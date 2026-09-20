@@ -1,0 +1,160 @@
+//! No shared slot, TLS, per-poll allocation, or mandatory scheduling budget.
+//! Unsafe internals are intended only for the audited call macro expansion.
+use crate::CallOn;
+use std::{
+    convert::Infallible,
+    future::Future,
+    marker::PhantomData,
+    ops::{Coroutine, CoroutineState},
+    pin::Pin,
+    ptr::NonNull,
+    task::{Context, Poll},
+};
+
+pub enum Suspend<Item> {
+    Pending,
+    Emit(Item),
+}
+
+/// Opaque, inert pointers. No safe API dereferences these pointers.
+/// The macro consumes this value before every suspension.
+#[doc(hidden)]
+pub struct ResumeEnv<Host: ?Sized> {
+    host: NonNull<Host>,
+    context: NonNull<Context<'static>>,
+}
+// SAFETY: carrying inert pointer bits does not access their pointees. Every
+// dereferencing method is unsafe and requires same-thread, current-resume use.
+// A safe generated call never exposes this value or sends it while active.
+unsafe impl<Host: ?Sized> Send for ResumeEnv<Host> {}
+// SAFETY: shared access cannot dereference anything through a safe method.
+// Unsafe methods require exclusive &mut access and the current resume scope.
+unsafe impl<Host: ?Sized> Sync for ResumeEnv<Host> {}
+impl<Host: ?Sized> ResumeEnv<Host> {
+    /// Consume the current environment before suspending; does not dereference it.
+    pub fn end(self) {}
+    unsafe fn enter<Output>(
+        &mut self,
+        body: impl for<'visit, 'waker> FnOnce(
+            Pin<&'visit mut Host>,
+            &'visit mut Context<'waker>,
+        ) -> Output,
+    ) -> Output {
+        // SAFETY: callers uphold the current-resume/exclusivity contract below.
+        // The HRTB prevents the fresh host/context borrows from escaping.
+        unsafe {
+            body(
+                Pin::new_unchecked(self.host.as_mut()),
+                &mut *self.context.as_ptr().cast::<Context<'_>>(),
+            )
+        }
+    }
+    /// # Safety
+    /// Must run synchronously on the thread of the resume that supplied self,
+    /// before that resume ends. No overlapping use of its host/context is
+    /// allowed. The environment must not be accessed from captured user code.
+    pub unsafe fn with<Output>(
+        &mut self,
+        body: impl for<'visit> FnOnce(Pin<&'visit mut Host>) -> Output,
+    ) -> Output {
+        // SAFETY: propagated from this method's caller; references remain local.
+        unsafe { self.enter(|host, _| body(host)) }
+    }
+    /// # Safety
+    /// Same current-resume and exclusive-access requirements as with.
+    pub unsafe fn poll_future<State: Future + ?Sized>(
+        &mut self,
+        state: Pin<&mut State>,
+    ) -> Poll<State::Output> {
+        // SAFETY: propagated from this method's caller.
+        unsafe { self.enter(|_, cx| state.poll(cx)) }
+    }
+    /// # Safety
+    /// Same current-resume and exclusive-access requirements as with.
+    pub unsafe fn poll_complete<Operation>(
+        &mut self,
+        operation: Pin<&mut Operation>,
+    ) -> Poll<Operation::Return>
+    where
+        Operation: CallOn<Host, Yield = Infallible> + ?Sized,
+    {
+        // SAFETY: propagated from this method's caller. No host borrow is stored.
+        unsafe {
+            self.enter(|host, cx| match operation.poll_call(host, cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(CoroutineState::Yielded(raw)) => match raw {},
+                Poll::Ready(CoroutineState::Complete(raw)) => Poll::Ready(raw),
+            })
+        }
+    }
+}
+/// Supply the callback's expected type without borrowing a resume environment.
+#[doc(hidden)]
+pub fn prepare<Host: ?Sized, Output, Body>(body: Body) -> Body
+where
+    Body: for<'visit> FnOnce(Pin<&'visit mut Host>) -> Output,
+{
+    body
+}
+/// Only the compiler-generated persistent state and completion flag are retained.
+#[pin_project::pin_project]
+pub struct StackCall<Host: ?Sized, State> {
+    #[pin]
+    state: State,
+    terminal: bool,
+    marker: PhantomData<fn(*mut Host) -> *mut Host>,
+}
+/// Build an inline pinned coroutine adapter, with no allocation.
+///
+/// # Safety
+/// The coroutine may dereference a ResumeEnv only during the same resume that
+/// supplied it and on that thread. It must consume the environment before each
+/// suspension, must not expose it or use it during Drop, and must not manufacture
+/// overlapping host/context references. User expressions must not inherit an
+/// unsafe context from generated helper calls. The call macros enforce these rules
+/// by hiding the environment and rejecting opaque suspension-generating syntax.
+#[doc(hidden)]
+pub unsafe fn build<Host: ?Sized, State, Item>(state: State) -> StackCall<Host, State>
+where
+    State: Coroutine<ResumeEnv<Host>, Yield = Suspend<Item>>,
+{
+    StackCall {
+        state,
+        terminal: false,
+        marker: PhantomData,
+    }
+}
+impl<Host: ?Sized, State, Item> CallOn<Host> for StackCall<Host, State>
+where
+    State: Coroutine<ResumeEnv<Host>, Yield = Suspend<Item>>,
+{
+    type Yield = Item;
+    type Return = State::Return;
+    fn poll_call(
+        self: Pin<&mut Self>,
+        host: Pin<&mut Host>,
+        cx: &mut Context<'_>,
+    ) -> Poll<CoroutineState<Item, State::Return>> {
+        let this = self.project();
+        assert!(!*this.terminal, "call polled after completion or panic");
+        *this.terminal = true;
+        let environment = ResumeEnv {
+            // SAFETY: only extract the pointer, preserving the host's pinning.
+            host: NonNull::from(unsafe { host.get_unchecked_mut() }),
+            context: NonNull::from(cx).cast(),
+        };
+        // build's contract ensures environment access ends before resume returns.
+        let state = this.state.resume(environment);
+        match state {
+            CoroutineState::Yielded(Suspend::Pending) => {
+                *this.terminal = false;
+                Poll::Pending
+            }
+            CoroutineState::Yielded(Suspend::Emit(item)) => {
+                *this.terminal = false;
+                Poll::Ready(CoroutineState::Yielded(item))
+            }
+            CoroutineState::Complete(value) => Poll::Ready(CoroutineState::Complete(value)),
+        }
+    }
+}

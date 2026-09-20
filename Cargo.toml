@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/sakuya-call", "crates/sakuya-call-macros", "examples/data-frame-codec"]
+resolver = "3"
