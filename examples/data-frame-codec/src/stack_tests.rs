@@ -1,8 +1,8 @@
 use crate::current_codec::ReadVarint;
 use crate::current_codec::{CodecError, ReadAtMost, ReadSource};
 use bytes::Bytes;
-use sakuya_call::CallOn;
-use sakuya_call::call_closure;
+use nitori_call::CallOn;
+use nitori_call::call_closure;
 use std::num::NonZeroUsize;
 use std::{
     cell::Cell,
@@ -477,7 +477,7 @@ fn callback_construction_can_suspend_without_retaining_the_old_environment() {
     assert_eq!(second, 21);
 }
 
-#[sakuya_call::call(yields = usize)]
+#[nitori_call::call(yields = usize)]
 async fn named_local<'data>(io: ::core::pin::Pin<&mut Target>, text: &'data mut String) -> usize {
     let first = io.write_local(text).await;
     let unrelated = || 7;
@@ -489,7 +489,7 @@ async fn named_local<'data>(io: ::core::pin::Pin<&mut Target>, text: &'data mut 
     io.value()
 }
 
-#[sakuya_call::call]
+#[nitori_call::call]
 async fn named_value<Target: ValueSource + ?Sized>(
     io: ::core::pin::Pin<&mut Target>,
     offset: usize,
@@ -505,7 +505,7 @@ impl ValueSource for Target {
     }
 }
 
-#[sakuya_call::call]
+#[nitori_call::call]
 async fn named_parent<Target: ValueSource + ?Sized>(io: ::core::pin::Pin<&mut Target>) -> usize {
     io.named_value(2).await
 }

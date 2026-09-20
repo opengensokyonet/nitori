@@ -1,7 +1,7 @@
 // expect: pass
 // facade-only
 #![feature(coroutines,coroutine_trait,type_alias_impl_trait)]
-use sakuya_call::{call,call_closure,CallOn};
+use nitori_call::{call,call_closure,CallOn};
 use std::{future::Future,pin::{Pin,pin},task::{Context,Poll,Waker}};
 #[call]
 async fn bump(io:Pin<&mut usize>)->usize {io.with(|mut host|{*host+=1;*host})}

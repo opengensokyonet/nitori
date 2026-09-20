@@ -42,7 +42,7 @@ impl Rewrite {
         let callback_name = private("__stack_callback");
         let host = &self.host;
         // Evaluate all author code OUTSIDE the generated unsafe block.
-        parse_quote!({let #callback_name=::sakuya_call::__private::prepare::<#host,_,_>(#callback);unsafe {#environment.with(#callback_name)}})
+        parse_quote!({let #callback_name=::nitori_call::__private::prepare::<#host,_,_>(#callback);unsafe {#environment.with(#callback_name)}})
     }
     fn awaited(&self, input: Tokens, child: bool) -> Expr {
         let environment = &self.environment;
@@ -59,7 +59,7 @@ impl Rewrite {
                     ::core::task::Poll::Ready(value)=>break value,
                     ::core::task::Poll::Pending=>{
                         #environment.end();
-                        #environment=yield ::sakuya_call::__private::Suspend::Pending;
+                        #environment=yield ::nitori_call::__private::Suspend::Pending;
                     }
                 }
             }
@@ -115,7 +115,7 @@ impl VisitMut for Rewrite {
             *expression = parse_quote!({
                 let #item=#value;
                 #environment.end();
-                #environment=yield ::sakuya_call::__private::Suspend::Emit(#item);
+                #environment=yield ::nitori_call::__private::Suspend::Emit(#item);
             });
             return;
         }
@@ -306,7 +306,7 @@ fn coroutine(mut closure: ExprClosure) -> Result<(Tokens, Box<Type>, bool)> {
     let capture = closure.capture;
     let output = closure.output;
     Ok((
-        quote!(::core::convert::identity(#[coroutine] static #capture |mut #environment: ::sakuya_call::__private::ResumeEnv<#host>| #output #body)),
+        quote!(::core::convert::identity(#[coroutine] static #capture |mut #environment: ::nitori_call::__private::ResumeEnv<#host>| #output #body)),
         host,
         rewrite.has_yield,
     ))
@@ -322,7 +322,7 @@ pub(super) fn expand(closure: ExprClosure) -> Result<Tokens> {
     };
     Ok(quote!({
         let #state = #coroutine;
-        unsafe {::sakuya_call::__private::build::<#host,_,#item>(#state)}
+        unsafe {::nitori_call::__private::build::<#host,_,#item>(#state)}
     }))
 }
 
@@ -436,8 +436,8 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
         #visibility mod #module {
             use super::*;
             pub type State #implementation #constraints = impl ::core::ops::Coroutine<
-                ::sakuya_call::__private::ResumeEnv<#host>,
-                Yield=::sakuya_call::__private::Suspend<#item_type>, Return=#output>;
+                ::nitori_call::__private::ResumeEnv<#host>,
+                Yield=::nitori_call::__private::Suspend<#item_type>, Return=#output>;
             #[define_opaque(State)]
             pub(super) fn make #implementation (#arguments) -> State #types #constraints {
                 #coroutine
@@ -446,24 +446,24 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
         #[::pin_project::pin_project]
         #visibility struct #call_name #implementation #constraints {
             #[pin]
-            inner: ::sakuya_call::__private::StackCall<#host, #module::State #types>,
+            inner: ::nitori_call::__private::StackCall<#host, #module::State #types>,
         }
         impl #implementation #call_name #types #constraints {
             #visibility fn new(#wrapper_arguments) -> Self {
                 let state = #module::make::<#(#parameters),*>(#(#names),*);
-                Self { inner: unsafe { ::sakuya_call::__private::build(state) } }
+                Self { inner: unsafe { ::nitori_call::__private::build(state) } }
             }
         }
         #(#attributes)*
         #visibility fn #name #implementation (#wrapper_arguments) -> #call_name #types #constraints {
             #call_name::<#(#parameters),*>::new(#(#names),*)
         }
-        impl #implementation ::sakuya_call::CallOn<#host> for #call_name #types #constraints {
+        impl #implementation ::nitori_call::CallOn<#host> for #call_name #types #constraints {
             type Yield = #item_type;
             type Return = #output;
             fn poll_call(self: ::core::pin::Pin<&mut Self>, host: ::core::pin::Pin<&mut #host>, cx: &mut ::core::task::Context<'_>)
                 -> ::core::task::Poll<::core::ops::CoroutineState<Self::Yield, Self::Return>> {
-                ::sakuya_call::CallOn::poll_call(self.project().inner, host, cx)
+                ::nitori_call::CallOn::poll_call(self.project().inner, host, cx)
             }
         }
         #helpers
@@ -577,7 +577,7 @@ fn helper_trait(function: &ItemFn, host: &Type, call_name: &Ident) -> Result<Tok
     methods
         .make_where_clause()
         .predicates
-        .push(parse_quote!(#call_type: ::sakuya_call::CallOn<Self>));
+        .push(parse_quote!(#call_type: ::nitori_call::CallOn<Self>));
     // Operation parameters belong on the trait so its signature can name the
     // complete operation and all capability requirements.
     let trait_generics = methods;
@@ -618,13 +618,13 @@ fn helper_trait(function: &ItemFn, host: &Type, call_name: &Ident) -> Result<Tok
     Ok(quote! {
         #visibility trait #trait_name #trait_parameters #trait_constraints {
             fn #name<#lifetime>(self: ::core::pin::Pin<&#lifetime mut Self>, #arguments)
-                -> ::sakuya_call::BoundCall<#lifetime, Self, #call_type> {
-                ::sakuya_call::BoundCall::new(self, <#call_type>::new(#(#names),*))
+                -> ::nitori_call::BoundCall<#lifetime, Self, #call_type> {
+                ::nitori_call::BoundCall::new(self, <#call_type>::new(#(#names),*))
             }
             fn #unpin_name<#lifetime>(&#lifetime mut self, #arguments)
-                -> ::sakuya_call::BoundCall<#lifetime, Self, #call_type>
+                -> ::nitori_call::BoundCall<#lifetime, Self, #call_type>
                 where Self: ::core::marker::Unpin {
-                ::sakuya_call::BoundCall::new(::core::pin::Pin::new(self), <#call_type>::new(#(#names),*))
+                ::nitori_call::BoundCall::new(::core::pin::Pin::new(self), <#call_type>::new(#(#names),*))
             }
         }
         impl #impl_parameters #trait_name #trait_arguments for #implementation_host #impl_constraints {}

@@ -1,7 +1,7 @@
 // expect: pass
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use sakuya_call::{call, call_closure};
-use sakuya_call::CallOn;
+use nitori_call::{call, call_closure};
+use nitori_call::CallOn;
 use std::{pin::{Pin,pin}, task::{Context,Waker}};
 trait Source { type Error; fn result(&self)->Result<usize,Self::Error>; }
 impl Source for usize {type Error=(); fn result(&self)->Result<usize,()>{Ok(*self)}}

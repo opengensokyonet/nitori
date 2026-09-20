@@ -7,9 +7,9 @@ extern crate std;
 #[prelude_import]
 use std::prelude::rust_2024::*;
 use bytes::Bytes;
-use sakuya_call::CallOn;
-use sakuya_call::{call, call_closure};
-use sakuya_data_frame_codec_example::{
+use nitori_call::CallOn;
+use nitori_call::{call, call_closure};
+use nitori_data_frame_codec_example::{
     current_codec::ReadVarint, current_codec::{CodecError, ReadSource},
 };
 use std::{
@@ -21,14 +21,14 @@ use std::{
 mod __call_read_pair {
     use super::*;
     pub type State<T: ReadSource + ?Sized> =
-        impl ::core::ops::Coroutine<::sakuya_call::__private::ResumeEnv<T>,
-        Yield = ::sakuya_call::__private::Suspend<u64>, Return =
+        impl ::core::ops::Coroutine<::nitori_call::__private::ResumeEnv<T>,
+        Yield = ::nitori_call::__private::Suspend<u64>, Return =
         Result<u64, CodecError>>;
     #[define_opaque(State)]
     pub(super) fn make<T: ReadSource + ?Sized>() -> State<T> {
         ::core::convert::identity(#[coroutine] static move
                 |mut __stack_environment:
-                    ::sakuya_call::__private::ResumeEnv<T>|
+                    ::nitori_call::__private::ResumeEnv<T>|
                 -> Result<u64, CodecError>
                 {
                     let first =
@@ -50,7 +50,7 @@ mod __call_read_pair {
                                         ::core::task::Poll::Pending => {
                                             __stack_environment.end();
                                             __stack_environment =
-                                                yield ::sakuya_call::__private::Suspend::Pending;
+                                                yield ::nitori_call::__private::Suspend::Pending;
                                         }
                                     }
                                 }
@@ -58,7 +58,7 @@ mod __call_read_pair {
                     let first =
                         {
                             let __stack_callback =
-                                ::sakuya_call::__private::prepare::<T, _, _>(|_| first);
+                                ::nitori_call::__private::prepare::<T, _, _>(|_| first);
                             unsafe { __stack_environment.with(__stack_callback) }
                         };
                     let offset =
@@ -81,7 +81,7 @@ mod __call_read_pair {
                                     ::core::task::Poll::Pending => {
                                         __stack_environment.end();
                                         __stack_environment =
-                                            yield ::sakuya_call::__private::Suspend::Pending;
+                                            yield ::nitori_call::__private::Suspend::Pending;
                                     }
                                 }
                             }
@@ -90,7 +90,7 @@ mod __call_read_pair {
                         let __stack_item = first;
                         __stack_environment.end();
                         __stack_environment =
-                            yield ::sakuya_call::__private::Suspend::Emit(__stack_item);
+                            yield ::nitori_call::__private::Suspend::Emit(__stack_item);
                     };
                     Ok(first +
                                 {
@@ -110,7 +110,7 @@ mod __call_read_pair {
                                                 ::core::task::Poll::Pending => {
                                                     __stack_environment.end();
                                                     __stack_environment =
-                                                        yield ::sakuya_call::__private::Suspend::Pending;
+                                                        yield ::nitori_call::__private::Suspend::Pending;
                                                 }
                                             }
                                         }
@@ -121,7 +121,7 @@ mod __call_read_pair {
 #[pin(__private())]
 struct ReadPair<T: ReadSource + ?Sized> {
     #[pin]
-    inner: ::sakuya_call::__private::StackCall<T, __call_read_pair::State<T>>,
+    inner: ::nitori_call::__private::StackCall<T, __call_read_pair::State<T>>,
 }
 #[allow(unused_qualifications, deprecated, explicit_outlives_requirements,
 single_use_lifetimes, unreachable_pub, unused_tuple_struct_fields, clippy ::
@@ -140,14 +140,14 @@ const _: () =
         mut_mut)]
         struct __ReadPairProjection<'pin, T: ReadSource + ?Sized> where
             ReadPair<T>: 'pin {
-            inner: ::pin_project::__private::Pin<&'pin mut (::sakuya_call::__private::StackCall<T,
+            inner: ::pin_project::__private::Pin<&'pin mut (::nitori_call::__private::StackCall<T,
             __call_read_pair::State<T>>)>,
         }
         #[allow(dead_code, clippy :: missing_docs_in_private_items, clippy ::
         ref_option_ref)]
         struct __ReadPairProjectionRef<'pin, T: ReadSource + ?Sized> where
             ReadPair<T>: 'pin {
-            inner: ::pin_project::__private::Pin<&'pin (::sakuya_call::__private::StackCall<T,
+            inner: ::pin_project::__private::Pin<&'pin (::nitori_call::__private::StackCall<T,
             __call_read_pair::State<T>>)>,
         }
         impl<T: ReadSource + ?Sized> ReadPair<T> {
@@ -185,7 +185,7 @@ const _: () =
         struct __ReadPair<'pin, T: ReadSource + ?Sized> {
             __pin_project_use_generics: _pin_project::__private::AlwaysUnpin<'pin,
             (_pin_project::__private::PhantomData<T>)>,
-            __field0: ::sakuya_call::__private::StackCall<T,
+            __field0: ::nitori_call::__private::StackCall<T,
             __call_read_pair::State<T>>,
         }
         impl<'pin, T: ReadSource + ?Sized> _pin_project::__private::Unpin for
@@ -213,11 +213,11 @@ const _: () =
 impl<T: ReadSource + ?Sized> ReadPair<T> {
     fn new() -> Self {
         let state = __call_read_pair::make::<T>();
-        Self { inner: unsafe { ::sakuya_call::__private::build(state) } }
+        Self { inner: unsafe { ::nitori_call::__private::build(state) } }
     }
 }
 fn read_pair<T: ReadSource + ?Sized>() -> ReadPair<T> { ReadPair::<T>::new() }
-impl<T: ReadSource + ?Sized> ::sakuya_call::CallOn<T> for ReadPair<T> {
+impl<T: ReadSource + ?Sized> ::nitori_call::CallOn<T> for ReadPair<T> {
     type Yield = u64;
     type Return = Result<u64, CodecError>;
     fn poll_call(self: ::core::pin::Pin<&mut Self>,
@@ -225,25 +225,25 @@ impl<T: ReadSource + ?Sized> ::sakuya_call::CallOn<T> for ReadPair<T> {
         ->
             ::core::task::Poll<::core::ops::CoroutineState<Self::Yield,
             Self::Return>> {
-        ::sakuya_call::CallOn::poll_call(self.project().inner, host, cx)
+        ::nitori_call::CallOn::poll_call(self.project().inner, host, cx)
     }
 }
 trait ReadPairExt where Self: ReadSource,
-    ReadPair<Self>: ::sakuya_call::CallOn<Self> {
+    ReadPair<Self>: ::nitori_call::CallOn<Self> {
     fn read_pair<'__call_host>(self: ::core::pin::Pin<&'__call_host mut Self>)
-        -> ::sakuya_call::BoundCall<'__call_host, Self, ReadPair<Self>> {
-        ::sakuya_call::BoundCall::new(self, <ReadPair<Self>>::new())
+        -> ::nitori_call::BoundCall<'__call_host, Self, ReadPair<Self>> {
+        ::nitori_call::BoundCall::new(self, <ReadPair<Self>>::new())
     }
     fn read_pair_unpin<'__call_host>(&'__call_host mut self)
-        -> ::sakuya_call::BoundCall<'__call_host, Self, ReadPair<Self>> where
+        -> ::nitori_call::BoundCall<'__call_host, Self, ReadPair<Self>> where
         Self: ::core::marker::Unpin {
-        ::sakuya_call::BoundCall::new(::core::pin::Pin::new(self),
+        ::nitori_call::BoundCall::new(::core::pin::Pin::new(self),
             <ReadPair<Self>>::new())
     }
 }
 impl<__CallHost: ?Sized> ReadPairExt for __CallHost where
     __CallHost: ReadSource,
-    ReadPair<__CallHost>: ::sakuya_call::CallOn<__CallHost> {}
+    ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {}
 struct Source(Bytes);
 impl ReadSource for Source {
     fn poll_read(mut self: Pin<&mut Self>, maximum: NonZeroUsize,
@@ -299,7 +299,7 @@ fn main() {
             let __stack_state =
                 ::core::convert::identity(#[coroutine] static
                         |mut __stack_environment:
-                            ::sakuya_call::__private::ResumeEnv<Source>|
+                            ::nitori_call::__private::ResumeEnv<Source>|
                         -> Result<u64, CodecError>
                         {
                             let first =
@@ -320,7 +320,7 @@ fn main() {
                                                 ::core::task::Poll::Pending => {
                                                     __stack_environment.end();
                                                     __stack_environment =
-                                                        yield ::sakuya_call::__private::Suspend::Pending;
+                                                        yield ::nitori_call::__private::Suspend::Pending;
                                                 }
                                             }
                                         }
@@ -328,7 +328,7 @@ fn main() {
                             let first =
                                 {
                                     let __stack_callback =
-                                        ::sakuya_call::__private::prepare::<Source, _,
+                                        ::nitori_call::__private::prepare::<Source, _,
                                                 _>(|_| first);
                                     unsafe { __stack_environment.with(__stack_callback) }
                                 };
@@ -352,7 +352,7 @@ fn main() {
                                             ::core::task::Poll::Pending => {
                                                 __stack_environment.end();
                                                 __stack_environment =
-                                                    yield ::sakuya_call::__private::Suspend::Pending;
+                                                    yield ::nitori_call::__private::Suspend::Pending;
                                             }
                                         }
                                     }
@@ -361,7 +361,7 @@ fn main() {
                                 let __stack_item = first;
                                 __stack_environment.end();
                                 __stack_environment =
-                                    yield ::sakuya_call::__private::Suspend::Emit(__stack_item);
+                                    yield ::nitori_call::__private::Suspend::Emit(__stack_item);
                             };
                             Ok(first +
                                         {
@@ -381,14 +381,14 @@ fn main() {
                                                         ::core::task::Poll::Pending => {
                                                             __stack_environment.end();
                                                             __stack_environment =
-                                                                yield ::sakuya_call::__private::Suspend::Pending;
+                                                                yield ::nitori_call::__private::Suspend::Pending;
                                                         }
                                                     }
                                                 }
                                             }? + offset)
                         });
             unsafe {
-                ::sakuya_call::__private::build::<Source, _, _>(__stack_state)
+                ::nitori_call::__private::build::<Source, _, _>(__stack_state)
             }
         });
 }

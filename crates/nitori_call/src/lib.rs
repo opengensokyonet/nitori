@@ -89,7 +89,7 @@ impl<Host: ?Sized, Operation: CallOn<Host>> Future for BoundCall<'_, Host, Opera
 }
 
 /// Define named and anonymous operations through the public facade.
-pub use sakuya_call_macros::{call, call_closure};
+pub use nitori_call_macros::{call, call_closure};
 
 /// Code-generation support, not an author-facing execution API.
 #[doc(hidden)]

@@ -1,7 +1,7 @@
 //! Current named codec operations using the temporary resume environment.
 use bytes::{Buf, Bytes};
-use sakuya_call::CallOn;
-use sakuya_call::call;
+use nitori_call::CallOn;
+use nitori_call::call;
 use snafu::Snafu;
 use std::num::NonZeroUsize;
 use std::{
@@ -179,7 +179,7 @@ pub async fn write_all<Target: WriteSink<Input> + ?Sized, Input: Buf>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sakuya_call::CallOn;
+    use nitori_call::CallOn;
     use std::{
         ops::CoroutineState,
         pin::{Pin, pin},

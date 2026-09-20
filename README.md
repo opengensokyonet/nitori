@@ -1,13 +1,13 @@
-# sakuya
+# nitori
 
-Early development of sakuya, a QUIC implementation for Open Gensokyo Network, administratively supported by Starspun Works.
+Foundational Rust tools for Open Gensokyo Network, administratively supported by Starspun Works.
 
-This repository currently contains the experimental `sakuya-call` mechanism and a DATA frame codec example. It is not yet a complete QUIC implementation or a stable production API.
+This repository currently contains the experimental `nitori_call` mechanism and a DATA frame codec example. Future tools such as `nitori_io` will be added as their contracts are developed. The current APIs are experimental and are not stable production APIs.
 
 ## Layout
 
-- `crates/sakuya-call`: `CallOn`, `BoundCall`, and the public macro re-exports.
-- `crates/sakuya-call-macros`: procedural macros used by `sakuya-call`.
+- `crates/nitori_call`: `CallOn`, `BoundCall`, and the public macro re-exports.
+- `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
 
 ## Development

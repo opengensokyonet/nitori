@@ -1,6 +1,6 @@
 // expect: Unpin
 #![feature(coroutines,coroutine_trait,type_alias_impl_trait)]
-use sakuya_call::call;
+use nitori_call::call;
 use std::{marker::PhantomPinned,pin::Pin};
 #[call]
 async fn value(io:Pin<&mut PhantomPinned>)->usize {1}

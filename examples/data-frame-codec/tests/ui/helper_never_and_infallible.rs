@@ -1,6 +1,6 @@
 // expect: pass
 #![feature(coroutine_trait,never_type)]
-use sakuya_call::{BoundCall,CallOn,Stream};
+use nitori_call::{BoundCall,CallOn,Stream};
 use std::{convert::Infallible,future::Future,marker::PhantomData,ops::CoroutineState,pin::Pin,task::{Context,Poll}};
 struct Complete<Yield>(PhantomData<fn()->Yield>);
 impl<Yield> CallOn<usize> for Complete<Yield>{

@@ -1,6 +1,6 @@
 // expect: E0503
 #![feature(coroutines,coroutine_trait,type_alias_impl_trait)]
-use sakuya_call::call;
+use nitori_call::call;
 use std::pin::Pin;
 #[call]
 async fn value(io:Pin<&mut usize>)->usize {io.with(|target|*target)}

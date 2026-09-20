@@ -1,7 +1,7 @@
 // expect: E0133
 #![feature(coroutines,coroutine_trait)]
-use sakuya_call::call_closure;
-use sakuya_call::CallOn;
+use nitori_call::call_closure;
+use nitori_call::CallOn;
 use std::{convert::Infallible,ops::CoroutineState,pin::Pin,task::{Context,Poll}};
 struct Child;
 impl Child{unsafe fn new()->Self{Self}}

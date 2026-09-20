@@ -1,10 +1,9 @@
 [package]
-name = "sakuya-call-macros"
+name = "nitori_call_macros"
 version = "0.0.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/opengensokyonet/sakuya"
 [lib]
 proc-macro = true
 [dependencies]

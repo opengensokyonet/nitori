@@ -1,12 +1,11 @@
 [package]
-name = "sakuya-call"
+name = "nitori_call"
 version = "0.0.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0 OR MIT"
-repository = "https://github.com/opengensokyonet/sakuya"
 
 [dependencies]
 pin-project = "1.1.13"
 futures-core = "0.3.32"
-sakuya-call-macros = { path = "../sakuya-call-macros" }
+nitori_call_macros = { path = "../nitori_call_macros" }

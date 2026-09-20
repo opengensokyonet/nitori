@@ -59,16 +59,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya-call"
+name = "nitori_call"
 version = "0.0.0"
 dependencies = [
  "futures-core",
  "pin-project",
- "sakuya-call-macros",
+ "nitori_call_macros",
 ]
 
 [[package]]
-name = "sakuya-call-macros"
+name = "nitori_call_macros"
 version = "0.0.0"
 dependencies = [
  "proc-macro2",
@@ -77,12 +77,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakuya-data-frame-codec-example"
+name = "nitori-data-frame-codec-example"
 version = "0.0.0"
 dependencies = [
  "bytes",
  "pin-project",
- "sakuya-call",
+ "nitori_call",
  "snafu",
 ]
 

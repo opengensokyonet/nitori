@@ -10,7 +10,7 @@ workspace = root.parents[1]
 scratch = root / "target" / "boundary-consumer"
 (scratch / "src").mkdir(parents=True, exist_ok=True)
 manifest = '''[package]
-name = "sakuya-boundary-consumer"
+name = "nitori-boundary-consumer"
 version = "0.0.0"
 edition = "2024"
 [workspace]
@@ -18,8 +18,8 @@ edition = "2024"
 pin-project = "1.1.13"
 '''
 dependencies = [
-    ("sakuya-call", workspace / "crates" / "sakuya-call"),
-    ("sakuya-data-frame-codec-example", root),
+    ("nitori_call", workspace / "crates" / "nitori_call"),
+    ("nitori-data-frame-codec-example", root),
 ]
 for name, path in dependencies:
     manifest += f'{name} = {{ path = {json.dumps(str(path))} }}\n'
@@ -32,7 +32,7 @@ for source in sorted((root / "tests" / "ui").glob("*.rs")):
     text = source.read_text()
     expected = text.splitlines()[0].removeprefix("// expect: ")
     if "// facade-only" in text.splitlines():
-        selected_manifest = manifest.split('sakuya-data-frame-codec-example =', 1)[0]
+        selected_manifest = manifest.split('nitori-data-frame-codec-example =', 1)[0]
     else:
         selected_manifest = manifest
     (scratch / "Cargo.toml").write_text(selected_manifest)

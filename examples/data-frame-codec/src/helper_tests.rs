@@ -1,7 +1,7 @@
 use crate::current_codec::{CodecError, ReadDataFrameExt, ReadSource, ReadVarintExt};
 use bytes::Bytes;
-use sakuya_call::call;
-use sakuya_call::{CallOn, Stream};
+use nitori_call::call;
+use nitori_call::{CallOn, Stream};
 use std::{
     cell::{Cell, RefCell},
     future::Future,

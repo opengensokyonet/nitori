@@ -1,9 +1,9 @@
 //! Source counterpart of expanded/expansion_demo.rs; both operations do the same work.
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 use bytes::Bytes;
-use sakuya_call::CallOn;
-use sakuya_call::{call, call_closure};
-use sakuya_data_frame_codec_example::{
+use nitori_call::CallOn;
+use nitori_call::{call, call_closure};
+use nitori_data_frame_codec_example::{
     current_codec::ReadVarint,
     current_codec::{CodecError, ReadSource},
 };

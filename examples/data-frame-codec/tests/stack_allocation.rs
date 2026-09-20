@@ -1,7 +1,7 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 #![deny(unsafe_op_in_unsafe_fn)]
-use sakuya_call::CallOn;
-use sakuya_call::call_closure;
+use nitori_call::CallOn;
+use nitori_call::call_closure;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -64,7 +64,7 @@ impl CallOn<u8> for ReadByte {
         Poll::Ready(CoroutineState::Complete(*target))
     }
 }
-#[sakuya_call::call]
+#[nitori_call::call]
 async fn named_byte(io: ::core::pin::Pin<&mut u8>) -> u8 {
     io.read_byte().await
 }
