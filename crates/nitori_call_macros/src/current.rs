@@ -413,6 +413,45 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
     let attributes = &function.attrs;
     let generics = &function.sig.generics;
     let (implementation, types, constraints) = generics.split_for_impl();
+    // The public alias carries names only; the nominal Parameters type and
+    // implementations enforce the original bounds.
+    let mut alias_generics = generics.clone();
+    alias_generics.where_clause = None;
+    for parameter in &mut alias_generics.params {
+        match parameter {
+            GenericParam::Type(parameter) => parameter.bounds.clear(),
+            GenericParam::Lifetime(parameter) => parameter.bounds.clear(),
+            GenericParam::Const(_) => {}
+        }
+    }
+    // Operation lives one module deeper than the user's declaration.
+    let mut operation_visibility = visibility.clone();
+    match &mut operation_visibility {
+        syn::Visibility::Inherited => operation_visibility = parse_quote!(pub(super)),
+        syn::Visibility::Restricted(restriction) if !restriction.path.is_ident("crate") => {
+            let path = &restriction.path;
+            restriction.path = if path
+                .segments
+                .first()
+                .is_some_and(|segment| segment.ident == "self")
+            {
+                let mut path = (**path).clone();
+                path.segments.first_mut().unwrap().ident = Ident::new("super", name.span());
+                Box::new(path)
+            } else if path
+                .segments
+                .first()
+                .is_some_and(|segment| segment.ident == "super")
+            {
+                Box::new(parse_quote!(super::#path))
+            } else {
+                path.clone()
+            };
+            restriction.in_token = Some(Default::default());
+        }
+        _ => {}
+    }
+
     // Lifetimes are inferred at make/new calls; types and const parameters must
     // be explicit because the virtual host does not occur in real arguments.
     let parameters: Vec<Tokens> = generics
@@ -442,16 +481,28 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
             pub(super) fn make #implementation (#arguments) -> State #types #constraints {
                 #coroutine
             }
+            // Keep user generics outside pin-project-lite's restricted parser.
+            // Parameters makes every lifetime/type/const parameter nominally
+            // present, including ones used only by the opaque coroutine state.
+            pub struct __Parameters #implementation #constraints {
+                marker: ::core::marker::PhantomData<fn() -> State #types>,
+            }
+            ::nitori_call::__private::pin_project! {
+                #operation_visibility struct __Operation<Parameters, Inner> {
+                    #[pin]
+                    pub(super) inner: Inner,
+                    pub(super) marker: ::core::marker::PhantomData<fn() -> Parameters>,
+                }
+            }
         }
-        #[::pin_project::pin_project]
-        #visibility struct #call_name #implementation #constraints {
-            #[pin]
-            inner: ::nitori_call::__private::StackCall<#host, #module::State #types>,
-        }
+        #visibility type #call_name #alias_generics = #module::__Operation<
+            #module::__Parameters #types,
+            ::nitori_call::__private::StackCall<#host, #module::State #types>,
+        >;
         impl #implementation #call_name #types #constraints {
             #visibility fn new(#wrapper_arguments) -> Self {
                 let state = #module::make::<#(#parameters),*>(#(#names),*);
-                Self { inner: unsafe { ::nitori_call::__private::build(state) } }
+                Self { inner: unsafe { ::nitori_call::__private::build(state) }, marker: ::core::marker::PhantomData }
             }
         }
         #(#attributes)*

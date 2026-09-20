@@ -29,7 +29,7 @@ cargo +nightly run --locked --example expansion_demo
 python3 examples/data-frame-codec/scripts/expand_example.py
 ```
 
-The boundary probes run offline after Cargo has fetched workspace dependencies. Consumers of `#[call]` currently need a direct `pin-project` dependency. The codec demonstrates QUIC VarInt and single-frame HTTP/3 DATA processing; it does not implement complete HTTP/3 semantics.
+The boundary probes run offline after Cargo has fetched workspace dependencies. Consumers of `#[call]` do not need a direct pin-projection dependency. The codec demonstrates QUIC VarInt and single-frame HTTP/3 DATA processing; it does not implement complete HTTP/3 semantics.
 
 ## License
 

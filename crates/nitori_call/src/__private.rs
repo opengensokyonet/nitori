@@ -1,5 +1,9 @@
 //! No shared slot, TLS, per-poll allocation, or mandatory scheduling budget.
 //! Unsafe internals are intended only for the audited call macro expansion.
+/// Projection support for generated calls; consumers need no direct dependency.
+#[doc(hidden)]
+pub use pin_project_lite::pin_project;
+
 use crate::CallOn;
 use std::{
     convert::Infallible,
@@ -96,13 +100,14 @@ where
 {
     body
 }
-/// Only the compiler-generated persistent state and completion flag are retained.
-#[pin_project::pin_project]
-pub struct StackCall<Host: ?Sized, State> {
-    #[pin]
-    state: State,
-    terminal: bool,
-    marker: PhantomData<fn(*mut Host) -> *mut Host>,
+pin_project_lite::pin_project! {
+    /// Only the compiler-generated persistent state and completion flag are retained.
+    pub struct StackCall<Host: ?Sized, State> {
+        #[pin]
+        state: State,
+        terminal: bool,
+        marker: PhantomData<fn(*mut Host) -> *mut Host>,
+    }
 }
 /// Build an inline pinned coroutine adapter, with no allocation.
 ///

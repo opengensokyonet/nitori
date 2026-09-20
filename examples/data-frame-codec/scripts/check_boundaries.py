@@ -15,7 +15,6 @@ version = "0.0.0"
 edition = "2024"
 [workspace]
 [dependencies]
-pin-project = "1.1.13"
 '''
 dependencies = [
     ("nitori_call", workspace / "crates" / "nitori_call"),

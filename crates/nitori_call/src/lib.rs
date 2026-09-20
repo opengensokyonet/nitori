@@ -22,15 +22,16 @@ pub trait CallOn<Host: ?Sized> {
     ) -> Poll<CoroutineState<Self::Yield, Self::Return>>;
 }
 
-/// An operation bound to a real host borrow. This adapter retains that borrow
-/// across Pending; the underlying CallOn operation itself does not require this.
-#[must_use = "bound calls do nothing until polled"]
-#[pin_project::pin_project]
-pub struct BoundCall<'host, Host: ?Sized, Operation> {
-    host: Pin<&'host mut Host>,
-    #[pin]
-    operation: Operation,
-    terminal: bool,
+pin_project_lite::pin_project! {
+    /// An operation bound to a real host borrow. This adapter retains that borrow
+    /// across Pending; the underlying CallOn operation itself does not require this.
+    #[must_use = "bound calls do nothing until polled"]
+    pub struct BoundCall<'host, Host: ?Sized, Operation> {
+        host: Pin<&'host mut Host>,
+        #[pin]
+        operation: Operation,
+        terminal: bool,
+    }
 }
 impl<'host, Host: ?Sized, Operation: CallOn<Host>> BoundCall<'host, Host, Operation> {
     pub fn new(host: Pin<&'host mut Host>, operation: Operation) -> Self {

@@ -9,4 +9,3 @@ license = "Apache-2.0 OR MIT"
 bytes = "1.12.1"
 snafu = "0.9.2"
 nitori_call = { path = "../../crates/nitori_call" }
-pin-project = "1.1.13"

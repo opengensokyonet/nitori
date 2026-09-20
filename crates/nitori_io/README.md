@@ -31,8 +31,8 @@ async fn header<H: ReadHost + ?Sized>(io: Pin<&mut H>) -> Result<[u8; 3], ReadEr
 # fn main() {}
 ```
 
-Consumers of `#[call]` also need a direct `pin-project` dependency and the feature
-gates above. Bind an operation explicitly with
+Consumers of `#[call]` need the feature gates above, but no direct
+pin-projection dependency. Bind an operation explicitly with
 `BoundCall::new(pinned_host, ReadArray::<3>::new())` to execute outside a virtual
 call. Local buffers and their named cursor views may remain borrowed across
 Pending. Bind temporary buffer views to locals before passing their borrows to
