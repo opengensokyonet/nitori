@@ -55,6 +55,77 @@ Numeric operations support all integer primitives (including `usize`/`isize`)
 and `f32`/`f64`, preserving floating-point bits. They read a `size_of::<T>()` array
 before synchronous decoding. Pointer-sized encodings depend on the target width.
 
+## Built-in hosts and bridges
+
+| Host | Read | Write | Native ReadChunk |
+| --- | --- | --- | --- |
+| `&[u8]` | yes | — | borrowed subslice |
+| `&mut [u8]` | — | bounded | — |
+| `Bytes` | yes | — | zero-copy split |
+| `BytesMut` | yes | append | zero-copy split |
+| `Vec<u8>` | — | append | — |
+| `VecDeque<u8>` | consume front | append | — |
+| `std::io::Cursor<T>` | when `T: AsRef<[u8]> + Unpin` | when the cursor implements `std::io::Write` and `T: Unpin` | — |
+
+Memory operations use `Infallible`, except cursor writes which preserve
+`std::io::Error`. A full slice writer returns zero. A cursor write offers one
+contiguous input segment; `WriteAll` handles the remaining segments. Use a
+cursor for reading a Vec without removing its prefix. Borrowed slice chunks
+retain the slice's original lifetime and need not be `'static`.
+
+`&mut T` and `Box<T>` forward supported capabilities when `T: Unpin`.
+`Pin<P>` forwards when `P: DerefMut + Unpin`, without requiring its target to
+be `Unpin`; this includes `Pin<&mut T>` and `Pin<Box<T>>`.
+
+The `bridge` module adapts external IO **into** nitori capabilities:
+
+- `bridge::Std<T>` accepts `std::io::Read` / `Write`, with no optional feature.
+  It executes synchronously and may block. `WouldBlock` and `Interrupted` remain
+  their original errors; no readiness registration or retry loop is invented.
+- `bridge::Tokio<T>` accepts `tokio::io::AsyncRead` / `AsyncWrite` with feature
+  `tokio`. It does not enable a Tokio runtime.
+- `bridge::Futures<T>` accepts the traits re-exported by `futures::io` with
+  feature `futures`, depending only on `futures-io`.
+
+Default features are empty. Both optional features may be enabled together.
+The crate still requires std when default features are disabled. Async bridges
+support pinned, borrowed, and non-Send hosts. Each wrapper provides `new`,
+`From<T>`, `get_ref`, `get_mut`, and `into_inner`; async wrappers additionally
+provide `get_pin_mut`, preserving the pinning of a `!Unpin` async host.
+
+Bridge reads use an initialized stack buffer of at most 8 KiB, then copy only
+successful bytes to the caller's arbitrary `BufMut`. This preserves the buffer
+on Pending and errors without unsafe code. They retain no unread bytes or
+per-poll buffer pointers. Writes pass one contiguous input segment directly to
+the host. Empty requests still reach the host. Flush, close, and seek remain
+explicit operations on the underlying object; dropping a bridge adds no flush.
+Reverse conversion is not provided.
+
+`adapters::Chunked<T>` adds copying `ReadChunk` to any `Read`, including a bridge,
+with an explicit nonzero chunk capacity. It caps each read by both that capacity
+and the requested maximum, retains empty allocated storage across Pending, and
+returns owned `Bytes` on success. A larger subsequent request replaces scratch
+storage if necessary instead of growing it geometrically beyond the limit. Ordinary Read and Write calls pass through to
+the same host. It does not prefetch, and cancellation cannot lose an unread tail.
+Allocation uses `BytesMut`'s infallible allocation policy; the allocator may round
+capacity up. Native chunk hosts do not need this adapter.
+
+```rust
+use nitori_io::{adapters::Chunked, bridge::Std, ReadChunk};
+use std::{io::Cursor, num::NonZeroUsize, pin::Pin, task::{Context, Poll, Waker}};
+
+let mut io = Chunked::new(
+    Std::new(Cursor::new(b"hello")),
+    NonZeroUsize::new(1024).unwrap(),
+);
+let mut cx = Context::from_waker(Waker::noop());
+let Poll::Ready(Ok(Some(chunk))) = Pin::new(&mut io)
+    .poll_read_chunk(&mut cx, NonZeroUsize::new(3).unwrap())
+else { panic!("synchronous memory IO completes immediately") };
+assert_eq!(chunk, &b"hel"[..]);
+assert_eq!(io.into_inner().into_inner().position(), 3);
+```
+
 ## Progress, errors, and cancellation
 
 Basic polls report a completed prefix before a later error. `Pending` and `Err`
@@ -118,3 +189,8 @@ From the repository root, run the checks listed in the root README. The focused
 suite is `cargo +nightly test --locked -p nitori_io`; it includes real BoundCall
 execution, virtual macro calls, Pending/wakeup behavior, typed errors, buffer
 ownership, cancellation, conversion helpers, and numeric decoding.
+
+For the optional bridges, also run `cargo +nightly test --locked -p nitori_io --features tokio`, `cargo +nightly test --locked -p nitori_io --features futures`,
+and `cargo +nightly test --locked -p nitori_io --all-features`. The bridge tests
+exercise pinned non-Send hosts, wakeups, error identity, partial progress,
+segmented buffers, and cancellation followed by a different chunk maximum.

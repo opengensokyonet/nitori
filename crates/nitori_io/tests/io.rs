@@ -651,11 +651,12 @@ fn read_to_end_preserves_partial_host_failure() {
     assert_eq!(out, b"prefixab");
 }
 
-#[pin_project::pin_project]
-struct PinnedHost {
-    inner: Source,
-    #[pin]
-    marker: std::marker::PhantomPinned,
+pin_project_lite::pin_project! {
+    struct PinnedHost {
+        inner: Source,
+        #[pin]
+        marker: std::marker::PhantomPinned,
+    }
 }
 impl ReadHost for PinnedHost {
     type Error = io::Error;
