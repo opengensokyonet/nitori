@@ -17,11 +17,11 @@ Import operation types from `nitori_io::calls` when using virtual calls:
 #![feature(coroutines, coroutine_trait, stmt_expr_attributes, type_alias_impl_trait)]
 use nitori_call::call;
 use nitori_io::{Read as ReadHost, calls::{ReadArray, ReadExact}};
-use nitori_io::error::ReadError;
+use nitori_io::calls::ReadExactError;
 use std::pin::Pin;
 
 #[call]
-async fn header<H: ReadHost + ?Sized>(io: Pin<&mut H>) -> Result<[u8; 3], ReadError<H::Error>> {
+async fn header<H: ReadHost + ?Sized>(io: Pin<&mut H>) -> Result<[u8; 3], ReadExactError<H::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
@@ -43,13 +43,14 @@ virtual calls.
 | `Read::new(&mut destination)` | `Result<usize, H::Error>` |
 | `ReadChunk::new(nonzero_maximum)` | `Result<Option<H::Chunk>, H::Error>` |
 | `Write::new(input)` | `WriteReturn<Input, H::Error>` |
-| `ReadExact::new(&mut destination, length)` | `Result<(), ReadError<H::Error>>` |
-| `ReadToEnd::new(&mut destination)` | `Result<usize, ReadError<H::Error>>` |
-| `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; completes with actual byte count |
-| `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; completes with `()` |
-| `WriteAll::new(input)` | `WriteReturn<Input, WriteError<H::Error>>` |
-| `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadError<H::Error>>` |
-| `ReadLe::<T>::new()`, `ReadBe::<T>::new()` | `Result<T, ReadError<H::Error>>` |
+| `ReadExact::new(&mut destination, length)` | `Result<(), ReadExactError<H::Error>>` |
+| `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<H::Error>>` |
+| `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; `Result<usize, ReadChunksError<H::Error>>` |
+| `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; `Result<(), ReadChunksExactError<H::Error>>` |
+| `WriteAll::new(input)` | `WriteReturn<Input, WriteAllError<H::Error>>` |
+| `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<H::Error>>` |
+| `ReadLe::<T>::new()` | `Result<T, ReadLeError<H::Error>>` |
+| `ReadBe::<T>::new()` | `Result<T, ReadBeError<H::Error>>` |
 
 Numeric operations support all integer primitives (including `usize`/`isize`)
 and `f32`/`f64`, preserving floating-point bits. They read a `size_of::<T>()` array
@@ -139,11 +140,20 @@ reports only newly appended bytes. If its destination fills before EOF is
 confirmed, it reports capacity failure, even for an exactly fitting source; it
 does not consume a probe byte.
 
-Derived errors expose `failure()`, `completed()`, `host_error()`, and
-`into_parts()`. SNAFU-derived `ReadFailure`/`WriteFailure` describe capacity,
-premature EOF, host failure, and zero write progress. Wrappers retain arbitrary
-host error types, including borrowed errors; they implement standard `Error`
-with the original source chain when the host error implements `Error + 'static`.
+Each composite operation has its own error type in `calls`, defined alongside
+the operation and containing only failures that operation can produce.
+`Incomplete`, `InsufficientCapacity`, and `WriteZero` are reusable error primitives
+in `error`. Match operation error variants directly to recover their structured
+fields; `completed()` reports prior progress and
+`host_error()` borrows the original host failure. `ReadChunksError` always
+contains a host error, so its accessor returns `&E`; enum accessors return
+`Option<&E>`.
+
+All operation errors derive SNAFU. Construction and progress access impose no
+diagnostic bounds on host errors, including borrowed payloads without `Debug`
+or `Display`. Standard `Error` and the original source chain are available
+when the host error implements `Error + 'static`. Primitive variants delegate
+diagnostics transparently; host variants retain the original source directly.
 Array/numeric failures report progress but do not return the partial array.
 
 `WriteReturn` contains `input` and `result`. Owned input or a borrowed cursor is

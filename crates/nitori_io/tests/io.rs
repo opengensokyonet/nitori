@@ -9,7 +9,7 @@ use nitori_call::{BoundCall, call};
 use nitori_io::{
     Read as ReadHost, ReadChunk as ChunkHost, Write as WriteHost,
     calls::*,
-    error::{ReadFailure, WriteFailure},
+    error::{Incomplete, InsufficientCapacity, WriteZero},
     helpers::*,
 };
 use std::{
@@ -194,11 +194,13 @@ fn exact_prechecks_capacity_and_limits_source() {
     ))
     .unwrap_err();
     assert!(matches!(
-        error.failure(),
-        ReadFailure::Capacity {
-            required: 3,
-            available: 2,
-            completed: 0
+        error,
+        ReadExactError::InsufficientCapacity {
+            source: InsufficientCapacity {
+                required: 3,
+                available: 2,
+                completed: 0
+            }
         }
     ));
     assert_eq!(source.polls.get(), 0);
@@ -224,10 +226,12 @@ fn exact_errors_preserve_prefix_and_source_chain() {
     ))
     .unwrap_err();
     assert!(matches!(
-        error.failure(),
-        ReadFailure::UnexpectedEof {
-            expected: 4,
-            completed: 2
+        error,
+        ReadExactError::Incomplete {
+            source: Incomplete {
+                expected: 4,
+                completed: 2
+            }
         }
     ));
     assert_eq!(out, b"ab");
@@ -263,8 +267,10 @@ fn read_to_end_appends_and_requires_confirmed_eof() {
     ))
     .unwrap_err();
     assert!(matches!(
-        error.failure(),
-        ReadFailure::Capacity { completed: 4, .. }
+        error,
+        ReadToEndError::InsufficientCapacity {
+            source: InsufficientCapacity { completed: 4, .. }
+        }
     ));
     assert_eq!(source.consumed, 4);
     assert_eq!(source.polls.get(), 4); // no EOF probe after filling the target
@@ -349,8 +355,10 @@ fn write_ownership_borrowing_and_partial_errors() {
         WriteAll::new(Bytes::from_static(b"x")),
     ));
     assert!(matches!(
-        result.result.unwrap_err().failure(),
-        WriteFailure::WriteZero { completed: 0 }
+        result.result.unwrap_err(),
+        WriteAllError::WriteZero {
+            source: WriteZero { completed: 0 }
+        }
     ));
     assert_eq!(result.input, b"x"[..]);
 }
@@ -415,7 +423,7 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
 #[call]
 async fn local_codec<H: ReadHost + ?Sized>(
     io: Pin<&mut H>,
-) -> Result<[u8; 3], nitori_io::error::ReadError<H::Error>> {
+) -> Result<[u8; 3], nitori_io::calls::ReadExactError<H::Error>> {
     let [first] = io.read_array::<1>().await?;
     let mut rest = [0; 2];
     let mut destination = rest.as_mut_slice();
@@ -425,7 +433,7 @@ async fn local_codec<H: ReadHost + ?Sized>(
 #[call]
 async fn number_codec<H: ReadHost + ?Sized>(
     io: Pin<&mut H>,
-) -> Result<u32, nitori_io::error::ReadError<H::Error>> {
+) -> Result<u32, nitori_io::calls::ReadLeError<H::Error>> {
     io.read_le::<u32>().await
 }
 #[test]
@@ -702,7 +710,7 @@ fn host_errors_need_neither_error_trait_nor_static_lifetime() {
 #[call]
 async fn borrowed_write<H: WriteHost + ?Sized>(
     io: Pin<&mut H>,
-) -> Result<usize, nitori_io::error::WriteError<H::Error>> {
+) -> Result<usize, nitori_io::calls::WriteAllError<H::Error>> {
     let mut input = Bytes::from_static(b"abc");
     let returned = io.write_all(&mut input).await;
     returned.result
@@ -719,4 +727,171 @@ fn virtual_write_borrows_local_input() {
         3
     );
     assert_eq!(host.bytes, b"abc");
+}
+
+// No diagnostic traits: borrowing a host failure must not restrict IO calls.
+struct RawFailure<'a>(&'a str);
+struct RawHost<'a> {
+    failure: Option<&'a str>,
+}
+impl<'a> ReadHost for RawHost<'a> {
+    type Error = RawFailure<'a>;
+    fn poll_read<B: BufMut + ?Sized>(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut B,
+    ) -> Poll<Result<usize, Self::Error>> {
+        Poll::Ready(self.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
+    }
+}
+impl ChunkHost for RawHost<'_> {
+    type Chunk = Bytes;
+    fn poll_read_chunk(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: NonZeroUsize,
+    ) -> Poll<Result<Option<Bytes>, Self::Error>> {
+        Poll::Ready(self.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
+    }
+}
+impl<'a> WriteHost for RawHost<'a> {
+    type Error = RawFailure<'a>;
+    fn poll_write<B: Buf + ?Sized>(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut B,
+    ) -> Poll<Result<usize, Self::Error>> {
+        Poll::Ready(self.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
+    }
+}
+
+#[test]
+fn operation_errors_accept_borrowed_payloads_without_diagnostic_traits() {
+    let message = String::from("raw failure");
+    let mut host = RawHost {
+        failure: Some(&message),
+    };
+    macro_rules! check_read {
+        ($call:expr) => {
+            let error = run(BoundCall::new(Pin::new(&mut host), $call))
+                .err()
+                .unwrap();
+            assert_eq!(error.host_error().unwrap().0, message);
+            assert_eq!(error.completed(), 0);
+            assert_eq!(error.to_string(), "read failed after 0 bytes");
+            assert!(snafu::ErrorCompat::backtrace(&error).is_none());
+        };
+    }
+    check_read!(ReadArray::<2>::new());
+    check_read!(ReadLe::<u16>::new());
+    check_read!(ReadBe::<u16>::new());
+    let mut buffer = Vec::new();
+    check_read!(ReadExact::new(&mut buffer, 2));
+    check_read!(ReadToEnd::new(&mut buffer));
+
+    let mut chunks = pin!(BoundCall::new(
+        Pin::new(&mut host),
+        ReadChunks::new(2, nz(2))
+    ));
+    let Some(CoroutineState::Complete(Err(error))) = run(chunks.as_mut().next()) else {
+        panic!("expected chunk host failure");
+    };
+    assert_eq!(error.host_error().0, message);
+    assert_eq!(error.to_string(), "read failed after 0 bytes");
+
+    let mut exact = pin!(BoundCall::new(
+        Pin::new(&mut host),
+        ReadChunksExact::new(2, nz(2))
+    ));
+    let Some(CoroutineState::Complete(Err(error))) = run(exact.as_mut().next()) else {
+        panic!("expected exact chunk host failure");
+    };
+    assert_eq!(error.host_error().unwrap().0, message);
+    assert_eq!(error.to_string(), "read failed after 0 bytes");
+
+    let returned = run(BoundCall::new(
+        Pin::new(&mut host),
+        WriteAll::new(Bytes::from_static(b"x")),
+    ));
+    let error = returned.result.err().unwrap();
+    assert_eq!(error.host_error().unwrap().0, message);
+    assert_eq!(error.to_string(), "write failed after 0 bytes");
+    assert_eq!(returned.input, b"x"[..]);
+}
+
+#[test]
+fn primitive_failures_do_not_require_host_diagnostics() {
+    use nitori_io::calls::{ReadArrayError, ReadBeError, ReadLeError};
+    let mut host = RawHost { failure: None };
+    macro_rules! incomplete {
+        ($call:expr, $error:ident) => {
+            let error = run(BoundCall::new(Pin::new(&mut host), $call))
+                .err()
+                .unwrap();
+            assert_eq!(error.to_string(), "read incomplete after 0 of 2 bytes");
+            match error {
+                $error::Incomplete {
+                    source:
+                        Incomplete {
+                            expected: 2,
+                            completed: 0,
+                        },
+                } => {}
+                $error::Incomplete { .. } | $error::Host { .. } => {
+                    panic!("expected incomplete read")
+                }
+            }
+        };
+    }
+    incomplete!(ReadArray::<2>::new(), ReadArrayError);
+    incomplete!(ReadLe::<u16>::new(), ReadLeError);
+    incomplete!(ReadBe::<u16>::new(), ReadBeError);
+    let mut empty: &mut [u8] = &mut [];
+    let error = run(BoundCall::new(
+        Pin::new(&mut host),
+        ReadExact::new(&mut empty, 1),
+    ))
+    .err()
+    .unwrap();
+    assert_eq!(error.completed(), 0);
+    assert!(matches!(error, ReadExactError::InsufficientCapacity { .. }));
+    let returned = run(BoundCall::new(
+        Pin::new(&mut host),
+        WriteAll::new(Bytes::from_static(b"x")),
+    ));
+    let error = returned.result.err().unwrap();
+    assert!(matches!(
+        error,
+        WriteAllError::WriteZero {
+            source: WriteZero { completed: 0 }
+        }
+    ));
+    assert_eq!(error.to_string(), "write made no progress after 0 bytes");
+}
+
+#[test]
+fn numeric_errors_preserve_progress_and_original_source() {
+    use nitori_io::calls::{ReadBeError, ReadLeError};
+    macro_rules! check {
+        ($call:expr, $error:ident) => {
+            let mut source = Source::new(b"abcd");
+            source.fail_at = Some(2);
+            let error = run(BoundCall::new(Pin::new(&mut source), $call)).unwrap_err();
+            assert_eq!(error.completed(), 2);
+            let original = std::error::Error::source(&error).unwrap();
+            assert!(std::ptr::eq(
+                original.downcast_ref::<io::Error>().unwrap(),
+                error.host_error().unwrap()
+            ));
+            assert_eq!(snafu::ErrorCompat::iter_chain(&error).count(), 2);
+            match error {
+                $error::Host { completed: 2, .. } => {}
+                $error::Host { .. } | $error::Incomplete { .. } => {
+                    panic!("expected partial host failure")
+                }
+            }
+        };
+    }
+    check!(ReadLe::<u32>::new(), ReadLeError);
+    check!(ReadBe::<u32>::new(), ReadBeError);
 }
