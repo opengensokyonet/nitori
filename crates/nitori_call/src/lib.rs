@@ -1,7 +1,6 @@
 #![feature(coroutine_trait)]
 #![deny(unsafe_op_in_unsafe_fn)]
-//! Operations are parameterized by their execution host. Binding a real host
-//! is optional; managed callers can supply a fresh short borrow to every poll.
+#![doc = include_str!("../README.md")]
 use std::{
     future::{Future, poll_fn},
     ops::CoroutineState,
@@ -87,6 +86,99 @@ impl<Host: ?Sized, Operation: CallOn<Host>> Future for BoundCall<'_, Host, Opera
             }
         }
     }
+}
+
+/// Advance one event using a no-op waker.
+///
+/// All dependencies of the operation must complete immediately. Panics on
+/// `Pending`; this is a contract violation, not an incomplete-input result.
+/// After a panic, the caller must not resume the operation. The caller also
+/// owns tracking completion and must not poll a completed operation again.
+pub fn step_sync<Host: ?Sized, Operation: CallOn<Host>>(
+    operation: Pin<&mut Operation>,
+    host: Pin<&mut Host>,
+) -> CoroutineState<Operation::Yield, Operation::Return> {
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    match operation.poll_call(host, &mut cx) {
+        Poll::Ready(event) => event,
+        Poll::Pending => panic!("synchronous call returned Pending"),
+    }
+}
+
+/// Execute an operation with no intermediate yields and return its result.
+///
+/// The operation is pinned on the stack. See [`step_sync`] for the synchronous
+/// execution contract. Previously consumed or written data is not rolled back.
+pub fn run_sync<Host: ?Sized, Operation>(
+    host: Pin<&mut Host>,
+    operation: Operation,
+) -> Operation::Return
+where
+    Operation: CallOn<Host, Yield = std::convert::Infallible>,
+{
+    match step_sync(std::pin::pin!(operation), host) {
+        CoroutineState::Complete(value) => value,
+        CoroutineState::Yielded(never) => match never {},
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// A lazily executed synchronous call that preserves intermediate yields.
+    ///
+    /// Pin this object, then iterate over its pinned mutable reference. Each
+    /// step delivers one yield or the unique completion event. Construction
+    /// does no work; dropping the object cancels remaining work without rollback.
+    /// The host remains borrowed for the lifetime of the binding.
+    #[must_use = "synchronous event calls do nothing until advanced"]
+    pub struct SyncBoundCall<'host, Host: ?Sized, Operation> {
+        #[pin]
+        bound: BoundCall<'host, Host, Operation>,
+        terminal: bool,
+    }
+}
+impl<'host, Host: ?Sized, Operation: CallOn<Host>> SyncBoundCall<'host, Host, Operation> {
+    pub fn new(host: Pin<&'host mut Host>, operation: Operation) -> Self {
+        Self {
+            bound: BoundCall::new(host, operation),
+            terminal: false,
+        }
+    }
+
+    /// Synchronously obtain one event; completion is followed by `None`.
+    ///
+    /// Panics on `Pending` and terminates this adapter on any unwinding panic.
+    /// No event is discarded and no external readiness is awaited.
+    pub fn next(
+        self: Pin<&mut Self>,
+    ) -> Option<CoroutineState<Operation::Yield, Operation::Return>> {
+        let this = self.project();
+        if *this.terminal {
+            return None;
+        }
+        *this.terminal = true;
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        match this.bound.poll_next(&mut cx) {
+            Poll::Pending => panic!("synchronous call returned Pending"),
+            Poll::Ready(event) => {
+                if matches!(&event, Some(CoroutineState::Yielded(_))) {
+                    *this.terminal = false;
+                }
+                event
+            }
+        }
+    }
+}
+impl<Host: ?Sized, Operation: CallOn<Host>> Iterator
+    for Pin<&mut SyncBoundCall<'_, Host, Operation>>
+{
+    type Item = CoroutineState<Operation::Yield, Operation::Return>;
+    fn next(&mut self) -> Option<Self::Item> {
+        SyncBoundCall::next(self.as_mut())
+    }
+}
+impl<Host: ?Sized, Operation: CallOn<Host>> std::iter::FusedIterator
+    for Pin<&mut SyncBoundCall<'_, Host, Operation>>
+{
 }
 
 /// Define named and anonymous operations through the public facade.

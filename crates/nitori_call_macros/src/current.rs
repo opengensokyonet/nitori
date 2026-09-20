@@ -327,22 +327,42 @@ pub(super) fn expand(closure: ExprClosure) -> Result<Tokens> {
 }
 
 pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result<Tokens> {
-    let item_type: Type = if attribute.is_empty() {
-        parse_quote!(::core::convert::Infallible)
-    } else {
-        struct Options(Type);
-        impl syn::parse::Parse for Options {
-            fn parse(input: syn::parse::ParseStream<'_>) -> Result<Self> {
+    #[derive(Default)]
+    struct Options {
+        sync: bool,
+        yields: Option<Type>,
+    }
+    impl syn::parse::Parse for Options {
+        fn parse(input: syn::parse::ParseStream<'_>) -> Result<Self> {
+            let mut options = Self::default();
+            while !input.is_empty() {
                 let name: Ident = input.parse()?;
-                if name != "yields" {
-                    return Err(Error::new(name.span(), "expected yields = Type"));
+                if name == "sync" {
+                    if options.sync {
+                        return Err(Error::new(name.span(), "duplicate sync option"));
+                    }
+                    options.sync = true;
+                } else if name == "yields" {
+                    if options.yields.is_some() {
+                        return Err(Error::new(name.span(), "duplicate yields option"));
+                    }
+                    input.parse::<Token![=]>()?;
+                    options.yields = Some(input.parse()?);
+                } else {
+                    return Err(Error::new(name.span(), "expected sync or yields = Type"));
                 }
-                input.parse::<Token![=]>()?;
-                Ok(Self(input.parse()?))
+                if !input.is_empty() {
+                    input.parse::<Token![,]>()?;
+                }
             }
+            Ok(options)
         }
-        syn::parse2::<Options>(attribute)?.0
-    };
+    }
+    let options = syn::parse2::<Options>(attribute)?;
+    let has_yields = options.yields.is_some();
+    let item_type = options
+        .yields
+        .unwrap_or_else(|| parse_quote!(::core::convert::Infallible));
     if function.sig.asyncness.take().is_none() {
         return Err(Error::new_spanned(
             &function.sig,
@@ -469,7 +489,7 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
             GenericParam::Lifetime(_) => None,
         })
         .collect();
-    let helpers = helper_trait(&function, &host, &call_name)?;
+    let helpers = helper_trait(&function, &host, &call_name, options.sync, has_yields)?;
     Ok(quote! {
         #[doc(hidden)]
         #visibility mod #module {
@@ -521,7 +541,13 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
     })
 }
 
-fn helper_trait(function: &ItemFn, host: &Type, call_name: &Ident) -> Result<Tokens> {
+fn helper_trait(
+    function: &ItemFn,
+    host: &Type,
+    call_name: &Ident,
+    sync: bool,
+    has_yields: bool,
+) -> Result<Tokens> {
     let name = &function.sig.ident;
     let unpin_name = format_ident!("{}_unpin", name);
     let trait_name = format_ident!("{}Ext", call_name);
@@ -666,8 +692,41 @@ fn helper_trait(function: &ItemFn, host: &Type, call_name: &Ident) -> Result<Tok
         lifetime_name.push('_');
     }
     let lifetime = Lifetime::new(&format!("'{lifetime_name}"), Span::mixed_site());
+    let sync_methods = if sync {
+        let sync_name = format_ident!("sync_{}", name);
+        let sync_unpin_name = format_ident!("sync_{}_unpin", name);
+        let (result, execute) = if has_yields {
+            (
+                quote!(::nitori_call::SyncBoundCall<#lifetime, Self, #call_type>),
+                quote!(::nitori_call::SyncBoundCall::new),
+            )
+        } else {
+            (
+                quote!(<#call_type as ::nitori_call::CallOn<Self>>::Return),
+                quote!(::nitori_call::run_sync),
+            )
+        };
+        let bounds = if has_yields {
+            quote!()
+        } else {
+            quote!(#call_type: ::nitori_call::CallOn<Self, Yield = ::core::convert::Infallible>,)
+        };
+        quote! {
+            fn #sync_name<#lifetime>(self: ::core::pin::Pin<&#lifetime mut Self>, #arguments)
+                -> #result where #bounds {
+                #execute(self, <#call_type>::new(#(#names),*))
+            }
+            fn #sync_unpin_name<#lifetime>(&#lifetime mut self, #arguments)
+                -> #result where #bounds Self: ::core::marker::Unpin {
+                #execute(::core::pin::Pin::new(self), <#call_type>::new(#(#names),*))
+            }
+        }
+    } else {
+        quote!()
+    };
     Ok(quote! {
         #visibility trait #trait_name #trait_parameters #trait_constraints {
+            #sync_methods
             fn #name<#lifetime>(self: ::core::pin::Pin<&#lifetime mut Self>, #arguments)
                 -> ::nitori_call::BoundCall<#lifetime, Self, #call_type> {
                 ::nitori_call::BoundCall::new(self, <#call_type>::new(#(#names),*))

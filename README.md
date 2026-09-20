@@ -6,7 +6,7 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Layout
 
-- `crates/nitori_call`: `CallOn`, `BoundCall`, and the public macro re-exports.
+- `crates/nitori_call`: `CallOn`, asynchronous and synchronous adapters, and the public macro re-exports; see its [README](crates/nitori_call/README.md) for `#[call(sync)]` and synchronous event iteration.
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
