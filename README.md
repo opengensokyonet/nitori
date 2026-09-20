@@ -2,12 +2,13 @@
 
 Foundational Rust tools for Open Gensokyo Network, administratively supported by Starspun Works.
 
-This repository currently contains the experimental `nitori_call` mechanism and a DATA frame codec example. Future tools such as `nitori_io` will be added as their contracts are developed. The current APIs are experimental and are not stable production APIs.
+This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, and a DATA frame codec prototype. The current APIs are experimental and are not stable production APIs.
 
 ## Layout
 
 - `crates/nitori_call`: `CallOn`, `BoundCall`, and the public macro re-exports.
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
+- `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
 
 ## Development

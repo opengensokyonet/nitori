@@ -1,3 +1,8 @@
 [workspace]
-members = ["crates/nitori_call", "crates/nitori_call_macros", "examples/data-frame-codec"]
+members = [
+    "crates/nitori_call",
+    "crates/nitori_call_macros",
+    "crates/nitori_io",
+    "examples/data-frame-codec",
+]
 resolver = "3"
