@@ -2,6 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 use nitori_call::CallOn;
 use nitori_call::call_closure;
+use nitori_call::{PollCallExt as _, ReceiverExt as _};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -52,30 +53,36 @@ impl ReadByte {
     }
 }
 
-impl CallOn<u8> for ReadByte {
+impl CallOn<nitori_call::Direct<u8>> for ReadByte {
     type Yield = Infallible;
     type Return = u8;
-    fn poll_call(
+    fn poll_call<'v>(
         self: Pin<&mut Self>,
-        mut target: Pin<&mut u8>,
+        view: Pin<&mut nitori_call::DirectView<'v, u8>>,
         _: &mut Context<'_>,
-    ) -> Poll<CoroutineState<Infallible, u8>> {
+    ) -> Poll<CoroutineState<Infallible, u8>>
+    where
+        nitori_call::Direct<u8>: 'v,
+    {
+        let mut target = view.get_mut().0.as_mut();
         *target += 1;
         Poll::Ready(CoroutineState::Complete(*target))
     }
 }
 #[nitori_call::call]
-async fn named_byte(io: ::core::pin::Pin<&mut u8>) -> u8 {
-    io.read_byte().await
+async fn named_byte(io: nitori_call::Receiver<nitori_call::Direct<u8>>) -> u8 {
+    io.operation(ReadByte::new()).await
 }
 #[test]
 fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
-    let mut target = 0;
+    let mut target = 0u8;
     let mut cx = Context::from_waker(Waker::noop());
     ALLOCATIONS.with(|count| count.set(0));
     COUNTING.with(|flag| flag.set(true));
     let (emitted, waits, returned) = {
-        let mut operation = pin!(call_closure!(|io: ::core::pin::Pin<&mut u8>| {
+        let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+            nitori_call::Direct<u8>,
+        >| {
             let mut sum = 0usize;
             for _ in 0..4 {
                 let mut waited = false;
@@ -98,7 +105,7 @@ fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
         let mut emitted = 0;
         let mut waits = 0;
         let returned = loop {
-            match operation.as_mut().poll_call(Pin::new(&mut target), &mut cx) {
+            match operation.as_mut().poll_host(Pin::new(&mut target), &mut cx) {
                 Poll::Pending => waits += 1,
                 Poll::Ready(CoroutineState::Yielded(_)) => emitted += 1,
                 Poll::Ready(CoroutineState::Complete(value)) => break value,

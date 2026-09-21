@@ -1,6 +1,7 @@
 //! Sequential composition of parameterized calls from a stream or iterator.
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 
+use nitori_call::ReceiverExt as _;
 use nitori_call::{CallOn, Child, Stream, call};
 use std::{
     future::poll_fn,
@@ -23,11 +24,9 @@ impl<Source: Iterator> Stream for IterCalls<Source> {
 /// Yield each call's final result, discarding its intermediate yields.
 /// A return value such as `Err` is a value here, not a stop policy.
 #[call(sync, yields = Operation::Return)]
-pub async fn call_results<Host, Source, Operation>(
-    _io: nitori_call::Receiver<'_, Host>,
-    source: Source,
-) where
-    Host: ?Sized,
+pub async fn call_results<Host, Source, Operation>(_io: nitori_call::Receiver<Host>, source: Source)
+where
+    Host: nitori_call::HostFamily,
     Source: Stream<Item = Operation>,
     Operation: CallOn<Host>,
 {
@@ -41,11 +40,9 @@ pub async fn call_results<Host, Source, Operation>(
 /// Yield each child's events, including its completion, in execution order.
 /// The outer operation completes only when the source returns `None`.
 #[call(sync, yields = CoroutineState<Operation::Yield, Operation::Return>)]
-pub async fn call_events<Host, Source, Operation>(
-    _io: nitori_call::Receiver<'_, Host>,
-    source: Source,
-) where
-    Host: ?Sized,
+pub async fn call_events<Host, Source, Operation>(_io: nitori_call::Receiver<Host>, source: Source)
+where
+    Host: nitori_call::HostFamily,
     Source: Stream<Item = Operation>,
     Operation: CallOn<Host>,
 {
@@ -59,17 +56,26 @@ pub async fn call_events<Host, Source, Operation>(
 }
 
 #[call(yields = usize)]
-async fn add(io: nitori_call::Receiver<'_, usize>, amount: usize) -> usize {
-    let previous = io.with(|host| *host);
+async fn add(io: nitori_call::Receiver<nitori_call::Direct<usize>>, amount: usize) -> usize {
+    let previous = io
+        .with(|__access| {
+            let host = __access.into_pin().get_mut().0.as_mut();
+            *host
+        })
+        .await;
     yield previous;
-    io.with(|mut host| {
-        *host += amount;
-        *host
+    io.with(|__access| {
+        let mut host = __access.into_pin().get_mut().0.as_mut();
+        {
+            *host += amount;
+            *host
+        }
     })
+    .await
 }
 
 fn main() {
-    let mut host = 0;
+    let mut host = 0usize;
     let mut amounts = [2, 3].into_iter();
     let factory = std::iter::from_fn(move || amounts.next().map(Add::new));
     {
@@ -95,6 +101,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nitori_call::PollCallExt;
     use std::{
         cell::Cell,
         marker::PhantomPinned,
@@ -138,7 +145,10 @@ mod tests {
     }
 
     #[call(yields = usize)]
-    async fn delayed_add(io: nitori_call::Receiver<'_, usize>, amount: usize) -> usize {
+    async fn delayed_add(
+        io: nitori_call::Receiver<nitori_call::Direct<usize>>,
+        amount: usize,
+    ) -> usize {
         let mut waiting = false;
         poll_fn(|cx| {
             if waiting {
@@ -151,10 +161,14 @@ mod tests {
         })
         .await;
         yield amount;
-        io.with(|mut host| {
-            *host += amount;
-            *host
+        io.with(|__access| {
+            let mut host = __access.into_pin().get_mut().0.as_mut();
+            {
+                *host += amount;
+                *host
+            }
         })
+        .await
     }
 
     #[test]
@@ -166,40 +180,40 @@ mod tests {
             waiting: false,
             pinned: PhantomPinned,
         };
-        let mut operation = pin!(call_events::<usize, _, _>(source));
-        let mut host = 0;
+        let mut operation = pin!(call_events::<nitori_call::Direct<usize>, _, _>(source));
+        let mut host = 0usize;
         let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
         for (amount, total, previous) in [(2, 2, 0), (3, 5, 2)] {
             assert_eq!(
-                operation.as_mut().poll_call(Pin::new(&mut host), &mut cx),
+                operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
                 Poll::Pending
             );
             assert_eq!(
-                operation.as_mut().poll_call(Pin::new(&mut host), &mut cx),
+                operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
                 Poll::Pending
             );
             let source_polls = polls.get();
             assert_eq!(
-                operation.as_mut().poll_call(Pin::new(&mut host), &mut cx),
+                operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
                 Poll::Ready(CoroutineState::Yielded(CoroutineState::Yielded(amount)))
             );
             assert_eq!(host, previous);
             assert_eq!(polls.get(), source_polls);
             assert_eq!(
-                operation.as_mut().poll_call(Pin::new(&mut host), &mut cx),
+                operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
                 Poll::Ready(CoroutineState::Yielded(CoroutineState::Complete(total)))
             );
             assert_eq!(host, total);
             assert_eq!(polls.get(), source_polls);
         }
         assert_eq!(
-            operation.as_mut().poll_call(Pin::new(&mut host), &mut cx),
+            operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
             Poll::Pending
         );
         assert_eq!(
-            operation.as_mut().poll_call(Pin::new(&mut host), &mut cx),
+            operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
             Poll::Ready(CoroutineState::Complete(()))
         );
         assert_eq!(wakes.0.load(Ordering::SeqCst), 5);
@@ -213,7 +227,7 @@ mod tests {
             counter.set(counter.get() + 1);
             Some(Add::new(7))
         });
-        let mut host = 10;
+        let mut host = 10usize;
         {
             let mut events = pin!(host.sync_call_events_unpin(IterCalls(factory)));
             assert_eq!(produced.get(), 0);
@@ -230,7 +244,7 @@ mod tests {
     #[test]
     fn results_discard_intermediate_values_and_finish_on_source_end() {
         super::main();
-        let mut host = 0;
+        let mut host = 0usize;
         let mut empty = pin!(host.sync_call_results_unpin(IterCalls(std::iter::empty::<Add>())));
         assert_eq!(empty.as_mut().next(), Some(CoroutineState::Complete(())));
         assert_eq!(empty.as_mut().next(), None);

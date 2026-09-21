@@ -1,11 +1,14 @@
 //! Explicit capability adapters with caller-selected allocation limits.
-use crate::{Read, ReadChunk, Write, helpers::poll_chunk_from_read};
+use crate::{
+    PollReadExt as _, PollWriteExt as _, Read, ReadChunk, Write, helpers::poll_chunk_from_read,
+};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
+use nitori_call::{Direct, Host};
 
 pin_project_lite::pin_project! {
     /// Add copying chunk reads to any reader, with a shared underlying cursor.
@@ -49,24 +52,38 @@ impl<T> Chunked<T> {
         self.chunk_capacity
     }
 }
-impl<T: Read> Read for Chunked<T> {
-    type Error = T::Error;
-    fn poll_read<O: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+impl<T: Host> Read for Direct<Chunked<T>>
+where
+    T::Family: Read,
+{
+    type Error = <T::Family as Read>::Error;
+    fn poll_read<'visit, O: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Self::Error>> {
-        self.project().inner.poll_read(cx, destination)
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        this.project().inner.poll_read(cx, destination)
     }
 }
-impl<T: Read> ReadChunk for Chunked<T> {
+impl<T: Host> ReadChunk for Direct<Chunked<T>>
+where
+    T::Family: Read,
+{
     type Chunk = Bytes;
-    fn poll_read_chunk(
-        self: Pin<&mut Self>,
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>> {
-        let this = self.project();
+    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let this = this.project();
         let maximum = maximum.min(*this.chunk_capacity);
         // Avoid geometric growth beyond the configured allocation limit when
         // a cancelled/suspended request is followed by a larger one.
@@ -87,13 +104,22 @@ impl<T: Read> ReadChunk for Chunked<T> {
         )
     }
 }
-impl<T: Write> Write for Chunked<T> {
-    type Error = T::Error;
-    fn poll_write<I: Buf + ?Sized>(
-        self: Pin<&mut Self>,
+impl<T: Host> Write for Direct<Chunked<T>>
+where
+    T::Family: Write,
+{
+    type Error = <T::Family as Write>::Error;
+    fn poll_write<'visit, I: Buf + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Self::Error>> {
-        self.project().inner.poll_write(cx, input)
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        this.project().inner.poll_write(cx, input)
     }
 }
+
+nitori_call::direct_host!(impl [T] for Chunked<T>);

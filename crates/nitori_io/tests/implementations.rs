@@ -1,4 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use nitori_io::{PollReadExt as _, PollWriteExt as _};
 use nitori_io::{Read, ReadChunk, Write, adapters::Chunked, bridge::Std};
 use std::{
     collections::VecDeque,
@@ -21,7 +22,10 @@ fn ready<T, E: std::fmt::Debug>(poll: Poll<Result<T, E>>) -> T {
         Poll::Pending => panic!("unexpected Pending"),
     }
 }
-fn check_reader<T: Read<Error = Infallible> + Unpin>(mut source: T) {
+fn check_reader<T: nitori_call::Host + Unpin>(mut source: T)
+where
+    T::Family: Read<Error = Infallible>,
+{
     let mut first = [0; 1];
     let mut second = [0; 2];
     let mut output = first.as_mut_slice().chain_mut(second.as_mut_slice());
@@ -65,7 +69,10 @@ fn memory_readers_and_forwarding_share_cursors() {
     );
     assert_eq!(cursor.position(), u64::MAX);
 }
-fn check_chunks<T: ReadChunk<Error = Infallible> + Unpin>(mut source: T) {
+fn check_chunks<T: nitori_call::Host + Unpin>(mut source: T)
+where
+    T::Family: ReadChunk<Error = Infallible>,
+{
     let mut first = [0; 1];
     ready(Pin::new(&mut source).poll_read(&mut cx(), &mut first.as_mut_slice()));
     assert_eq!(first, *b"a");
@@ -87,9 +94,10 @@ fn native_chunks_are_bounded_and_zero_copy() {
     check_chunks(&b"abcde"[..]);
     check_chunks(Box::pin(Bytes::from_static(b"abcde")));
 }
-fn write<T: Write + Unpin>(sink: &mut T) -> usize
+fn write<T: nitori_call::Host + Unpin>(sink: &mut T) -> usize
 where
-    T::Error: std::fmt::Debug,
+    T::Family: Write,
+    <T::Family as Write>::Error: std::fmt::Debug,
 {
     let mut input = (&b"ab"[..]).chain(&b"cde"[..]);
     let input: &mut dyn Buf = &mut input;
@@ -186,4 +194,30 @@ fn std_errors_preserve_buffers_and_empty_requests_reach_host() {
             assert_eq!(input, before);
         }
     }
+}
+
+#[test]
+fn operations_extend_actual_resources_and_views() {
+    use nitori_call::Host;
+    use nitori_io::{ReadExt, WriteExt};
+    use std::{future::Future, pin::pin};
+    let mut source = &b"abcd"[..];
+    {
+        let mut call = pin!(source.read_array_unpin::<2>());
+        assert_eq!(ready(call.as_mut().poll(&mut cx())), *b"ab");
+    }
+    {
+        let mut view = pin!(Pin::new(&mut source).view());
+        let mut call = pin!(view.as_mut().read_array::<2>());
+        assert_eq!(ready(call.as_mut().poll(&mut cx())), *b"cd");
+    }
+    let mut output = Vec::new();
+    {
+        let mut call = pin!(output.write_all_unpin(&b"abcd"[..]));
+        let Poll::Ready(result) = call.as_mut().poll(&mut cx()) else {
+            panic!("ready")
+        };
+        assert_eq!(result.result.unwrap(), 4);
+    }
+    assert_eq!(output, b"abcd");
 }

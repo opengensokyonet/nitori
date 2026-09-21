@@ -1,5 +1,6 @@
 //! Read operations and their operation-specific failures.
 use super::Step;
+use crate::PollReadExt as _;
 use crate::{
     Read as ReadHost, ReadChunk as ChunkHost,
     error::{self, Incomplete, InsufficientCapacity},
@@ -23,14 +24,17 @@ impl<'a, B: BufMut + ?Sized> Read<'a, B> {
         Self(destination)
     }
 }
-impl<H: ReadHost + ?Sized, B: BufMut + ?Sized> CallOn<H> for Read<'_, B> {
+impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for Read<'_, B> {
     type Yield = Infallible;
     type Return = Result<usize, H::Error>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         host.poll_read(cx, self.get_mut().0).map(Complete)
     }
 }
@@ -42,14 +46,17 @@ impl ReadChunk {
         Self(maximum)
     }
 }
-impl<H: ChunkHost + ?Sized> CallOn<H> for ReadChunk {
+impl<H: ChunkHost> CallOn<H> for ReadChunk {
     type Yield = Infallible;
     type Return = Result<Option<H::Chunk>, H::Error>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         host.poll_read_chunk(cx, self.0).map(Complete)
     }
 }
@@ -113,14 +120,17 @@ impl<'a, B: BufMut + ?Sized> ReadExact<'a, B> {
         }
     }
 }
-impl<H: ReadHost + ?Sized, B: BufMut + ?Sized> CallOn<H> for ReadExact<'_, B> {
+impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadExact<'_, B> {
     type Yield = Infallible;
     type Return = Result<(), ReadExactError<H::Error>>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
         if !this.checked {
             this.checked = true;
@@ -135,13 +145,13 @@ impl<H: ReadHost + ?Sized, B: BufMut + ?Sized> CallOn<H> for ReadExact<'_, B> {
                 .into())));
             }
         }
-        poll_exact(host, cx, this.destination, this.length, &mut this.completed)
+        poll_exact::<H, _>(host, cx, this.destination, this.length, &mut this.completed)
             .map(|result| Complete(result.map_err(ReadExactError::from)))
     }
 }
 
-fn poll_exact<H: ReadHost + ?Sized, B: BufMut + ?Sized>(
-    mut host: Pin<&mut H>,
+fn poll_exact<'visit, H: ReadHost + 'visit, B: BufMut + ?Sized>(
+    mut host: Pin<&mut H::Host<'visit>>,
     cx: &mut Context<'_>,
     mut destination: &mut B,
     length: usize,
@@ -218,14 +228,17 @@ impl<'a, B: BufMut + ?Sized> ReadToEnd<'a, B> {
         }
     }
 }
-impl<H: ReadHost + ?Sized, B: BufMut + ?Sized> CallOn<H> for ReadToEnd<'_, B> {
+impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadToEnd<'_, B> {
     type Yield = Infallible;
     type Return = Result<usize, ReadToEndError<H::Error>>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        mut host: Pin<&mut H>,
+        mut host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
         loop {
             if this.destination.remaining_mut() == 0 {
@@ -291,14 +304,17 @@ impl ReadChunks {
         }
     }
 }
-impl<H: ChunkHost + ?Sized> CallOn<H> for ReadChunks {
+impl<H: ChunkHost> CallOn<H> for ReadChunks {
     type Yield = H::Chunk;
     type Return = Result<usize, ReadChunksError<H::Error>>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
         let Some(maximum) =
             NonZeroUsize::new((this.maximum - this.completed).min(this.chunk_maximum.get()))
@@ -356,31 +372,32 @@ impl ReadChunksExact {
         Self(ReadChunks::new(length, chunk_maximum))
     }
 }
-impl<H: ChunkHost + ?Sized> CallOn<H> for ReadChunksExact {
+impl<H: ChunkHost> CallOn<H> for ReadChunksExact {
     type Yield = H::Chunk;
     type Return = Result<(), ReadChunksExactError<H::Error>>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
-        Pin::new(&mut this.0)
-            .poll_call(host, cx)
-            .map(|state| match state {
-                Yielded(chunk) => Yielded(chunk),
-                Complete(Err(error)) => Complete(Err(read_chunks_exact::HostSnafu {
-                    completed: error.completed,
-                }
-                .into_error(error.source))),
-                Complete(Ok(completed)) if completed == this.0.maximum => Complete(Ok(())),
-                Complete(Ok(completed)) => Complete(Err(error::IncompleteSnafu {
-                    expected: this.0.maximum,
-                    completed,
-                }
-                .build()
-                .into())),
-            })
+        CallOn::<H>::poll_call(Pin::new(&mut this.0), host, cx).map(|state| match state {
+            Yielded(chunk) => Yielded(chunk),
+            Complete(Err(error)) => Complete(Err(read_chunks_exact::HostSnafu {
+                completed: error.completed,
+            }
+            .into_error(error.source))),
+            Complete(Ok(completed)) if completed == this.0.maximum => Complete(Ok(())),
+            Complete(Ok(completed)) => Complete(Err(error::IncompleteSnafu {
+                expected: this.0.maximum,
+                completed,
+            }
+            .build()
+            .into())),
+        })
     }
 }
 
@@ -430,17 +447,20 @@ impl<const LENGTH: usize> ReadArray<LENGTH> {
         }
     }
 }
-impl<H: ReadHost + ?Sized, const LENGTH: usize> CallOn<H> for ReadArray<LENGTH> {
+impl<H: ReadHost, const LENGTH: usize> CallOn<H> for ReadArray<LENGTH> {
     type Yield = Infallible;
     type Return = Result<[u8; LENGTH], ReadArrayError<H::Error>>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
         let mut destination = &mut this.bytes[this.completed..];
-        let result = ready!(poll_exact(
+        let result = ready!(poll_exact::<H, _>(
             host,
             cx,
             &mut destination,
@@ -576,12 +596,12 @@ macro_rules! endian_impl {
         endian_impl!(@call ReadBe, ReadBeError, read_be, $number);
     )*};
     (@call $name:ident, $error:ident, $method:ident, $number:ty) => {
-        impl<H: ReadHost + ?Sized> CallOn<H> for $name<$number> {
+        impl<H: ReadHost> CallOn<H> for $name<$number> {
             type Yield = Infallible;
             type Return = Result<$number, $error<H::Error>>;
-            fn poll_call(self: Pin<&mut Self>, host: Pin<&mut H>, cx: &mut Context<'_>) -> Step<Self::Yield, Self::Return> {
+            fn poll_call<'visit>(self: Pin<&mut Self>, host: Pin<&mut H::Host<'visit>>, cx: &mut Context<'_>) -> Step<Self::Yield, Self::Return> where H: 'visit {
                 use std::io::Read as _;
-                Pin::new(&mut self.get_mut().array).poll_call(host, cx).map(|state| match state {
+                CallOn::<H>::poll_call(Pin::new(&mut self.get_mut().array), host, cx).map(|state| match state {
                     Yielded(never) => match never {},
                     Complete(result) => Complete(result.map(|bytes| bytes.as_slice().$method::<$number>().expect("complete numeric array")).map_err($error::from)),
                 })

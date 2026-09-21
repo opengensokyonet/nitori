@@ -1,6 +1,6 @@
 #![feature(coroutine_trait)]
 use bytes::Bytes;
-use nitori_call::CallOn;
+use nitori_call::PollCallExt as _;
 use nitori_data_frame_codec_example::{
     current_codec::read_data_frame,
     current_codec::{CodecError, ReadSource},
@@ -14,16 +14,20 @@ use std::{
 
 struct Input(Bytes);
 impl ReadSource for Input {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
+    fn poll_read<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         maximum: NonZeroUsize,
         _: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>> {
-        let count = maximum.get().min(self.0.len());
+    ) -> Poll<Result<Option<Bytes>, CodecError>>
+    where
+        Self: 'visit,
+    {
+        let mut this = host.get_mut().0.as_mut();
+        let count = maximum.get().min(this.0.len());
         Poll::Ready(Ok(if count == 0 {
             None
         } else {
-            Some(self.0.split_to(count))
+            Some(this.0.split_to(count))
         }))
     }
 }
@@ -32,7 +36,7 @@ fn main() {
     let mut call = pin!(read_data_frame::<Input>(NonZeroUsize::new(2).unwrap()));
     let mut cx = Context::from_waker(Waker::noop());
     loop {
-        match call.as_mut().poll_call(Pin::new(&mut input), &mut cx) {
+        match call.as_mut().poll_host(Pin::new(&mut input), &mut cx) {
             Poll::Ready(CoroutineState::Yielded(bytes)) => println!("macro chunk: {bytes:?}"),
             Poll::Ready(CoroutineState::Complete(result)) => {
                 println!("macro complete: {result:?}; unconsumed: {:?}", input.0);
@@ -44,3 +48,5 @@ fn main() {
         }
     }
 }
+
+nitori_call::family_host!(impl [] for Input);

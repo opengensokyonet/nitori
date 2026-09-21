@@ -1,22 +1,26 @@
 //! Explicit conversions; neither helper installs a blanket capability impl.
-use crate::{Read, ReadChunk};
+use crate::{PollReadExt as _, Read, ReadChunk};
 use bytes::{Buf, BufMut};
 use core::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, ready},
 };
+use nitori_call::Host;
 
 /// Fill from one chunk, copying its entire contents without retaining a tail.
 ///
 /// Call this after any host-specific terminal-error checks: an empty destination
 /// returns zero locally because a chunk request must be nonzero. In particular,
 /// this helper must not bypass an error that the host prioritizes over emptiness.
-pub fn poll_read_from_chunk<H: ReadChunk + ?Sized, B: BufMut + ?Sized>(
+pub fn poll_read_from_chunk<H: Host + ?Sized, B: BufMut + ?Sized>(
     host: Pin<&mut H>,
     cx: &mut Context<'_>,
     mut destination: &mut B,
-) -> Poll<Result<usize, H::Error>> {
+) -> Poll<Result<usize, <H::Family as Read>::Error>>
+where
+    H::Family: ReadChunk,
+{
     let Some(maximum) = NonZeroUsize::new(destination.remaining_mut()) else {
         return Poll::Ready(Ok(0));
     };
@@ -46,9 +50,10 @@ pub fn poll_chunk_from_read<H, B, C>(
     storage: &mut Option<B>,
     create: impl FnOnce(usize) -> B,
     finish: impl FnOnce(B) -> C,
-) -> Poll<Result<Option<C>, H::Error>>
+) -> Poll<Result<Option<C>, <H::Family as Read>::Error>>
 where
-    H: Read + ?Sized,
+    H: Host + ?Sized,
+    H::Family: Read,
     B: BufMut,
     C: Buf,
 {

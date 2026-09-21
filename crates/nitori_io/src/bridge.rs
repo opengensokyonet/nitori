@@ -10,6 +10,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
+use nitori_call::Direct;
 use std::io;
 
 fn read_into<O: BufMut + ?Sized>(
@@ -54,26 +55,34 @@ impl<T> From<T> for Std<T> {
         Self::new(inner)
     }
 }
-impl<T: io::Read> Read for Std<T> {
+impl<T: io::Read> Read for Direct<Std<T>> {
     type Error = io::Error;
-    fn poll_read<O: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, O: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         _: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
         read_into(destination, |buffer| {
-            Poll::Ready(self.get_mut().inner.read(buffer))
+            Poll::Ready(this.get_mut().inner.read(buffer))
         })
     }
 }
-impl<T: io::Write> Write for Std<T> {
+impl<T: io::Write> Write for Direct<Std<T>> {
     type Error = io::Error;
-    fn poll_write<I: Buf + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_write<'visit, I: Buf + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<io::Result<usize>> {
-        let count = self.get_mut().inner.write(input.chunk())?;
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let count = this.get_mut().inner.write(input.chunk())?;
         input.advance(count);
         Poll::Ready(Ok(count))
     }
@@ -116,29 +125,37 @@ impl<T> From<T> for Tokio<T> {
     }
 }
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncRead> Read for Tokio<T> {
+impl<T: tokio::io::AsyncRead> Read for Direct<Tokio<T>> {
     type Error = io::Error;
-    fn poll_read<O: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, O: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
         read_into(destination, |buffer| {
             let mut buffer = tokio::io::ReadBuf::new(buffer);
-            ready!(self.project().inner.poll_read(cx, &mut buffer))?;
+            ready!(this.project().inner.poll_read(cx, &mut buffer))?;
             Poll::Ready(Ok(buffer.filled().len()))
         })
     }
 }
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncWrite> Write for Tokio<T> {
+impl<T: tokio::io::AsyncWrite> Write for Direct<Tokio<T>> {
     type Error = io::Error;
-    fn poll_write<I: Buf + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_write<'visit, I: Buf + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<io::Result<usize>> {
-        let count = ready!(self.project().inner.poll_write(cx, input.chunk()))?;
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let count = ready!(this.project().inner.poll_write(cx, input.chunk()))?;
         input.advance(count);
         Poll::Ready(Ok(count))
     }
@@ -181,28 +198,42 @@ impl<T> From<T> for Futures<T> {
     }
 }
 #[cfg(feature = "futures")]
-impl<T: futures_io::AsyncRead> Read for Futures<T> {
+impl<T: futures_io::AsyncRead> Read for Direct<Futures<T>> {
     type Error = io::Error;
-    fn poll_read<O: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, O: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
         read_into(destination, |buffer| {
-            self.project().inner.poll_read(cx, buffer)
+            this.project().inner.poll_read(cx, buffer)
         })
     }
 }
 #[cfg(feature = "futures")]
-impl<T: futures_io::AsyncWrite> Write for Futures<T> {
+impl<T: futures_io::AsyncWrite> Write for Direct<Futures<T>> {
     type Error = io::Error;
-    fn poll_write<I: Buf + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_write<'visit, I: Buf + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<io::Result<usize>> {
-        let count = ready!(self.project().inner.poll_write(cx, input.chunk()))?;
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let count = ready!(this.project().inner.poll_write(cx, input.chunk()))?;
         input.advance(count);
         Poll::Ready(Ok(count))
     }
 }
+
+nitori_call::direct_host!(impl [T] for Std<T>);
+#[cfg(feature = "tokio")]
+nitori_call::direct_host!(impl [T] for Tokio<T>);
+#[cfg(feature = "futures")]
+nitori_call::direct_host!(impl [T] for Futures<T>);

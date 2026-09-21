@@ -39,6 +39,7 @@ dependencies = [
 name = "nitori_call"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "futures-core",
  "nitori_call_macros",
  "pin-project-lite",

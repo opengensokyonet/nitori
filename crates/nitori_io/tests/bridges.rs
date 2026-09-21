@@ -1,7 +1,8 @@
 #![cfg(any(feature = "tokio", feature = "futures"))]
 use bytes::{Buf, BufMut, Bytes};
 use nitori_call::BoundCall;
-use nitori_io::{Read, ReadChunk, Write, adapters::Chunked, calls};
+use nitori_io::{PollReadExt as _, PollWriteExt as _};
+use nitori_io::{Read, Write, adapters::Chunked, calls};
 use std::{
     cell::Cell,
     future::Future,
@@ -152,7 +153,10 @@ fn ready<T>(value: Poll<io::Result<T>>) -> T {
         Poll::Pending => panic!("unexpected Pending"),
     }
 }
-fn check<T: Read<Error = io::Error> + Write<Error = io::Error>>(host: T, action: Rc<Cell<Action>>) {
+fn check<T: nitori_call::Host>(host: T, action: Rc<Cell<Action>>)
+where
+    T::Family: Read<Error = io::Error> + Write<Error = io::Error>,
+{
     let wakes = Arc::new(Wakes::default());
     let waker = Waker::from(wakes.clone());
     let mut cx = Context::from_waker(&waker);

@@ -6,22 +6,25 @@ numeric decoding and does not reference `std::io::FromEndianBytes`.
 
 ## Capabilities and operations
 
+`Read`, `ReadChunk`, and `Write` are capabilities on `HostFamily` types.
+Each method accepts a pinned `Self::Host<'visit>` for any valid visit lifetime;
+errors and chunks are stable associated types independent of that visit.
 `Read` fills any `BufMut`; `ReadChunk: Read` additionally returns owned `Buf`
 chunks from the same cursor. `Write` accepts any `Buf`. Buffer generics belong
 to the methods. Neither hosts nor buffers require `Send`, `Sync`, `Unpin`, or
 `'static`. These traits are not dyn-compatible; buffer arguments can be unsized.
 
-Import operation types from `nitori_io::calls` when using virtual calls:
+Import receiver extension traits for child calls, and operation types from
+`nitori_io::calls` when constructing operations explicitly:
 
 ```rust
-#![feature(coroutines, coroutine_trait, stmt_expr_attributes, type_alias_impl_trait)]
-use nitori_call::call;
-use nitori_io::{Read as ReadHost, calls::{ReadArray, ReadExact}};
+#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+use nitori_call::{call, Receiver};
+use nitori_io::{Read as ReadHost, ReceiverReadExt};
 use nitori_io::calls::ReadExactError;
-use std::pin::Pin;
 
 #[call]
-async fn header<H: ReadHost + ?Sized>(io: Pin<&mut H>) -> Result<[u8; 3], ReadExactError<H::Error>> {
+async fn header<H: ReadHost>(io: Receiver<H>) -> Result<[u8; 3], ReadExactError<H::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
@@ -33,10 +36,9 @@ async fn header<H: ReadHost + ?Sized>(io: Pin<&mut H>) -> Result<[u8; 3], ReadEx
 
 Consumers of `#[call]` need the feature gates above, but no direct
 pin-projection dependency. Bind an operation explicitly with
-`BoundCall::new(pinned_host, ReadArray::<3>::new())` to execute outside a virtual
-call. Local buffers and their named cursor views may remain borrowed across
+`BoundCall::new(pinned_host, ReadArray::<3>::new())` to execute outside a call body. Local buffers and their named cursor views may remain borrowed across
 Pending. Bind temporary buffer views to locals before passing their borrows to
-virtual calls.
+child calls.
 
 | Operation constructor | Completion |
 | --- | --- |
@@ -55,6 +57,13 @@ virtual calls.
 Numeric operations support all integer primitives (including `usize`/`isize`)
 and `f32`/`f64`, preserving floating-point bits. They read a `size_of::<T>()` array
 before synchronous decoding. Pointer-sized encodings depend on the target width.
+
+Actual hosts provide `ReadExt`, `ChunkExt`, and `WriteExt` operation methods
+returning bound calls, with pinned and `_unpin` entries. They also provide `PollReadExt` / `PollWriteExt` for synchronous poll
+access through their canonical family. `ReceiverReadExt`, `ReceiverChunkExt`,
+and `ReceiverWriteExt` work on both root and composed receivers. A local
+resource can use `nitori_call::family_host!` and implement the family capability
+on itself; custom wrapper families implement their own view reconstruction.
 
 ## Built-in hosts and bridges
 
@@ -102,7 +111,7 @@ the host. Empty requests still reach the host. Flush, close, and seek remain
 explicit operations on the underlying object; dropping a bridge adds no flush.
 Reverse conversion is not provided.
 
-`adapters::Chunked<T>` adds copying `ReadChunk` to any `Read`, including a bridge,
+`adapters::Chunked<T>` adds copying `ReadChunk` to a host whose family implements `Read`, including a bridge,
 with an explicit nonzero chunk capacity. It caps each read by both that capacity
 and the requested maximum, retains empty allocated storage across Pending, and
 returns owned `Bytes` on success. A larger subsequent request replaces scratch
@@ -112,7 +121,7 @@ Allocation uses `BytesMut`'s infallible allocation policy; the allocator may rou
 capacity up. Native chunk hosts do not need this adapter.
 
 ```rust
-use nitori_io::{adapters::Chunked, bridge::Std, ReadChunk};
+use nitori_io::{adapters::Chunked, bridge::Std, PollReadExt};
 use std::{io::Cursor, num::NonZeroUsize, pin::Pin, task::{Context, Poll, Waker}};
 
 let mut io = Chunked::new(
@@ -176,8 +185,8 @@ fails locally. Empty basic reads do not establish EOF.
 Chunk sequences yield one nonempty bounded chunk per resumption and never collect
 the whole sequence. Use `BoundCall` as a Stream or its pinned `next()` method to
 receive `CoroutineState::Yielded` followed by one `Complete` event. Directly
-awaiting a BoundCall discards yields. Virtual forwarding of yielding child calls
-is not yet supported by `nitori_call`.
+awaiting a BoundCall discards yields. Inside a call, pin the child and await `child.as_mut().next()` to relay its
+yields and observe its completion.
 
 `helpers::poll_read_from_chunk` copies a single bounded chunk into the destination.
 The host must perform its terminal-error checks before delegating, especially
@@ -197,7 +206,7 @@ remain outside this first implementation.
 
 From the repository root, run the checks listed in the root README. The focused
 suite is `cargo +nightly test --locked -p nitori_io`; it includes real BoundCall
-execution, virtual macro calls, Pending/wakeup behavior, typed errors, buffer
+execution, family macro calls, Pending/wakeup behavior, typed errors, buffer
 ownership, cancellation, conversion helpers, and numeric decoding.
 
 For the optional bridges, also run `cargo +nightly test --locked -p nitori_io --features tokio`, `cargo +nightly test --locked -p nitori_io --features futures`,

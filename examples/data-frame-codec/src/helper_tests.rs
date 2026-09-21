@@ -1,7 +1,10 @@
-use crate::current_codec::{CodecError, ReadDataFrameExt, ReadSource, ReadVarintExt};
+use crate::current_codec::{
+    CodecError, ReadDataFrameExt, ReadSource, ReadSourceExt as _, ReadVarintExt,
+};
 use bytes::Bytes;
 use nitori_call::call;
 use nitori_call::{CallOn, Stream};
+use nitori_call::{PollCallExt as _, ReceiverExt as _};
 use std::{
     cell::{Cell, RefCell},
     future::Future,
@@ -28,22 +31,26 @@ impl Memory {
     }
 }
 impl ReadSource for Memory {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
+    fn poll_read<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         maximum: NonZeroUsize,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>> {
-        self.polls.set(self.polls.get() + 1);
-        if self.wait {
-            self.wait = false;
+    ) -> Poll<Result<Option<Bytes>, CodecError>>
+    where
+        Self: 'visit,
+    {
+        let mut this = host.get_mut().0.as_mut();
+        this.polls.set(this.polls.get() + 1);
+        if this.wait {
+            this.wait = false;
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
-        let count = self.bytes.len().min(maximum.get());
+        let count = this.bytes.len().min(maximum.get());
         Poll::Ready(Ok(if count == 0 {
             None
         } else {
-            Some(self.bytes.split_to(count))
+            Some(this.bytes.split_to(count))
         }))
     }
 }
@@ -63,12 +70,16 @@ struct PinnedMemory {
     _pin: PhantomPinned,
 }
 impl ReadSource for PinnedMemory {
-    fn poll_read(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         maximum: NonZeroUsize,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>> {
-        Pin::new(&mut *self.inner.borrow_mut()).poll_read(maximum, cx)
+    ) -> Poll<Result<Option<Bytes>, CodecError>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        Pin::new(&mut *this.inner.borrow_mut()).poll_read(maximum, cx)
     }
 }
 #[test]
@@ -82,7 +93,8 @@ fn pinned_helper_supports_non_unpin_and_dyn_targets() {
         let mut future = pin!(source.as_mut().read_varint());
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(1))));
     }
-    let erased: Pin<&mut dyn ReadSource> = source.as_mut();
+    let mut view = nitori_call::Host::view(source.as_mut());
+    let erased = Pin::new(&mut view);
     let mut future = pin!(erased.read_varint());
     assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(2))));
 }
@@ -159,15 +171,19 @@ impl Drop for DropGuard {
     }
 }
 #[call]
-async fn wait_forever(io: Pin<&mut usize>, guard: DropGuard) {
-    io.with(|mut target| *target += 1);
+async fn wait_forever(io: nitori_call::Receiver<nitori_call::Direct<usize>>, guard: DropGuard) {
+    io.with(|__access| {
+        let mut target = __access.into_pin().get_mut().0.as_mut();
+        *target += 1
+    })
+    .await;
     std::future::pending::<()>().await;
     drop(guard);
 }
 #[test]
 fn helper_cancellation_drops_operation_without_revisiting_target() {
     let drops = Rc::new(Cell::new(0));
-    let mut target = 0;
+    let mut target = 0usize;
     let mut cx = Context::from_waker(Waker::noop());
     {
         let mut future = pin!(target.wait_forever_unpin(DropGuard(drops.clone())));
@@ -188,17 +204,22 @@ impl Fallible for usize {
 }
 #[call(yields = &'data str)]
 async fn generic_helper<'data, T: Fallible + ?Sized, const EXTRA: usize>(
-    io: Pin<&mut T>,
+    io: nitori_call::Receiver<nitori_call::Direct<T>>,
     text: &'data str,
 ) -> Result<usize, T::Error> {
     yield text;
-    io.with(|target| target.get()).map(|value| value + EXTRA)
+    io.with(|__access| {
+        let target = __access.into_pin().get_mut().0.as_mut();
+        target.get()
+    })
+    .await
+    .map(|value| value + EXTRA)
 }
 #[test]
 fn helper_preserves_lifetimes_const_arguments_and_target_errors() {
     let text = String::from("borrowed");
     let mut target = 4usize;
-    let mut stream = pin!(<usize as GenericHelperExt<3>>::generic_helper_unpin(
+    let mut stream = pin!(<usize as GenericHelperExt<usize, 3>>::generic_helper_unpin(
         &mut target,
         &text
     ));
@@ -214,15 +235,18 @@ fn helper_preserves_lifetimes_const_arguments_and_target_errors() {
 }
 // The new contract permits target-dependent signatures on one operation type.
 struct Identity;
-impl<T: Copy> CallOn<T> for Identity {
+impl<T: Copy> CallOn<nitori_call::Direct<T>> for Identity {
     type Yield = std::convert::Infallible;
     type Return = T;
-    fn poll_call(
+    fn poll_call<'v>(
         self: Pin<&mut Self>,
-        target: Pin<&mut T>,
+        target: Pin<&mut nitori_call::DirectView<'v, T>>,
         _: &mut Context<'_>,
-    ) -> Poll<CoroutineState<Self::Yield, T>> {
-        Poll::Ready(CoroutineState::Complete(*target))
+    ) -> Poll<CoroutineState<Self::Yield, T>>
+    where
+        nitori_call::Direct<T>: 'v,
+    {
+        Poll::Ready(CoroutineState::Complete(*target.get_mut().0))
     }
 }
 #[test]
@@ -231,23 +255,27 @@ fn one_operation_type_has_a_signature_for_each_target() {
     let mut number = 7u32;
     let mut flag = true;
     assert_eq!(
-        Pin::new(&mut Identity).poll_call(Pin::new(&mut number), &mut cx),
+        Pin::new(&mut Identity).poll_host(Pin::new(&mut number), &mut cx),
         Poll::Ready(CoroutineState::Complete(7))
     );
     assert_eq!(
-        Pin::new(&mut Identity).poll_call(Pin::new(&mut flag), &mut cx),
+        Pin::new(&mut Identity).poll_host(Pin::new(&mut flag), &mut cx),
         Poll::Ready(CoroutineState::Complete(true))
     );
 }
 
-impl crate::current_codec::WriteSink<Bytes> for Vec<u8> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
+impl crate::current_codec::WriteSink<Bytes> for nitori_call::Direct<Vec<u8>> {
+    fn poll_write<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         input: &mut Bytes,
         _: &mut Context<'_>,
-    ) -> Poll<Result<usize, CodecError>> {
+    ) -> Poll<Result<usize, CodecError>>
+    where
+        Self: 'visit,
+    {
+        let mut this = host.get_mut().0.as_mut();
         let chunk = input.split_to(input.len().min(1));
-        self.extend_from_slice(&chunk);
+        this.extend_from_slice(&chunk);
         Poll::Ready(Ok(chunk.len()))
     }
 }
@@ -269,7 +297,7 @@ fn write_helper_infers_input_generic_and_preserves_owned_result() {
     assert_eq!(target, b"abc");
 }
 
-async fn through_trait_only<T: ReadVarintExt + ?Sized>(
+async fn through_trait_only<F: ReadSource, T: ReadVarintExt<F> + ?Sized>(
     target: Pin<&mut T>,
 ) -> Result<u64, CodecError> {
     target.read_varint().await
@@ -316,9 +344,16 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
     assert_eq!(source.bytes.as_ref(), b"\0\0");
 }
 
-async fn write_through_trait_only<T: crate::current_codec::WriteAllExt<Bytes> + ?Sized + Unpin>(
+async fn write_through_trait_only<
+    F: crate::current_codec::WriteSink<Bytes>,
+    T: crate::current_codec::WriteAllExt<F, Bytes> + ?Sized + Unpin,
+>(
     target: &mut T,
     input: Bytes,
 ) -> crate::current_codec::WriteReturn<Bytes> {
     target.write_all_unpin(input).await
 }
+
+nitori_call::family_host!(impl [] for Memory);
+
+nitori_call::family_host!(impl [] for PinnedMemory);

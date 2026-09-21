@@ -9,3 +9,10 @@ license = "Apache-2.0 OR MIT"
 pin-project-lite = "0.2.17"
 futures-core = "0.3.32"
 nitori_call_macros = { path = "../nitori_call_macros" }
+
+[features]
+bytes = ["dep:bytes"]
+
+[dependencies.bytes]
+version = "1.11"
+optional = true

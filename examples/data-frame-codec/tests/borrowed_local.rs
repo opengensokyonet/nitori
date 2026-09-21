@@ -1,8 +1,10 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 
 use bytes::{Buf, Bytes};
-use nitori_call::{CallOn, call};
-use nitori_data_frame_codec_example::current_codec::{CodecError, Write, WriteSink};
+use nitori_call::PollCallExt as _;
+use nitori_call::call;
+use nitori_data_frame_codec_example::current_codec::ReceiverWriteExt as _;
+use nitori_data_frame_codec_example::current_codec::{CodecError, WriteSink};
 use std::{
     ops::CoroutineState,
     pin::{Pin, pin},
@@ -15,19 +17,23 @@ struct Output {
 }
 
 impl<Input: Buf + ?Sized> WriteSink<&mut Input> for Output {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
+    fn poll_write<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         input: &mut &mut Input,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<usize, CodecError>> {
-        if !self.waited {
-            self.waited = true;
+    ) -> Poll<Result<usize, CodecError>>
+    where
+        Self: 'visit,
+    {
+        let mut this = host.get_mut().0.as_mut();
+        if !this.waited {
+            this.waited = true;
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
-        self.waited = false;
+        this.waited = false;
         let count = input.chunk().len().min(2);
-        self.bytes.extend_from_slice(&input.chunk()[..count]);
+        this.bytes.extend_from_slice(&input.chunk()[..count]);
         input.advance(count);
         Poll::Ready(Ok(count))
     }
@@ -35,7 +41,7 @@ impl<Input: Buf + ?Sized> WriteSink<&mut Input> for Output {
 
 #[call]
 async fn write_local_buffer(
-    io: ::core::pin::Pin<&mut Output>,
+    io: nitori_call::Receiver<Output>,
 ) -> Result<(Bytes, usize, Bytes, usize), CodecError> {
     let mut buf = Bytes::from_static(b"abc");
     let returned = io.write(&mut buf).await;
@@ -57,19 +63,19 @@ fn named_call_reborrows_local_buf_across_pending() {
     assert!(
         operation
             .as_mut()
-            .poll_call(Pin::new(&mut output), &mut cx)
+            .poll_host(Pin::new(&mut output), &mut cx)
             .is_pending()
     );
     assert!(output.bytes.is_empty());
     assert!(
         operation
             .as_mut()
-            .poll_call(Pin::new(&mut output), &mut cx)
+            .poll_host(Pin::new(&mut output), &mut cx)
             .is_pending()
     );
     assert_eq!(output.bytes, b"ab");
     let Poll::Ready(CoroutineState::Complete(Ok((buf, first_count, tail, second_count)))) =
-        operation.as_mut().poll_call(Pin::new(&mut output), &mut cx)
+        operation.as_mut().poll_host(Pin::new(&mut output), &mut cx)
     else {
         panic!("expected completion")
     };
@@ -79,3 +85,5 @@ fn named_call_reborrows_local_buf_across_pending() {
     assert!(buf.is_empty());
     assert_eq!(output.bytes, b"abc");
 }
+
+nitori_call::family_host!(impl [] for Output);

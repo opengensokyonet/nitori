@@ -18,15 +18,6 @@ fn camel(name: &str) -> String {
         })
         .collect()
 }
-fn constructor(ty: &TypePath) -> Tokens {
-    let mut path = ty.path.clone();
-    for segment in &mut path.segments {
-        if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
-            arguments.colon2_token = Some(Default::default());
-        }
-    }
-    quote!(#path::new)
-}
 
 mod current;
 /// Define a named operation using the temporary resume environment.

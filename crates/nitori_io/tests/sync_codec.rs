@@ -1,8 +1,9 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 use nitori_call::{BoundCall, call};
+use nitori_io::{PollReadExt as _, ReceiverReadExt as _, ReceiverWriteExt as _};
 use nitori_io::{
     Read, Write,
-    calls::{ReadArray, ReadArrayError, WriteAll, WriteAllError, WriteReturn},
+    calls::{ReadArrayError, WriteAllError, WriteReturn},
 };
 use std::{
     future::Future,
@@ -12,23 +13,23 @@ use std::{
 };
 
 #[call(sync)]
-async fn header<Host: Read + ?Sized>(
-    io: Pin<&mut Host>,
+async fn header<Host: Read>(
+    io: nitori_call::Receiver<Host>,
 ) -> Result<[u8; 3], ReadArrayError<Host::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let rest = io.read_array::<2>().await?;
     Ok([tag, rest[0], rest[1]])
 }
 #[call(sync)]
-async fn encode<'input, Host: Write + ?Sized>(
-    io: Pin<&mut Host>,
+async fn encode<'input, Host: Write>(
+    io: nitori_call::Receiver<Host>,
     input: &'input [u8],
 ) -> WriteReturn<&'input [u8], WriteAllError<Host::Error>> {
     io.write_all(input).await
 }
 #[call(sync, yields = [u8; 3])]
-async fn headers<Host: Read + ?Sized>(
-    io: Pin<&mut Host>,
+async fn headers<Host: Read>(
+    io: nitori_call::Receiver<Host>,
     count: usize,
 ) -> Result<(), ReadArrayError<Host::Error>> {
     for _ in 0..count {
@@ -70,18 +71,22 @@ struct Delayed<'a> {
 }
 impl Read for Delayed<'_> {
     type Error = std::convert::Infallible;
-    fn poll_read<Output: bytes::BufMut + ?Sized>(
-        mut self: Pin<&mut Self>,
+    fn poll_read<'visit, Output: bytes::BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Self::Error>> {
-        if !self.waiting {
-            self.waiting = true;
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let mut this = host.get_mut().0.as_mut();
+        if !this.waiting {
+            this.waiting = true;
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
-        self.waiting = false;
-        Pin::new(&mut self.source).poll_read(cx, destination)
+        this.waiting = false;
+        Pin::new(&mut this.source).poll_read(cx, destination)
     }
 }
 #[test]
@@ -96,3 +101,5 @@ fn same_codec_can_resume_on_async_host() {
     assert!(call.as_mut().poll(&mut cx).is_pending());
     assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(value)) if value == *b"abc"));
 }
+
+nitori_call::family_host!(impl ['data] for Delayed<'data>);

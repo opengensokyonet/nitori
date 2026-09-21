@@ -1,5 +1,5 @@
 //! Host-free operation values and type-directed awaiting.
-use crate::CallOn;
+use crate::{CallOn, HostFamily};
 use std::{
     future::{Future, IntoFuture},
     marker::PhantomData,
@@ -8,50 +8,37 @@ use std::{
     task::{Context, Poll},
 };
 
-/// A real, reborrowable host binding used outside virtual call bodies.
-pub struct Receiver<'host, H: ?Sized> {
-    host: Pin<&'host mut H>,
-}
-impl<'host, H: ?Sized> Receiver<'host, H> {
-    pub fn from_pin(host: Pin<&'host mut H>) -> Self {
-        Self { host }
-    }
-    pub fn from_mut(host: &'host mut H) -> Self
-    where
-        H: Unpin,
-    {
-        Self::from_pin(Pin::new(host))
-    }
-    pub fn as_ref(&self) -> Pin<&H> {
-        self.host.as_ref()
-    }
-    pub fn as_mut(&mut self) -> Pin<&mut H> {
-        self.host.as_mut()
-    }
-    pub fn with<R>(&mut self, body: impl for<'a> FnOnce(Pin<&'a mut H>) -> R) -> R {
-        body(self.host.as_mut())
-    }
-}
-
 /// Poll an awaitable using a fresh Host borrow and task context.
 /// Successive polls must use the logical Host resources required by the operation.
-pub trait AwaitOn<H: ?Sized> {
+pub trait AwaitOn<H: HostFamily> {
     type Output;
-    fn poll_on(self: Pin<&mut Self>, host: Pin<&mut H>, cx: &mut Context<'_>)
-    -> Poll<Self::Output>;
+    fn poll_on<'visit>(
+        self: Pin<&mut Self>,
+        host: Pin<&mut H::Host<'visit>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Self::Output>
+    where
+        H: 'visit;
 }
-impl<H: ?Sized, F: Future> AwaitOn<H> for F {
+impl<H: HostFamily, F: Future> AwaitOn<H> for F {
     type Output = F::Output;
-    fn poll_on(self: Pin<&mut Self>, _: Pin<&mut H>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll_on<'visit>(
+        self: Pin<&mut Self>,
+        _: Pin<&mut H::Host<'visit>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Self::Output>
+    where
+        H: 'visit,
+    {
         self.poll(cx)
     }
 }
 /// Convert standard futures or owned host-aware values for a call await.
-pub trait IntoAwaitOn<H: ?Sized> {
+pub trait IntoAwaitOn<H: HostFamily> {
     type Awaitable: AwaitOn<H>;
     fn into_await_on(self) -> Self::Awaitable;
 }
-impl<H: ?Sized, F: IntoFuture> IntoAwaitOn<H> for F {
+impl<H: HostFamily, F: IntoFuture> IntoAwaitOn<H> for F {
     type Awaitable = F::IntoFuture;
     fn into_await_on(self) -> Self::Awaitable {
         self.into_future()
@@ -59,13 +46,13 @@ impl<H: ?Sized, F: IntoFuture> IntoAwaitOn<H> for F {
 }
 pin_project_lite::pin_project! {
  /// An owned operation with no Host borrow; pin before requesting events.
- pub struct Child<H:?Sized,O>{
+ pub struct Child<H: HostFamily,O>{
   #[pin] operation:O,
   terminal:bool,
   marker:PhantomData<fn(*mut H)->*mut H>,
  }
 }
-impl<H: ?Sized, O: CallOn<H>> Child<H, O> {
+impl<H: HostFamily, O: CallOn<H>> Child<H, O> {
     pub fn new(operation: O) -> Self {
         Self {
             operation,
@@ -79,11 +66,14 @@ impl<H: ?Sized, O: CallOn<H>> Child<H, O> {
             terminal: false,
         }
     }
-    fn poll_event(
+    fn poll_event<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<CoroutineState<O::Yield, O::Return>>> {
+    ) -> Poll<Option<CoroutineState<O::Yield, O::Return>>>
+    where
+        H: 'visit,
+    {
         let this = self.project();
         if *this.terminal {
             return Poll::Ready(None);
@@ -103,19 +93,22 @@ impl<H: ?Sized, O: CallOn<H>> Child<H, O> {
         }
     }
 }
-impl<H: ?Sized, O: CallOn<H>> IntoAwaitOn<H> for Child<H, O> {
+impl<H: HostFamily, O: CallOn<H>> IntoAwaitOn<H> for Child<H, O> {
     type Awaitable = Self;
     fn into_await_on(self) -> Self {
         self
     }
 }
-impl<H: ?Sized, O: CallOn<H>> AwaitOn<H> for Child<H, O> {
+impl<H: HostFamily, O: CallOn<H>> AwaitOn<H> for Child<H, O> {
     type Output = O::Return;
-    fn poll_on(
+    fn poll_on<'visit>(
         mut self: Pin<&mut Self>,
-        mut host: Pin<&mut H>,
+        mut host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
+    ) -> Poll<Self::Output>
+    where
+        H: 'visit,
+    {
         loop {
             match self.as_mut().poll_event(host.as_mut(), cx) {
                 Poll::Pending => return Poll::Pending,
@@ -127,24 +120,27 @@ impl<H: ?Sized, O: CallOn<H>> AwaitOn<H> for Child<H, O> {
     }
 }
 /// A single event request borrowing a pinned child; not a standard Future.
-pub struct Next<'a, H: ?Sized, O> {
+pub struct Next<'a, H: HostFamily, O> {
     child: Pin<&'a mut Child<H, O>>,
     terminal: bool,
 }
-impl<H: ?Sized, O> Unpin for Next<'_, H, O> {}
-impl<H: ?Sized, O: CallOn<H>> IntoAwaitOn<H> for Next<'_, H, O> {
+impl<H: HostFamily, O> Unpin for Next<'_, H, O> {}
+impl<H: HostFamily, O: CallOn<H>> IntoAwaitOn<H> for Next<'_, H, O> {
     type Awaitable = Self;
     fn into_await_on(self) -> Self {
         self
     }
 }
-impl<H: ?Sized, O: CallOn<H>> AwaitOn<H> for Next<'_, H, O> {
+impl<H: HostFamily, O: CallOn<H>> AwaitOn<H> for Next<'_, H, O> {
     type Output = Option<CoroutineState<O::Yield, O::Return>>;
-    fn poll_on(
+    fn poll_on<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
+    ) -> Poll<Self::Output>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
         assert!(!this.terminal, "next awaited after completion or panic");
         this.terminal = true;

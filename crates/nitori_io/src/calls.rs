@@ -1,4 +1,4 @@
-//! Operations for `CallOn`. Import their type names at `#[call]` use sites.
+//! Operations for family-based `CallOn`. Receiver methods are exported by the crate.
 //!
 //! Constructors only capture arguments; all checks and IO happen when polled.
 //! A completed operation must not be polled again. Derived operations preserve

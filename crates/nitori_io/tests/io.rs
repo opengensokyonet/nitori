@@ -6,6 +6,7 @@
 )]
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nitori_call::{BoundCall, call};
+use nitori_io::{PollReadExt as _, ReceiverReadExt as _, ReceiverWriteExt as _};
 use nitori_io::{
     Read as ReadHost, ReadChunk as ChunkHost, Write as WriteHost,
     calls::*,
@@ -90,12 +91,16 @@ impl Source {
 }
 impl ReadHost for Source {
     type Error = io::Error;
-    fn poll_read<B: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, B: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         mut out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        let this = self.get_mut();
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let this = this.get_mut();
         std::task::ready!(this.ready(cx))?;
         let count = out
             .remaining_mut()
@@ -110,25 +115,33 @@ impl ReadHost for Source {
 struct ChunkSource(Source);
 impl ReadHost for ChunkSource {
     type Error = io::Error;
-    fn poll_read<B: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, B: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        if self.0.fail_at.is_some_and(|at| self.0.consumed >= at) {
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        if this.0.fail_at.is_some_and(|at| this.0.consumed >= at) {
             return Poll::Ready(Err(io::Error::other("source failure")));
         }
-        poll_read_from_chunk(self, cx, out)
+        poll_read_from_chunk(this, cx, out)
     }
 }
 impl ChunkHost for ChunkSource {
     type Chunk = Bytes;
-    fn poll_read_chunk(
-        self: Pin<&mut Self>,
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>> {
-        let this = &mut self.get_mut().0;
+    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let this = &mut this.get_mut().0;
         std::task::ready!(this.ready(cx))?;
         let count = maximum
             .get()
@@ -160,12 +173,16 @@ impl Sink {
 }
 impl WriteHost for Sink {
     type Error = io::Error;
-    fn poll_write<B: Buf + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_write<'visit, B: Buf + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         input: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        let this = self.get_mut();
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        let this = this.get_mut();
         if this.fail_at.is_some_and(|at| this.bytes.len() >= at) {
             return Poll::Ready(Err(io::Error::other("sink failure")));
         }
@@ -421,8 +438,8 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
 }
 
 #[call]
-async fn local_codec<H: ReadHost + ?Sized>(
-    io: Pin<&mut H>,
+async fn local_codec<H: ReadHost>(
+    io: nitori_call::Receiver<H>,
 ) -> Result<[u8; 3], nitori_io::calls::ReadExactError<H::Error>> {
     let [first] = io.read_array::<1>().await?;
     let mut rest = [0; 2];
@@ -431,13 +448,13 @@ async fn local_codec<H: ReadHost + ?Sized>(
     Ok([first, rest[0], rest[1]])
 }
 #[call]
-async fn number_codec<H: ReadHost + ?Sized>(
-    io: Pin<&mut H>,
+async fn number_codec<H: ReadHost>(
+    io: nitori_call::Receiver<H>,
 ) -> Result<u32, nitori_io::calls::ReadLeError<H::Error>> {
     io.read_le::<u32>().await
 }
 #[test]
-fn virtual_calls_capture_local_buffers_across_pending() {
+fn family_calls_capture_local_buffers_across_pending() {
     let mut source = Source::new(b"abc");
     assert_eq!(
         run(BoundCall::new(
@@ -668,12 +685,16 @@ pin_project_lite::pin_project! {
 }
 impl ReadHost for PinnedHost {
     type Error = io::Error;
-    fn poll_read<B: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, B: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        Pin::new(self.project().inner).poll_read(cx, destination)
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        Pin::new(this.project().inner).poll_read(cx, destination)
     }
 }
 #[test]
@@ -691,12 +712,16 @@ fn host_does_not_need_unpin() {
 struct BorrowedErrorHost<'a>(&'a str);
 impl<'a> ReadHost for BorrowedErrorHost<'a> {
     type Error = &'a str;
-    fn poll_read<B: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, B: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        Poll::Ready(Err(self.0))
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        Poll::Ready(Err(this.0))
     }
 }
 #[test]
@@ -708,15 +733,15 @@ fn host_errors_need_neither_error_trait_nor_static_lifetime() {
 }
 
 #[call]
-async fn borrowed_write<H: WriteHost + ?Sized>(
-    io: Pin<&mut H>,
+async fn borrowed_write<H: WriteHost>(
+    io: nitori_call::Receiver<H>,
 ) -> Result<usize, nitori_io::calls::WriteAllError<H::Error>> {
     let mut input = Bytes::from_static(b"abc");
     let returned = io.write_all(&mut input).await;
     returned.result
 }
 #[test]
-fn virtual_write_borrows_local_input() {
+fn family_write_borrows_local_input() {
     let mut host = Sink::new();
     assert_eq!(
         run(BoundCall::new(
@@ -736,32 +761,44 @@ struct RawHost<'a> {
 }
 impl<'a> ReadHost for RawHost<'a> {
     type Error = RawFailure<'a>;
-    fn poll_read<B: BufMut + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_read<'visit, B: BufMut + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        Poll::Ready(self.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        Poll::Ready(this.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
     }
 }
 impl ChunkHost for RawHost<'_> {
     type Chunk = Bytes;
-    fn poll_read_chunk(
-        self: Pin<&mut Self>,
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::Host<'visit>>,
         _: &mut Context<'_>,
         _: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>> {
-        Poll::Ready(self.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
+    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        Poll::Ready(this.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
     }
 }
 impl<'a> WriteHost for RawHost<'a> {
     type Error = RawFailure<'a>;
-    fn poll_write<B: Buf + ?Sized>(
-        self: Pin<&mut Self>,
+    fn poll_write<'visit, B: Buf + ?Sized>(
+        host: Pin<&mut Self::Host<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Self::Error>> {
-        Poll::Ready(self.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let this = host.get_mut().0.as_mut();
+        Poll::Ready(this.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
     }
 }
 
@@ -895,3 +932,15 @@ fn numeric_errors_preserve_progress_and_original_source() {
     check!(ReadLe::<u32>::new(), ReadLeError);
     check!(ReadBe::<u32>::new(), ReadBeError);
 }
+
+nitori_call::family_host!(impl [] for Source);
+
+nitori_call::family_host!(impl [] for ChunkSource);
+
+nitori_call::family_host!(impl [] for Sink);
+
+nitori_call::family_host!(impl [] for PinnedHost);
+
+nitori_call::family_host!(impl ['a] for BorrowedErrorHost<'a>);
+
+nitori_call::family_host!(impl ['a] for RawHost<'a>);

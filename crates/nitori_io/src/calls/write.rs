@@ -1,5 +1,6 @@
 //! Write operations and their operation-specific failures.
 use super::Step;
+use crate::PollWriteExt as _;
 use crate::{
     Write as WriteHost,
     error::{self, WriteZero},
@@ -30,14 +31,17 @@ impl<B: Buf> Write<B> {
         Self(Some(input))
     }
 }
-impl<H: WriteHost + ?Sized, B: Buf> CallOn<H> for Write<B> {
+impl<H: WriteHost, B: Buf> CallOn<H> for Write<B> {
     type Yield = Infallible;
     type Return = WriteReturn<B, H::Error>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H>,
+        host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let input = &mut self.get_mut().0;
         let result = ready!(host.poll_write(cx, input.as_mut().expect("completed write")));
         Poll::Ready(Complete(WriteReturn {
@@ -89,14 +93,17 @@ impl<B: Buf> WriteAll<B> {
         }
     }
 }
-impl<H: WriteHost + ?Sized, B: Buf> CallOn<H> for WriteAll<B> {
+impl<H: WriteHost, B: Buf> CallOn<H> for WriteAll<B> {
     type Yield = Infallible;
     type Return = WriteReturn<B, WriteAllError<H::Error>>;
-    fn poll_call(
+    fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        mut host: Pin<&mut H>,
+        mut host: Pin<&mut H::Host<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Step<Self::Yield, Self::Return> {
+    ) -> Step<Self::Yield, Self::Return>
+    where
+        H: 'visit,
+    {
         let this = self.get_mut();
         let result = loop {
             let input = this.input.as_mut().expect("completed write all");

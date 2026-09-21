@@ -4,12 +4,11 @@
 #[doc(hidden)]
 pub use pin_project_lite::pin_project;
 
-use crate::CallOn;
+use crate::{CallOn, HostFamily};
 use std::{
     marker::PhantomData,
     ops::{Coroutine, CoroutineState},
     pin::Pin,
-    ptr::NonNull,
     task::{Context, Poll},
 };
 
@@ -30,74 +29,72 @@ impl<Item> Suspension for Suspend<Item> {
     }
 }
 
-/// Opaque, inert pointers. No safe API dereferences these pointers.
-/// The macro consumes this value before every suspension.
-#[doc(hidden)]
-pub struct ResumeEnv<Host: ?Sized> {
-    host: NonNull<Host>,
-    context: NonNull<Context<'static>>,
+/// An inert current-resume dispatch token. Never exposed by the macros.
+pub struct ResumeEnv<F: HostFamily> {
+    slot: *mut (),
+    dispatch: unsafe fn(*mut (), &mut dyn Request<F>),
 }
-// SAFETY: carrying inert pointer bits does not access their pointees. Every
-// dereferencing method is unsafe and requires same-thread, current-resume use.
-// A safe generated call never exposes this value or sends it while active.
-unsafe impl<Host: ?Sized> Send for ResumeEnv<Host> {}
-// SAFETY: shared access cannot dereference anything through a safe method.
-// Unsafe methods require exclusive &mut access and the current resume scope.
-unsafe impl<Host: ?Sized> Sync for ResumeEnv<Host> {}
-impl<Host: ?Sized> ResumeEnv<Host> {
-    /// Consume the current environment before suspending; does not dereference it.
-    pub fn end(self) {}
-    unsafe fn enter<Output>(
-        &mut self,
-        body: impl for<'visit, 'waker> FnOnce(
-            Pin<&'visit mut Host>,
-            &'visit mut Context<'waker>,
-        ) -> Output,
-    ) -> Output {
-        // SAFETY: callers uphold the current-resume/exclusivity contract below.
-        // The HRTB prevents the fresh host/context borrows from escaping.
-        unsafe {
-            body(
-                Pin::new_unchecked(self.host.as_mut()),
-                &mut *self.context.as_ptr().cast::<Context<'_>>(),
-            )
-        }
+// SAFETY: pointers are inert; only unsafe current-resume methods access them.
+unsafe impl<F: HostFamily> Send for ResumeEnv<F> {}
+// SAFETY: no safe method accesses the pointee; dispatch requires exclusivity.
+unsafe impl<F: HostFamily> Sync for ResumeEnv<F> {}
+trait Request<F: HostFamily> {
+    fn execute<'host>(&mut self, host: Pin<&mut F::Host<'host>>, cx: &mut Context<'_>)
+    where
+        F: 'host;
+}
+struct PollRequest<'a, F: HostFamily, A: crate::AwaitOn<F> + ?Sized> {
+    value: Pin<&'a mut A>,
+    result: Option<Poll<A::Output>>,
+}
+impl<F: HostFamily, A: crate::AwaitOn<F> + ?Sized> Request<F> for PollRequest<'_, F, A> {
+    fn execute<'host>(&mut self, host: Pin<&mut F::Host<'host>>, cx: &mut Context<'_>)
+    where
+        F: 'host,
+    {
+        self.result = Some(self.value.as_mut().poll_on(host, cx));
     }
-    pub fn prepare_await<A: crate::IntoAwaitOn<Host>>(&self, value: A) -> A::Awaitable {
+}
+struct Slot<'access, 'host, 'waker, F: HostFamily + 'host> {
+    host: Pin<&'access mut F::Host<'host>>,
+    cx: &'access mut Context<'waker>,
+}
+struct Dispatcher<'host, F: HostFamily + 'host>(PhantomData<&'host F>);
+impl<'host, F: HostFamily + 'host> Dispatcher<'host, F> {
+    unsafe fn dispatch(slot: *mut (), request: &mut dyn Request<F>) {
+        // SAFETY: created for this exact host lifetime by poll_call, used only
+        // during its synchronous resume. Neither reference escapes execute.
+        let slot = unsafe { &mut *slot.cast::<Slot<'_, 'host, '_, F>>() };
+        request.execute(slot.host.as_mut(), slot.cx);
+    }
+}
+impl<F: HostFamily> ResumeEnv<F> {
+    pub fn end(self) {}
+    pub fn receiver(&self) -> crate::Receiver<F> {
+        crate::Receiver::new()
+    }
+    pub fn prepare_await<A: crate::IntoAwaitOn<F>>(&self, value: A) -> A::Awaitable {
         value.into_await_on()
     }
     /// # Safety
-    /// Must run synchronously on the thread of the resume that supplied self,
-    /// before that resume ends. No overlapping use of its host/context is
-    /// allowed. The environment must not be accessed from captured user code.
-    pub unsafe fn with<Output>(
-        &mut self,
-        body: impl for<'visit> FnOnce(Pin<&'visit mut Host>) -> Output,
-    ) -> Output {
-        // SAFETY: propagated from this method's caller; references remain local.
-        unsafe { self.enter(|host, _| body(host)) }
-    }
-    /// # Safety
-    /// Same current-resume and exclusive-access requirements as with.
-    pub unsafe fn poll_await<A: crate::AwaitOn<Host> + ?Sized>(
+    /// Use only on the supplying resume's thread, before it returns, with no
+    /// overlapping access. Never retain or expose the token across suspension.
+    pub unsafe fn poll_await<A: crate::AwaitOn<F> + ?Sized>(
         &mut self,
         value: Pin<&mut A>,
     ) -> Poll<A::Output> {
-        // SAFETY: the caller supplies the current exclusive resume access.
-        unsafe { self.enter(|host, cx| value.poll_on(host, cx)) }
+        let mut request = PollRequest::<F, A> {
+            value,
+            result: None,
+        };
+        // SAFETY: caller guarantees current-resume exclusive access.
+        unsafe { (self.dispatch)(self.slot, &mut request) };
+        request.result.expect("resume dispatch completed")
     }
-}
-/// Supply the callback's expected type without borrowing a resume environment.
-#[doc(hidden)]
-pub fn prepare<Host: ?Sized, Output, Body>(body: Body) -> Body
-where
-    Body: for<'visit> FnOnce(Pin<&'visit mut Host>) -> Output,
-{
-    body
 }
 pin_project_lite::pin_project! {
     /// Only the compiler-generated persistent state and completion flag are retained.
-    pub struct StackCall<Host: ?Sized, State> {
+    pub struct StackCall<Host: HostFamily, State> {
         #[pin]
         state: State,
         terminal: bool,
@@ -114,7 +111,7 @@ pin_project_lite::pin_project! {
 /// unsafe context from generated helper calls. The call macros enforce these rules
 /// by hiding the environment and rejecting opaque suspension-generating syntax.
 #[doc(hidden)]
-pub unsafe fn build<Host: ?Sized, State, Item>(state: State) -> StackCall<Host, State>
+pub unsafe fn build<Host: HostFamily, State, Item>(state: State) -> StackCall<Host, State>
 where
     State: Coroutine<ResumeEnv<Host>, Yield = Suspend<Item>>,
 {
@@ -125,7 +122,7 @@ where
 ///
 /// # Safety
 /// The caller must uphold exactly the same resume-environment contract as build.
-pub unsafe fn build_mapped<Host: ?Sized, State>(state: State) -> StackCall<Host, State>
+pub unsafe fn build_mapped<Host: HostFamily, State>(state: State) -> StackCall<Host, State>
 where
     State: Coroutine<ResumeEnv<Host>>,
     State::Yield: Suspension,
@@ -136,25 +133,28 @@ where
         marker: PhantomData,
     }
 }
-impl<Host: ?Sized, State, Item> CallOn<Host> for StackCall<Host, State>
+impl<Host: HostFamily, State, Item> CallOn<Host> for StackCall<Host, State>
 where
     State: Coroutine<ResumeEnv<Host>>,
     State::Yield: Suspension<Item = Item>,
 {
     type Yield = Item;
     type Return = State::Return;
-    fn poll_call(
+    fn poll_call<'host>(
         self: Pin<&mut Self>,
-        host: Pin<&mut Host>,
+        host: Pin<&mut Host::Host<'host>>,
         cx: &mut Context<'_>,
-    ) -> Poll<CoroutineState<Item, State::Return>> {
+    ) -> Poll<CoroutineState<Item, State::Return>>
+    where
+        Host: 'host,
+    {
         let this = self.project();
         assert!(!*this.terminal, "call polled after completion or panic");
         *this.terminal = true;
+        let mut slot = Slot::<Host> { host, cx };
         let environment = ResumeEnv {
-            // SAFETY: only extract the pointer, preserving the host's pinning.
-            host: NonNull::from(unsafe { host.get_unchecked_mut() }),
-            context: NonNull::from(cx).cast(),
+            slot: (&mut slot as *mut Slot<'_, 'host, '_, Host>).cast(),
+            dispatch: Dispatcher::<'host, Host>::dispatch,
         };
         // build's contract ensures environment access ends before resume returns.
         let state = this.state.resume(environment);
