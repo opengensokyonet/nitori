@@ -570,10 +570,27 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
             use super::*;
             pub type State #implementation #constraints = impl ::core::ops::Coroutine<
                 ::nitori_call::__private::ResumeEnv<#host>,
-                Yield=::nitori_call::__private::Suspend<#item_type>, Return=#output>;
+                Yield=__Yield #types, Return=__Return #types>;
             #[define_opaque(State)]
             pub(super) fn make #implementation (#arguments) -> State #types #constraints {
-                #coroutine
+                ::nitori_call::__private::map_coroutine(#coroutine,
+                    |value| -> __Yield #types { __Yield { value, marker: ::core::marker::PhantomData } },
+                    |value| -> __Return #types { __Return { value, marker: ::core::marker::PhantomData } })
+            }
+            // Keep another operation's opaque state out of the State TAIT's
+            // associated Yield/Return constraints. A nominal boundary avoids rustc's
+            // E0282 for TAIT bounds containing another opaque type.
+            #operation_visibility struct __Return #implementation #constraints {
+                pub(super) value: #output,
+                marker: ::core::marker::PhantomData<fn() -> __Parameters #types>,
+            }
+            #operation_visibility struct __Yield #implementation #constraints {
+                value: ::nitori_call::__private::Suspend<#item_type>,
+                marker: ::core::marker::PhantomData<fn() -> __Parameters #types>,
+            }
+            impl #implementation ::nitori_call::__private::Suspension for __Yield #types #constraints {
+                type Item = #item_type;
+                fn into_suspend(self) -> ::nitori_call::__private::Suspend<Self::Item> { self.value }
             }
             // Keep user generics outside pin-project-lite's restricted parser.
             // Parameters makes every lifetime/type/const parameter nominally
@@ -596,7 +613,7 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
         impl #implementation #call_name #types #constraints {
             #visibility fn new(#wrapper_arguments) -> Self {
                 let state = #module::make::<#(#parameters),*>(#(#names),*);
-                Self { inner: unsafe { ::nitori_call::__private::build(state) }, marker: ::core::marker::PhantomData }
+                Self { inner: unsafe { ::nitori_call::__private::build_mapped(state) }, marker: ::core::marker::PhantomData }
             }
         }
         #(#attributes)*
@@ -606,9 +623,13 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
         impl #implementation ::nitori_call::CallOn<#host> for #call_name #types #constraints {
             type Yield = #item_type;
             type Return = #output;
+            #[allow(unreachable_code)]
             fn poll_call(self: ::core::pin::Pin<&mut Self>, host: ::core::pin::Pin<&mut #host>, cx: &mut ::core::task::Context<'_>)
                 -> ::core::task::Poll<::core::ops::CoroutineState<Self::Yield, Self::Return>> {
-                ::nitori_call::CallOn::poll_call(self.project().inner, host, cx)
+                ::nitori_call::CallOn::poll_call(self.project().inner, host, cx).map(|event| match event {
+                    ::core::ops::CoroutineState::Yielded(value) => ::core::ops::CoroutineState::Yielded(value),
+                    ::core::ops::CoroutineState::Complete(value) => ::core::ops::CoroutineState::Complete(value.value),
+                })
             }
         }
         #helpers

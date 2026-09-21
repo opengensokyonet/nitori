@@ -278,3 +278,79 @@ fn generated_receiver_entries_support_reborrows_and_sync_events() {
     assert_eq!(events.as_mut().next(), Some(CoroutineState::Complete(2)));
     assert_eq!(events.as_mut().next(), None);
 }
+// Returns a real host-free child through a normal function/closure boundary.
+#[call]
+async fn escaped(io: Receiver<'_, Host>) -> nitori_call::Child<Host, Decode> {
+    let value: nitori_call::Child<Host, Decode> = io.decode(8);
+    value
+}
+#[call]
+async fn reentered(io: Receiver<'_, Host>) -> usize {
+    let value = io.escaped().await;
+    let factory = move || value;
+    factory().await
+}
+
+#[test]
+fn higher_order_call_returns_an_owned_child() {
+    check_discard(Reentered::new(), 10);
+}
+
+#[call]
+async fn input_factory<'data>(
+    io: Receiver<'_, Host>,
+    data: &'data mut [u8],
+) -> nitori_call::Child<Host, InputBuffer<'data>> {
+    io.input_buffer(data)
+}
+#[call]
+async fn higher_input(io: Receiver<'_, Host>) -> [u8; 2] {
+    let mut buffer = [0; 2];
+    let child = io.input_factory(&mut buffer).await;
+    child.await;
+    buffer
+}
+#[call(yields = nitori_call::Child<Host, Decode>)]
+async fn children(io: Receiver<'_, Host>) {
+    yield io.decode(1);
+    yield io.decode(4);
+}
+#[call]
+async fn flattened(io: Receiver<'_, Host>) -> usize {
+    let mut source = pin!(io.children());
+    let mut sum = 0;
+    while let Some(event) = source.as_mut().next().await {
+        match event {
+            CoroutineState::Yielded(child) => sum += child.await,
+            CoroutineState::Complete(()) => {}
+        }
+    }
+    sum
+}
+#[test]
+fn returned_child_keeps_borrowed_input_and_yielded_children_can_be_awaited() {
+    let mut host = pin!(host());
+    let mut input = pin!(HigherInput::new());
+    assert_eq!(
+        poll(input.as_mut(), host.as_mut(), Waker::noop()),
+        Poll::Pending
+    );
+    assert_eq!(
+        poll(input.as_mut(), host.as_mut(), Waker::noop()),
+        Poll::Ready(CoroutineState::Complete([7, 9]))
+    );
+    let mut operation = pin!(Flattened::new());
+    assert_eq!(
+        poll(operation.as_mut(), host.as_mut(), Waker::noop()),
+        Poll::Pending
+    );
+    assert_eq!(
+        poll(operation.as_mut(), host.as_mut(), Waker::noop()),
+        Poll::Pending
+    );
+    assert_eq!(
+        poll(operation.as_mut(), host.as_mut(), Waker::noop()),
+        Poll::Ready(CoroutineState::Complete(9))
+    );
+    assert_eq!(host.count(), 4);
+}

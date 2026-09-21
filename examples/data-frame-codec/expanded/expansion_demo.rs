@@ -22,21 +22,53 @@ mod __call_read_pair {
     use super::*;
     pub type State<T: ReadSource + ?Sized> =
         impl ::core::ops::Coroutine<::nitori_call::__private::ResumeEnv<T>,
-        Yield = ::nitori_call::__private::Suspend<u64>, Return =
-        Result<u64, CodecError>>;
+        Yield = __Yield<T>, Return = __Return<T>>;
     #[define_opaque(State)]
     pub(super) fn make<T: ReadSource + ?Sized>() -> State<T> {
-        ::core::convert::identity(#[coroutine] static move
-                |mut __stack_environment:
-                    ::nitori_call::__private::ResumeEnv<T>|
-                -> Result<u64, CodecError>
-                {
-                    let first =
-                        {
-                                let __await_input =
-                                    ::nitori_call::Child::<T, _>::new(ReadVarint::new());
-                                let mut __stack_child =
+        ::nitori_call::__private::map_coroutine(::core::convert::identity(#[coroutine] static
+                    move
+                    |mut __stack_environment:
+                        ::nitori_call::__private::ResumeEnv<T>|
+                    -> Result<u64, CodecError>
+                    {
+                        let first =
+                            {
+                                    let __await_input =
+                                        ::nitori_call::Child::<T, _>::new(ReadVarint::new());
+                                    let mut __stack_child =
 
+                                        {
+                                            super let mut pinned: ::core::pin::PinMacroHelper<_> =
+                                                ::core::pin::PinMacroHelper {
+                                                    value: __stack_environment.prepare_await(__await_input),
+                                                };
+                                            unsafe {
+                                                ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
+                                            }
+                                        };
+                                    loop {
+                                        match unsafe {
+                                                __stack_environment.poll_await(__stack_child.as_mut())
+                                            } {
+                                            ::core::task::Poll::Ready(value) => break value,
+                                            ::core::task::Poll::Pending => {
+                                                __stack_environment.end();
+                                                __stack_environment =
+                                                    yield ::nitori_call::__private::Suspend::Pending;
+                                            }
+                                        }
+                                    }
+                                }?;
+                        let first =
+                            {
+                                let __stack_callback =
+                                    ::nitori_call::__private::prepare::<T, _, _>(|_| first);
+                                unsafe { __stack_environment.with(__stack_callback) }
+                            };
+                        let offset =
+                            {
+                                let __await_input = ready(0u64);
+                                let mut __stack_child =
                                     {
                                         super let mut pinned: ::core::pin::PinMacroHelper<_> =
                                             ::core::pin::PinMacroHelper {
@@ -58,73 +90,61 @@ mod __call_read_pair {
                                         }
                                     }
                                 }
-                            }?;
-                    let first =
+                            };
                         {
-                            let __stack_callback =
-                                ::nitori_call::__private::prepare::<T, _, _>(|_| first);
-                            unsafe { __stack_environment.with(__stack_callback) }
+                            let __stack_item = first;
+                            __stack_environment.end();
+                            __stack_environment =
+                                yield ::nitori_call::__private::Suspend::Emit(__stack_item);
                         };
-                    let offset =
-                        {
-                            let __await_input = ready(0u64);
-                            let mut __stack_child =
-                                {
-                                    super let mut pinned: ::core::pin::PinMacroHelper<_> =
-                                        ::core::pin::PinMacroHelper {
-                                            value: __stack_environment.prepare_await(__await_input),
-                                        };
-                                    unsafe {
-                                        ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
-                                    }
-                                };
-                            loop {
-                                match unsafe {
-                                        __stack_environment.poll_await(__stack_child.as_mut())
-                                    } {
-                                    ::core::task::Poll::Ready(value) => break value,
-                                    ::core::task::Poll::Pending => {
-                                        __stack_environment.end();
-                                        __stack_environment =
-                                            yield ::nitori_call::__private::Suspend::Pending;
-                                    }
-                                }
-                            }
-                        };
-                    {
-                        let __stack_item = first;
-                        __stack_environment.end();
-                        __stack_environment =
-                            yield ::nitori_call::__private::Suspend::Emit(__stack_item);
-                    };
-                    Ok(first +
-                                {
-                                        let __await_input =
-                                            ::nitori_call::Child::<T, _>::new(ReadVarint::new());
-                                        let mut __stack_child =
-                                            {
-                                                super let mut pinned: ::core::pin::PinMacroHelper<_> =
-                                                    ::core::pin::PinMacroHelper {
-                                                        value: __stack_environment.prepare_await(__await_input),
-                                                    };
-                                                unsafe {
-                                                    ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
-                                                }
-                                            };
-                                        loop {
-                                            match unsafe {
-                                                    __stack_environment.poll_await(__stack_child.as_mut())
-                                                } {
-                                                ::core::task::Poll::Ready(value) => break value,
-                                                ::core::task::Poll::Pending => {
-                                                    __stack_environment.end();
-                                                    __stack_environment =
-                                                        yield ::nitori_call::__private::Suspend::Pending;
+                        Ok(first +
+                                    {
+                                            let __await_input =
+                                                ::nitori_call::Child::<T, _>::new(ReadVarint::new());
+                                            let mut __stack_child =
+                                                {
+                                                    super let mut pinned: ::core::pin::PinMacroHelper<_> =
+                                                        ::core::pin::PinMacroHelper {
+                                                            value: __stack_environment.prepare_await(__await_input),
+                                                        };
+                                                    unsafe {
+                                                        ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
+                                                    }
+                                                };
+                                            loop {
+                                                match unsafe {
+                                                        __stack_environment.poll_await(__stack_child.as_mut())
+                                                    } {
+                                                    ::core::task::Poll::Ready(value) => break value,
+                                                    ::core::task::Poll::Pending => {
+                                                        __stack_environment.end();
+                                                        __stack_environment =
+                                                            yield ::nitori_call::__private::Suspend::Pending;
+                                                    }
                                                 }
                                             }
-                                        }
-                                    }? + offset)
-                })
+                                        }? + offset)
+                    }),
+            |value| -> __Yield<T>
+                { __Yield { value, marker: ::core::marker::PhantomData } },
+            |value| -> __Return<T>
+                { __Return { value, marker: ::core::marker::PhantomData } })
+    }
+    pub(super) struct __Return<T: ReadSource + ?Sized> {
+        pub(super) value: Result<u64, CodecError>,
+        marker: ::core::marker::PhantomData<fn() -> __Parameters<T>>,
+    }
+    pub(super) struct __Yield<T: ReadSource + ?Sized> {
+        value: ::nitori_call::__private::Suspend<u64>,
+        marker: ::core::marker::PhantomData<fn() -> __Parameters<T>>,
+    }
+    impl<T: ReadSource + ?Sized> ::nitori_call::__private::Suspension for
+        __Yield<T> {
+        type Item = u64;
+        fn into_suspend(self)
+            -> ::nitori_call::__private::Suspend<Self::Item> {
+            self.value
+        }
     }
     pub struct __Parameters<T: ReadSource + ?Sized> {
         marker: ::core::marker::PhantomData<fn() -> State<T>>,
@@ -225,7 +245,7 @@ impl<T: ReadSource + ?Sized> ReadPair<T> {
     fn new() -> Self {
         let state = __call_read_pair::make::<T>();
         Self {
-            inner: unsafe { ::nitori_call::__private::build(state) },
+            inner: unsafe { ::nitori_call::__private::build_mapped(state) },
             marker: ::core::marker::PhantomData,
         }
     }
@@ -234,12 +254,20 @@ fn read_pair<T: ReadSource + ?Sized>() -> ReadPair<T> { ReadPair::<T>::new() }
 impl<T: ReadSource + ?Sized> ::nitori_call::CallOn<T> for ReadPair<T> {
     type Yield = u64;
     type Return = Result<u64, CodecError>;
+    #[allow(unreachable_code)]
     fn poll_call(self: ::core::pin::Pin<&mut Self>,
         host: ::core::pin::Pin<&mut T>, cx: &mut ::core::task::Context<'_>)
         ->
             ::core::task::Poll<::core::ops::CoroutineState<Self::Yield,
             Self::Return>> {
-        ::nitori_call::CallOn::poll_call(self.project().inner, host, cx)
+        ::nitori_call::CallOn::poll_call(self.project().inner, host,
+                cx).map(|event|
+                match event {
+                    ::core::ops::CoroutineState::Yielded(value) =>
+                        ::core::ops::CoroutineState::Yielded(value),
+                    ::core::ops::CoroutineState::Complete(value) =>
+                        ::core::ops::CoroutineState::Complete(value.value),
+                })
     }
 }
 trait ReadPairExt where Self: ReadSource,

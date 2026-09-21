@@ -18,6 +18,18 @@ pub enum Suspend<Item> {
     Emit(Item),
 }
 
+/// Normalize a nominal suspension wrapper without exposing its item in TAIT bounds.
+pub trait Suspension {
+    type Item;
+    fn into_suspend(self) -> Suspend<Self::Item>;
+}
+impl<Item> Suspension for Suspend<Item> {
+    type Item = Item;
+    fn into_suspend(self) -> Self {
+        self
+    }
+}
+
 /// Opaque, inert pointers. No safe API dereferences these pointers.
 /// The macro consumes this value before every suspension.
 #[doc(hidden)]
@@ -106,6 +118,18 @@ pub unsafe fn build<Host: ?Sized, State, Item>(state: State) -> StackCall<Host, 
 where
     State: Coroutine<ResumeEnv<Host>, Yield = Suspend<Item>>,
 {
+    // SAFETY: identical resume-environment contract, supplied by our caller.
+    unsafe { build_mapped(state) }
+}
+/// Build a named operation whose suspension has a nominal type boundary.
+///
+/// # Safety
+/// The caller must uphold exactly the same resume-environment contract as build.
+pub unsafe fn build_mapped<Host: ?Sized, State>(state: State) -> StackCall<Host, State>
+where
+    State: Coroutine<ResumeEnv<Host>>,
+    State::Yield: Suspension,
+{
     StackCall {
         state,
         terminal: false,
@@ -114,7 +138,8 @@ where
 }
 impl<Host: ?Sized, State, Item> CallOn<Host> for StackCall<Host, State>
 where
-    State: Coroutine<ResumeEnv<Host>, Yield = Suspend<Item>>,
+    State: Coroutine<ResumeEnv<Host>>,
+    State::Yield: Suspension<Item = Item>,
 {
     type Yield = Item;
     type Return = State::Return;
@@ -134,15 +159,54 @@ where
         // build's contract ensures environment access ends before resume returns.
         let state = this.state.resume(environment);
         match state {
-            CoroutineState::Yielded(Suspend::Pending) => {
+            CoroutineState::Yielded(value) => {
                 *this.terminal = false;
-                Poll::Pending
-            }
-            CoroutineState::Yielded(Suspend::Emit(item)) => {
-                *this.terminal = false;
-                Poll::Ready(CoroutineState::Yielded(item))
+                match value.into_suspend() {
+                    Suspend::Pending => Poll::Pending,
+                    Suspend::Emit(item) => Poll::Ready(CoroutineState::Yielded(item)),
+                }
             }
             CoroutineState::Complete(value) => Poll::Ready(CoroutineState::Complete(value)),
+        }
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// Map suspension and completion without moving the pinned coroutine.
+    pub struct MapCoroutine<State, YieldMap, ReturnMap> {
+        #[pin]
+        state: State,
+        yield_map: YieldMap,
+        return_map: ReturnMap,
+    }
+}
+pub fn map_coroutine<State, YieldMap, ReturnMap>(
+    state: State,
+    yield_map: YieldMap,
+    return_map: ReturnMap,
+) -> MapCoroutine<State, YieldMap, ReturnMap> {
+    MapCoroutine {
+        state,
+        yield_map,
+        return_map,
+    }
+}
+impl<
+    Resume,
+    State: Coroutine<Resume>,
+    YieldMap: FnMut(State::Yield) -> Item,
+    ReturnMap: FnMut(State::Return) -> Output,
+    Item,
+    Output,
+> Coroutine<Resume> for MapCoroutine<State, YieldMap, ReturnMap>
+{
+    type Yield = Item;
+    type Return = Output;
+    fn resume(self: Pin<&mut Self>, argument: Resume) -> CoroutineState<Item, Output> {
+        let this = self.project();
+        match this.state.resume(argument) {
+            CoroutineState::Yielded(value) => CoroutineState::Yielded((this.yield_map)(value)),
+            CoroutineState::Complete(value) => CoroutineState::Complete((this.return_map)(value)),
         }
     }
 }

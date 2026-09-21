@@ -24,8 +24,7 @@ Use `io.with(|host| ...)` for synchronous access to the actual pinned Host.
 `io.as_ref().method()` and `io.as_mut().method()` are short-access conveniences;
 their Host references cannot escape. Projection chains run inside that access,
 so use `.with` for complex synchronous expressions and compute asynchronous
-arguments before entering them. `io.sync_name(args)` also uses short access and
-preserves generic method arguments. A yielding synchronous binding cannot escape
+arguments before entering them. `io.sync_name(args)` also uses short access. A yielding synchronous binding cannot escape
 this short access; consume it within `.with`.
 
 `pin!(expression)`, `std::pin::pin!(expression)` and `core::pin::pin!(expression)`
@@ -43,6 +42,42 @@ borrowing model differs from virtual macro access.
 Legacy `Pin<&mut Host>` annotations remain accepted for source compatibility,
 including their old synchronous direct-method syntax. Their child awaits use
 the same type-directed protocol. New code should use Receiver.
+
+## Higher-order operations
+
+Calls may return or yield an owned child operation. The child retains its real
+input borrows, so normal Rust lifetime rules apply when it is handed to another
+consumer. Awaiting the factory and awaiting the returned child are separate
+steps:
+
+```rust
+#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+use nitori_call::{call, Child, Receiver};
+
+#[call]
+async fn increment(io: Receiver<'_, usize>) -> usize {
+    io.with(|mut host| { *host += 1; *host })
+}
+#[call]
+async fn factory(io: Receiver<'_, usize>) -> Child<usize, Increment> {
+    io.increment()
+}
+#[call(sync)]
+async fn execute(io: Receiver<'_, usize>) -> usize {
+    let child = io.factory().await;
+    child.await
+}
+fn main() {
+    let mut host = 0;
+    assert_eq!(host.sync_execute_unpin(), 1);
+}
+```
+
+The generated coroutine uses nominal internal Yield and Return wrappers to
+avoid a compiler inference limitation involving nested opaque associated types.
+This does not change the public CallOn types and introduces no heap allocation.
+The standalone [compiler reproduction and issue draft](../../experiments/tait-associated-output/ISSUE.md)
+record the limitation and controls.
 
 ## Synchronous methods
 
