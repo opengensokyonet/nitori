@@ -187,3 +187,7 @@ pub use nitori_call_macros::{call, call_closure};
 /// Code-generation support, not an author-facing execution API.
 #[doc(hidden)]
 pub mod __private;
+
+mod typed;
+/// Host receivers, owned child operations and host-aware await adapters.
+pub use typed::{AwaitOn, Child, IntoAwaitOn, Next, Receiver};

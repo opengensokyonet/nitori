@@ -33,18 +33,22 @@ mod __call_read_pair {
                 {
                     let first =
                         {
+                                let __await_input =
+                                    ::nitori_call::Child::<T, _>::new(ReadVarint::new());
                                 let mut __stack_child =
 
                                     {
                                         super let mut pinned: ::core::pin::PinMacroHelper<_> =
-                                            ::core::pin::PinMacroHelper { value: ReadVarint::new() };
+                                            ::core::pin::PinMacroHelper {
+                                                value: __stack_environment.prepare_await(__await_input),
+                                            };
                                         unsafe {
                                             ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
                                         }
                                     };
                                 loop {
                                     match unsafe {
-                                            __stack_environment.poll_complete(__stack_child.as_mut())
+                                            __stack_environment.poll_await(__stack_child.as_mut())
                                         } {
                                         ::core::task::Poll::Ready(value) => break value,
                                         ::core::task::Poll::Pending => {
@@ -63,11 +67,12 @@ mod __call_read_pair {
                         };
                     let offset =
                         {
+                            let __await_input = ready(0u64);
                             let mut __stack_child =
                                 {
                                     super let mut pinned: ::core::pin::PinMacroHelper<_> =
                                         ::core::pin::PinMacroHelper {
-                                            value: ::core::future::IntoFuture::into_future(ready(0u64)),
+                                            value: __stack_environment.prepare_await(__await_input),
                                         };
                                     unsafe {
                                         ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
@@ -75,7 +80,7 @@ mod __call_read_pair {
                                 };
                             loop {
                                 match unsafe {
-                                        __stack_environment.poll_future(__stack_child.as_mut())
+                                        __stack_environment.poll_await(__stack_child.as_mut())
                                     } {
                                     ::core::task::Poll::Ready(value) => break value,
                                     ::core::task::Poll::Pending => {
@@ -94,17 +99,21 @@ mod __call_read_pair {
                     };
                     Ok(first +
                                 {
+                                        let __await_input =
+                                            ::nitori_call::Child::<T, _>::new(ReadVarint::new());
                                         let mut __stack_child =
                                             {
                                                 super let mut pinned: ::core::pin::PinMacroHelper<_> =
-                                                    ::core::pin::PinMacroHelper { value: ReadVarint::new() };
+                                                    ::core::pin::PinMacroHelper {
+                                                        value: __stack_environment.prepare_await(__await_input),
+                                                    };
                                                 unsafe {
                                                     ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
                                                 }
                                             };
                                         loop {
                                             match unsafe {
-                                                    __stack_environment.poll_complete(__stack_child.as_mut())
+                                                    __stack_environment.poll_await(__stack_child.as_mut())
                                                 } {
                                                 ::core::task::Poll::Ready(value) => break value,
                                                 ::core::task::Poll::Pending => {
@@ -249,6 +258,24 @@ trait ReadPairExt where Self: ReadSource,
 impl<__CallHost: ?Sized> ReadPairExt for __CallHost where
     __CallHost: ReadSource,
     ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {}
+trait ReadPairReceiverExt<__CallHost: ?Sized> where __CallHost: ReadSource,
+    ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {
+    fn read_pair<'__call_host>(&'__call_host mut self)
+    ->
+        ::nitori_call::BoundCall<'__call_host, __CallHost,
+        ReadPair<__CallHost>>;
+}
+impl<__CallHost: ?Sized> ReadPairReceiverExt<__CallHost> for
+    ::nitori_call::Receiver<'_, __CallHost> where __CallHost: ReadSource,
+    ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {
+    fn read_pair<'__call_host>(&'__call_host mut self)
+        ->
+            ::nitori_call::BoundCall<'__call_host, __CallHost,
+            ReadPair<__CallHost>> {
+        ::nitori_call::BoundCall::new(self.as_mut(),
+            <ReadPair<__CallHost>>::new())
+    }
+}
 struct Source(Bytes);
 impl ReadSource for Source {
     fn poll_read(mut self: Pin<&mut Self>, maximum: NonZeroUsize,
@@ -309,17 +336,21 @@ fn main() {
                         {
                             let first =
                                 {
+                                        let __await_input =
+                                            ::nitori_call::Child::<Source, _>::new(ReadVarint::new());
                                         let mut __stack_child =
                                             {
                                                 super let mut pinned: ::core::pin::PinMacroHelper<_> =
-                                                    ::core::pin::PinMacroHelper { value: ReadVarint::new() };
+                                                    ::core::pin::PinMacroHelper {
+                                                        value: __stack_environment.prepare_await(__await_input),
+                                                    };
                                                 unsafe {
                                                     ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
                                                 }
                                             };
                                         loop {
                                             match unsafe {
-                                                    __stack_environment.poll_complete(__stack_child.as_mut())
+                                                    __stack_environment.poll_await(__stack_child.as_mut())
                                                 } {
                                                 ::core::task::Poll::Ready(value) => break value,
                                                 ::core::task::Poll::Pending => {
@@ -339,11 +370,12 @@ fn main() {
                                 };
                             let offset =
                                 {
+                                    let __await_input = ready(0u64);
                                     let mut __stack_child =
                                         {
                                             super let mut pinned: ::core::pin::PinMacroHelper<_> =
                                                 ::core::pin::PinMacroHelper {
-                                                    value: ::core::future::IntoFuture::into_future(ready(0u64)),
+                                                    value: __stack_environment.prepare_await(__await_input),
                                                 };
                                             unsafe {
                                                 ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
@@ -351,7 +383,7 @@ fn main() {
                                         };
                                     loop {
                                         match unsafe {
-                                                __stack_environment.poll_future(__stack_child.as_mut())
+                                                __stack_environment.poll_await(__stack_child.as_mut())
                                             } {
                                             ::core::task::Poll::Ready(value) => break value,
                                             ::core::task::Poll::Pending => {
@@ -370,17 +402,21 @@ fn main() {
                             };
                             Ok(first +
                                         {
+                                                let __await_input =
+                                                    ::nitori_call::Child::<Source, _>::new(ReadVarint::new());
                                                 let mut __stack_child =
                                                     {
                                                         super let mut pinned: ::core::pin::PinMacroHelper<_> =
-                                                            ::core::pin::PinMacroHelper { value: ReadVarint::new() };
+                                                            ::core::pin::PinMacroHelper {
+                                                                value: __stack_environment.prepare_await(__await_input),
+                                                            };
                                                         unsafe {
                                                             ::core::pin::pin_new_unchecked_in_helper(&mut pinned)
                                                         }
                                                     };
                                                 loop {
                                                     match unsafe {
-                                                            __stack_environment.poll_complete(__stack_child.as_mut())
+                                                            __stack_environment.poll_await(__stack_child.as_mut())
                                                         } {
                                                         ::core::task::Poll::Ready(value) => break value,
                                                         ::core::task::Poll::Pending => {

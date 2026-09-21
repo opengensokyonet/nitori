@@ -5,6 +5,45 @@ operation state while each poll receives a short pinned host borrow. `BoundCall`
 binds a host borrow for asynchronous execution: it implements Future and Stream.
 Awaiting it discards intermediate yields; use its event stream to preserve them.
 
+## Child calls and host access
+
+The first `#[call]` parameter is a virtual `Receiver<'_, Host>`. A direct
+`io.decode(args)` constructs a real `Child<Host, Decode>` without borrowing the
+Host. It may be moved, stored, passed to ordinary functions, or captured by
+closures before it is pinned. Direct `.await` discards child yields and returns
+its final result. To observe events, explicitly pin the child and await
+`child.as_mut().next()`: it returns `Some(Yielded(item))`, a unique
+`Some(Complete(result))`, then `None`.
+
+All awaits use `IntoAwaitOn` / `AwaitOn`. Standard IntoFuture values receive the
+current Context; Child and Next additionally receive the current pinned Host.
+Next is a host-aware awaitable, not a standard Future. The macro does not track
+child variable declarations or recognize calls to `next` by their name.
+
+Use `io.with(|host| ...)` for synchronous access to the actual pinned Host.
+`io.as_ref().method()` and `io.as_mut().method()` are short-access conveniences;
+their Host references cannot escape. Projection chains run inside that access,
+so use `.with` for complex synchronous expressions and compute asynchronous
+arguments before entering them. `io.sync_name(args)` also uses short access and
+preserves generic method arguments. A yielding synchronous binding cannot escape
+this short access; consume it within `.with`.
+
+`pin!(expression)`, `std::pin::pin!(expression)` and `core::pin::pin!(expression)`
+are reserved macro intrinsics expanded to `::core::pin::pin!`. Other opaque
+macros are rejected. Nested ordinary async blocks and closures retain their own
+scope and cannot capture the virtual receiver.
+
+Outside the macro, `Receiver::from_pin` supports any pinned Host and
+`Receiver::from_mut` supports Unpin hosts. The macro generates a separate
+`NameReceiverExt` trait with `name` and, when requested, `sync_name`, borrowing
+`&mut Receiver`. The original Host extension trait and its four entries remain
+available. Ordinary async code can use the real Receiver and bound futures; its
+borrowing model differs from virtual macro access.
+
+Legacy `Pin<&mut Host>` annotations remain accepted for source compatibility,
+including their old synchronous direct-method syntax. Their child awaits use
+the same type-directed protocol. New code should use Receiver.
+
 ## Synchronous methods
 
 `#[call(sync)]` adds `sync_name` and `sync_name_unpin` to the generated extension
@@ -19,16 +58,16 @@ explicitly declares `yields = Infallible`. Attribute order is unrestricted.
 
 ```rust
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::call;
-use std::{ops::CoroutineState, pin::{Pin, pin}};
+use nitori_call::{call, Receiver};
+use std::{ops::CoroutineState, pin::pin};
 
 #[call(sync)]
-async fn add(io: Pin<&mut usize>, amount: usize) -> usize {
+async fn add(io: Receiver<'_, usize>, amount: usize) -> usize {
     io.with(|mut host| { *host += amount; *host })
 }
 
 #[call(sync, yields = usize)]
-async fn steps(io: Pin<&mut usize>, count: usize) -> usize {
+async fn steps(io: Receiver<'_, usize>, count: usize) -> usize {
     for _ in 0..count {
         yield io.add(1).await;
     }

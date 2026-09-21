@@ -1,5 +1,7 @@
 # Typed child-await prototype
 
+This is a historical, baseline-pinned experiment. The [current library](../../crates/nitori_call/README.md) now provides the child-await protocol and Receiver extension traits. The results and limitations below describe the archived experiment.
+
 This isolated experiment applies a patch to commit `eefb694aa4ce6184c1d6658f09222dc76cff5b8f` in a temporary checkout. It does not enable new APIs in the main workspace. Its purpose is to test real child values, manual pinning, and type-directed await dispatch inside `#[call]`.
 
 The executable [test body](typed_children.rs) includes this flow:

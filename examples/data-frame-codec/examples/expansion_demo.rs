@@ -16,7 +16,9 @@ use std::{
 };
 
 #[call(yields = u64)]
-async fn read_pair<T: ReadSource + ?Sized>(io: Pin<&mut T>) -> Result<u64, CodecError> {
+async fn read_pair<T: ReadSource + ?Sized>(
+    io: nitori_call::Receiver<'_, T>,
+) -> Result<u64, CodecError> {
     let first = io.read_varint().await?;
     let first = io.with(|_| first);
     let offset = ready(0u64).await;
@@ -61,7 +63,7 @@ where
 fn main() {
     check(read_pair());
     check(call_closure!(
-        |io: Pin<&mut Source>| -> Result<u64, CodecError> {
+        |io: nitori_call::Receiver<'_, Source>| -> Result<u64, CodecError> {
             let first = io.read_varint().await?;
             let first = io.with(|_| first);
             let offset = ready(0u64).await;

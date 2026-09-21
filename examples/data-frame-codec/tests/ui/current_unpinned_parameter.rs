@@ -1,4 +1,4 @@
-// expect: virtual host type must be Pin<&mut T>
+// expect: virtual host type must be Receiver
 #![feature(coroutines,coroutine_trait,type_alias_impl_trait)]
 use nitori_call::call;
 #[call]

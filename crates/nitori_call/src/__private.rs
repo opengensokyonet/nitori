@@ -6,8 +6,6 @@ pub use pin_project_lite::pin_project;
 
 use crate::CallOn;
 use std::{
-    convert::Infallible,
-    future::Future,
     marker::PhantomData,
     ops::{Coroutine, CoroutineState},
     pin::Pin,
@@ -53,6 +51,9 @@ impl<Host: ?Sized> ResumeEnv<Host> {
             )
         }
     }
+    pub fn prepare_await<A: crate::IntoAwaitOn<Host>>(&self, value: A) -> A::Awaitable {
+        value.into_await_on()
+    }
     /// # Safety
     /// Must run synchronously on the thread of the resume that supplied self,
     /// before that resume ends. No overlapping use of its host/context is
@@ -66,30 +67,12 @@ impl<Host: ?Sized> ResumeEnv<Host> {
     }
     /// # Safety
     /// Same current-resume and exclusive-access requirements as with.
-    pub unsafe fn poll_future<State: Future + ?Sized>(
+    pub unsafe fn poll_await<A: crate::AwaitOn<Host> + ?Sized>(
         &mut self,
-        state: Pin<&mut State>,
-    ) -> Poll<State::Output> {
-        // SAFETY: propagated from this method's caller.
-        unsafe { self.enter(|_, cx| state.poll(cx)) }
-    }
-    /// # Safety
-    /// Same current-resume and exclusive-access requirements as with.
-    pub unsafe fn poll_complete<Operation>(
-        &mut self,
-        operation: Pin<&mut Operation>,
-    ) -> Poll<Operation::Return>
-    where
-        Operation: CallOn<Host, Yield = Infallible> + ?Sized,
-    {
-        // SAFETY: propagated from this method's caller. No host borrow is stored.
-        unsafe {
-            self.enter(|host, cx| match operation.poll_call(host, cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(CoroutineState::Yielded(raw)) => match raw {},
-                Poll::Ready(CoroutineState::Complete(raw)) => Poll::Ready(raw),
-            })
-        }
+        value: Pin<&mut A>,
+    ) -> Poll<A::Output> {
+        // SAFETY: the caller supplies the current exclusive resume access.
+        unsafe { self.enter(|host, cx| value.poll_on(host, cx)) }
     }
 }
 /// Supply the callback's expected type without borrowing a resume environment.

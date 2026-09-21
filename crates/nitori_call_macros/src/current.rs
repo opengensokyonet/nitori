@@ -5,6 +5,17 @@ use super::*;
 fn private(name: &str) -> Ident {
     Ident::new(name, Span::mixed_site())
 }
+// These spellings are intrinsic to the macro, not arbitrary user macro calls.
+fn pin_intrinsic(path: &Path) -> bool {
+    let names: Vec<_> = path
+        .segments
+        .iter()
+        .map(|part| part.ident.to_string())
+        .collect();
+    matches!(names.as_slice(), [name] if name == "pin")
+        || matches!(names.as_slice(), [root, module, name]
+            if (root == "std" || root == "core") && module == "pin" && name == "pin")
+}
 struct Validate {
     error: Option<Error>,
 }
@@ -16,6 +27,13 @@ impl VisitMut for Validate {
         ));
     }
     fn visit_macro_mut(&mut self, invocation: &mut Macro) {
+        if pin_intrinsic(&invocation.path) {
+            match syn::parse2::<Expr>(invocation.tokens.clone()) {
+                Ok(mut expression) => self.visit_expr_mut(&mut expression),
+                Err(error) => self.error = Some(error),
+            }
+            return;
+        }
         self.error = Some(Error::new_spanned(
             invocation,
             "opaque macros are outside the call macro safety boundary",
@@ -27,6 +45,7 @@ struct Rewrite {
     host: Box<Type>,
     environment: Ident,
     has_yield: bool,
+    typed: bool,
     error: Option<Error>,
 }
 impl Rewrite {
@@ -37,6 +56,21 @@ impl Rewrite {
         self.direct(expression)
             || matches!(expression,Expr::MethodCall(method) if method.args.is_empty() && self.sync_chain(&method.receiver))
     }
+    fn child(&mut self, method: ExprMethodCall) -> Expr {
+        let name = Ident::new(&camel(&method.method.to_string()), method.method.span());
+        let mut ty: TypePath = parse_quote!(#name);
+        if let Some(arguments) = &method.turbofish {
+            ty.path.segments.last_mut().unwrap().arguments =
+                PathArguments::AngleBracketed(arguments.clone());
+        }
+        let constructor = constructor(&ty);
+        let mut arguments = method.args;
+        for argument in &mut arguments {
+            self.visit_expr_mut(argument);
+        }
+        let host = &self.host;
+        parse_quote!(::nitori_call::Child::<#host,_>::new(#constructor(#arguments)))
+    }
     fn access(&self, callback: Expr) -> Expr {
         let environment = &self.environment;
         let callback_name = private("__stack_callback");
@@ -44,16 +78,14 @@ impl Rewrite {
         // Evaluate all author code OUTSIDE the generated unsafe block.
         parse_quote!({let #callback_name=::nitori_call::__private::prepare::<#host,_,_>(#callback);unsafe {#environment.with(#callback_name)}})
     }
-    fn awaited(&self, input: Tokens, child: bool) -> Expr {
+    fn awaited(&self, input: Tokens) -> Expr {
         let environment = &self.environment;
         let state = private("__stack_child");
-        let poll = if child {
-            quote!(#environment.poll_complete(#state.as_mut()))
-        } else {
-            quote!(#environment.poll_future(#state.as_mut()))
-        };
+        let poll = quote!(#environment.poll_await(#state.as_mut()));
+        let input_name = private("__await_input");
         parse_quote!({
-            let mut #state=::core::pin::pin!(#input);
+            let #input_name = #input;
+            let mut #state=::core::pin::pin!(#environment.prepare_await(#input_name));
             loop {
                 match unsafe {#poll} {
                     ::core::task::Poll::Ready(value)=>break value,
@@ -68,37 +100,32 @@ impl Rewrite {
 }
 impl VisitMut for Rewrite {
     fn visit_expr_mut(&mut self, expression: &mut Expr) {
-        if let Expr::Await(awaited) = expression {
-            if let Expr::MethodCall(method) = &*awaited.base
-                && self.direct(&method.receiver)
-            {
-                if method.method == "with" {
-                    self.error = Some(Error::new_spanned(
-                        method,
-                        "with is synchronous; omit await",
-                    ));
-                    return;
+        if let Expr::Macro(invocation) = expression
+            && pin_intrinsic(&invocation.mac.path)
+        {
+            match syn::parse2::<Expr>(invocation.mac.tokens.clone()) {
+                Ok(mut inner) => {
+                    self.visit_expr_mut(&mut inner);
+                    *expression = parse_quote!(::core::pin::pin!(#inner));
                 }
-                let name = Ident::new(&camel(&method.method.to_string()), method.method.span());
-                let mut ty: TypePath = parse_quote!(#name);
-                if let Some(arguments) = &method.turbofish {
-                    ty.path.segments.last_mut().unwrap().arguments =
-                        PathArguments::AngleBracketed(arguments.clone());
-                }
-                let constructor = constructor(&ty);
-                let mut arguments = method.args.clone();
-                for argument in &mut arguments {
-                    self.visit_expr_mut(argument);
-                }
-                *expression = self.awaited(quote!(#constructor(#arguments)), true);
-            } else {
-                let mut future = (*awaited.base).clone();
-                self.visit_expr_mut(&mut future);
-                *expression = self.awaited(
-                    quote!(::core::future::IntoFuture::into_future(#future)),
-                    false,
-                );
+                Err(error) => self.error = Some(error),
             }
+            return;
+        }
+        if let Expr::Await(awaited) = expression {
+            let mut value = (*awaited.base).clone();
+            // Retain the old Pin annotation as source compatibility only; both
+            // forms use the same owned child and type-directed await protocol.
+            if !self.typed
+                && let Expr::MethodCall(method) = &value
+                && self.direct(&method.receiver)
+                && method.method != "with"
+            {
+                value = self.child(method.clone());
+            } else {
+                self.visit_expr_mut(&mut value);
+            }
+            *expression = self.awaited(quote!(#value));
             return;
         }
         if let Expr::Yield(emitted) = expression {
@@ -139,6 +166,41 @@ impl VisitMut for Rewrite {
             self.visit_expr_mut(&mut callback);
             *expression = self.access(callback);
             return;
+        }
+        if self.typed {
+            fn projection(expression: &Expr, receiver: &Ident) -> bool {
+                match expression {
+                    Expr::MethodCall(method) => {
+                        (matches!(&*method.receiver, Expr::Path(path) if path.path.is_ident(receiver))
+                            && (method.method == "as_ref" || method.method == "as_mut"))
+                            || projection(&method.receiver, receiver)
+                    }
+                    _ => false,
+                }
+            }
+            if projection(expression, &self.receiver) {
+                let mut invocation = expression.clone();
+                let host_name = private("__projection_host");
+                fn rebind(expression: &mut Expr, host: &Ident) {
+                    if let Expr::MethodCall(method) = expression {
+                        if matches!(&*method.receiver, Expr::Path(_)) {
+                            *method.receiver = parse_quote!(#host);
+                        } else {
+                            rebind(&mut method.receiver, host);
+                        }
+                    }
+                }
+                rebind(&mut invocation, &host_name);
+                *expression = self.access(parse_quote!(|mut #host_name| #invocation));
+                return;
+            }
+            if let Expr::MethodCall(method) = expression
+                && self.direct(&method.receiver)
+                && !method.method.to_string().starts_with("sync_")
+            {
+                *expression = self.child(method.clone());
+                return;
+            }
         }
         if let Expr::MethodCall(method) = expression
             && self.direct(&method.receiver)
@@ -219,13 +281,24 @@ fn host_type(annotation: &Type) -> Result<Box<Type>> {
     let invalid = || {
         Error::new_spanned(
             annotation,
-            "virtual host type must be Pin<&mut T> with an elided borrow lifetime",
+            "virtual host type must be Receiver<'_ , T> or Pin<&mut T> with an elided borrow lifetime",
         )
     };
     let Type::Path(path) = annotation else {
         return Err(invalid());
     };
     let segment = path.path.segments.last().ok_or_else(invalid)?;
+    if segment.ident == "Receiver" {
+        if path.qself.is_none()
+            && let PathArguments::AngleBracketed(arguments) = &segment.arguments
+            && arguments.args.len() == 2
+            && matches!(arguments.args.first(), Some(GenericArgument::Lifetime(lifetime)) if lifetime.ident == "_")
+            && let Some(GenericArgument::Type(host)) = arguments.args.last()
+        {
+            return Ok(Box::new(host.clone()));
+        }
+        return Err(invalid());
+    }
     if path.qself.is_some() || segment.ident != "Pin" {
         return Err(invalid());
     }
@@ -293,6 +366,7 @@ fn coroutine(mut closure: ExprClosure) -> Result<(Tokens, Box<Type>, bool)> {
         host: host.clone(),
         environment: environment.clone(),
         has_yield: false,
+        typed: matches!(&*parameter.ty, Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "Receiver")),
         error: None,
     };
     rewrite.visit_expr_mut(&mut closure.body);
@@ -724,6 +798,54 @@ fn helper_trait(
     } else {
         quote!()
     };
+    let receiver_trait = format_ident!("{}ReceiverExt", call_name);
+    let mut receiver_call = call_type.clone();
+    let mut receiver_arguments = arguments.clone();
+    let mut replace = ReplaceSelf(&implementation_host);
+    replace.visit_type_mut(&mut receiver_call);
+    for argument in &mut receiver_arguments {
+        replace.visit_fn_arg_mut(argument);
+    }
+    let (_, receiver_trait_arguments, _) = implementation.split_for_impl();
+    let receiver_sync = if sync {
+        let sync_name = format_ident!("sync_{}", name);
+        let (result, execute, bounds) = if has_yields {
+            (
+                quote!(::nitori_call::SyncBoundCall<#lifetime, #implementation_host, #receiver_call>),
+                quote!(::nitori_call::SyncBoundCall::new),
+                quote!(),
+            )
+        } else {
+            (
+                quote!(<#receiver_call as ::nitori_call::CallOn<#implementation_host>>::Return),
+                quote!(::nitori_call::run_sync),
+                quote!(where #receiver_call: ::nitori_call::CallOn<#implementation_host, Yield = ::core::convert::Infallible>),
+            )
+        };
+        quote! {
+            fn #sync_name<#lifetime>(&#lifetime mut self, #receiver_arguments) -> #result #bounds {
+                #execute(self.as_mut(), <#receiver_call>::new(#(#names),*))
+            }
+        }
+    } else {
+        quote!()
+    };
+    let receiver_methods = quote! {
+        fn #name<#lifetime>(&#lifetime mut self, #receiver_arguments)
+            -> ::nitori_call::BoundCall<#lifetime, #implementation_host, #receiver_call> {
+            ::nitori_call::BoundCall::new(self.as_mut(), <#receiver_call>::new(#(#names),*))
+        }
+        #receiver_sync
+    };
+    let mut declarations: ItemTrait = parse_quote! {
+        #visibility trait #receiver_trait #impl_parameters #impl_constraints { #receiver_methods }
+    };
+    for item in &mut declarations.items {
+        if let TraitItem::Fn(method) = item {
+            method.default = None;
+            method.semi_token = Some(Default::default());
+        }
+    }
     Ok(quote! {
         #visibility trait #trait_name #trait_parameters #trait_constraints {
             #sync_methods
@@ -738,5 +860,10 @@ fn helper_trait(
             }
         }
         impl #impl_parameters #trait_name #trait_arguments for #implementation_host #impl_constraints {}
+        #declarations
+        impl #impl_parameters #receiver_trait #receiver_trait_arguments
+            for ::nitori_call::Receiver<'_, #implementation_host> #impl_constraints {
+            #receiver_methods
+        }
     })
 }

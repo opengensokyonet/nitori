@@ -102,7 +102,7 @@ impl<Target: WriteSink<Input> + ?Sized, Input: Buf> CallOn<Target> for Write<Inp
 
 #[call]
 pub async fn read_varint<Target: ReadSource + ?Sized>(
-    io: ::core::pin::Pin<&mut Target>,
+    io: nitori_call::Receiver<'_, Target>,
 ) -> Result<u64, CodecError> {
     let mut first = io
         .read_at_most(NonZeroUsize::new(1).unwrap())
@@ -133,7 +133,7 @@ pub struct DataChunk {
 
 #[call(yields = DataChunk)]
 pub async fn read_data_frame<Target: ReadSource + ?Sized>(
-    io: ::core::pin::Pin<&mut Target>,
+    io: nitori_call::Receiver<'_, Target>,
     quantum: NonZeroUsize,
 ) -> Result<u64, CodecError> {
     let frame_type = io.read_varint().await?;
@@ -153,7 +153,7 @@ pub async fn read_data_frame<Target: ReadSource + ?Sized>(
 
 #[call]
 pub async fn write_all<Target: WriteSink<Input> + ?Sized, Input: Buf>(
-    io: ::core::pin::Pin<&mut Target>,
+    io: nitori_call::Receiver<'_, Target>,
     mut input: Input,
 ) -> WriteReturn<Input> {
     let mut written = 0;
