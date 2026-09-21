@@ -34,7 +34,7 @@ scope and cannot capture the virtual receiver.
 
 Outside the macro, `Receiver::from_pin` supports any pinned Host and
 `Receiver::from_mut` supports Unpin hosts. The macro generates a separate
-`NameReceiverExt` trait with `name` and, when requested, `sync_name`, borrowing
+`ReceiverNameExt` trait with `name` and, when requested, `sync_name`, borrowing
 `&mut Receiver`. The original Host extension trait and its four entries remain
 available. Ordinary async code can use the real Receiver and bound futures; its
 borrowing model differs from virtual macro access.
@@ -125,6 +125,18 @@ assert_eq!(host.sync_add_unpin(2), 2);
 assert_eq!(host, 4);
 }
 ```
+
+A synchronous parent can consume a yielding child through the same
+`pin!(io.child(args))` and `child.as_mut().next().await` body used by an
+asynchronous parent. With `#[call(sync, yields = Item)]`, its generated sync
+entry yields one parent event per iterator step. The parent may use `.with`
+between child events; no child binding retains the Host borrow between steps.
+The presence of `.await` does not require an executor when all polls are ready.
+
+Alternatively, a `.with` callback may construct a real `host.sync_child(args)`
+binding, pin it, and consume its iterator before returning owned results.
+`let events = io.sync_child(args)` cannot retain that binding outside the short
+access: the binding borrows the Host. This is rejected by the borrow checker.
 
 The operation can be `!Unpin` even when the host is `Unpin`. Pin the event binding
 before advancing it; `Pin<&mut SyncBoundCall>` implements Iterator and

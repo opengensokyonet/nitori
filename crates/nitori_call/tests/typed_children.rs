@@ -354,3 +354,67 @@ fn returned_child_keeps_borrowed_input_and_yielded_children_can_be_awaited() {
     );
     assert_eq!(host.count(), 4);
 }
+
+#[call(sync, yields = usize)]
+async fn counter_events(io: Receiver<'_, Host>) -> usize {
+    io.with(|host| host.count.set(host.count() + 1));
+    yield io.as_ref().count();
+    io.with(|host| host.count.set(host.count() + 1));
+    yield io.as_ref().count();
+    io.as_ref().count()
+}
+
+#[call(sync, yields = usize)]
+async fn relay_sync_events(io: Receiver<'_, Host>) -> usize {
+    let mut child = pin!(io.counter_events());
+    while let Some(event) = child.as_mut().next().await {
+        match event {
+            CoroutineState::Yielded(value) => {
+                io.with(|host| host.count.set(host.count() + 10));
+                yield value;
+            }
+            CoroutineState::Complete(value) => return value,
+        }
+    }
+    0
+}
+
+#[call(sync)]
+async fn collect_sync_events(io: Receiver<'_, Host>) -> Vec<CoroutineState<usize, usize>> {
+    io.with(|host| {
+        let mut events = std::pin::pin!(host.sync_counter_events());
+        events.as_mut().collect()
+    })
+}
+
+#[test]
+fn sync_yielding_children_are_lazy_and_allow_parent_host_access() {
+    let mut host = pin!(host());
+    let count = host.count.clone();
+    let mut receiver = Receiver::from_pin(host.as_mut());
+    // UFCS also verifies the public Receiver<Name>Ext spelling.
+    let mut events = pin!(ReceiverRelaySyncEventsExt::sync_relay_sync_events(
+        &mut receiver
+    ));
+    assert_eq!(count.get(), 0);
+    assert_eq!(events.as_mut().next(), Some(CoroutineState::Yielded(1)));
+    assert_eq!(count.get(), 11);
+    assert_eq!(events.as_mut().next(), Some(CoroutineState::Yielded(12)));
+    assert_eq!(count.get(), 22);
+    assert_eq!(events.as_mut().next(), Some(CoroutineState::Complete(22)));
+    assert_eq!(events.as_mut().next(), None);
+}
+
+#[test]
+fn with_can_consume_a_sync_event_binding_and_return_owned_events() {
+    let mut host = pin!(host());
+    assert_eq!(
+        run_sync(host.as_mut(), CollectSyncEvents::new()),
+        vec![
+            CoroutineState::Yielded(1),
+            CoroutineState::Yielded(2),
+            CoroutineState::Complete(2),
+        ]
+    );
+    assert_eq!(host.count(), 2);
+}

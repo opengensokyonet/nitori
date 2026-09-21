@@ -819,7 +819,7 @@ fn helper_trait(
     } else {
         quote!()
     };
-    let receiver_trait = format_ident!("{}ReceiverExt", call_name);
+    let receiver_trait = format_ident!("Receiver{}Ext", call_name);
     let mut receiver_call = call_type.clone();
     let mut receiver_arguments = arguments.clone();
     let mut replace = ReplaceSelf(&implementation_host);

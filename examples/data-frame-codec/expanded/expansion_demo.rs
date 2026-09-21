@@ -286,14 +286,14 @@ trait ReadPairExt where Self: ReadSource,
 impl<__CallHost: ?Sized> ReadPairExt for __CallHost where
     __CallHost: ReadSource,
     ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {}
-trait ReadPairReceiverExt<__CallHost: ?Sized> where __CallHost: ReadSource,
+trait ReceiverReadPairExt<__CallHost: ?Sized> where __CallHost: ReadSource,
     ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {
     fn read_pair<'__call_host>(&'__call_host mut self)
     ->
         ::nitori_call::BoundCall<'__call_host, __CallHost,
         ReadPair<__CallHost>>;
 }
-impl<__CallHost: ?Sized> ReadPairReceiverExt<__CallHost> for
+impl<__CallHost: ?Sized> ReceiverReadPairExt<__CallHost> for
     ::nitori_call::Receiver<'_, __CallHost> where __CallHost: ReadSource,
     ReadPair<__CallHost>: ::nitori_call::CallOn<__CallHost> {
     fn read_pair<'__call_host>(&'__call_host mut self)
