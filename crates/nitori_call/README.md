@@ -181,3 +181,45 @@ persistent host borrow. It supports callers that reacquire controlled access on
 each step. Such callers own completion and panic tracking and must not resume an
 operation after completion or panic. Successive accesses must refer to the same
 logical host resources required by the operation.
+
+
+## Sequential call composition
+
+The runnable [call composition example](examples/call_composition.rs) uses the
+existing macro and typed child protocol to implement two generic operations:
+
+- `call_results`: accepts `Stream<Item = Operation>` where `Operation: CallOn<Host>`,
+  executes one operation at a time, and yields each final `Operation::Return`.
+  Intermediate child yields are discarded by the existing direct-await contract.
+- `call_events`: accepts the same source and yields each child's
+  `CoroutineState<Operation::Yield, Operation::Return>`, preserving completion
+  boundaries. The outer operation returns `()` when the source ends.
+
+`IterCalls` adapts an iterator without prefetching; `std::iter::from_fn` supplies
+a closure factory, and `map` constructs operations from successive parameters.
+The stream can be `!Unpin`, and operation values may retain input borrows. Each
+source has one concrete operation type; heterogeneous operations require a
+common representation and are not automatically erased. The input items are
+unbound operations, not `BoundCall` or `Child` wrappers.
+
+No next input is requested until the current call completes and its output is
+consumed. The adapter does not control buffering inside a supplied source.
+A child `Complete` is an outer `Yielded(Complete(...))`; only source exhaustion
+produces outer `Complete(())`. Return values are opaque: an `Err` is delivered
+as a value, and does not automatically stop later calls. Fallible sources and
+stop-on-error policies require a separately specified adapter.
+
+Both operations use `#[call(sync, yields = ...)]`, so the same bodies support
+asynchronous event consumption and synchronous iteration. Synchronous execution
+requires both the source and every child dependency to be immediately ready.
+Use the event interface to consume their outputs: directly awaiting the whole
+composition discards them and may never finish for an infinite source. A child
+that yields forever also prevents the results-only variant from producing a
+final result. Cancellation drops the current state without rollback.
+
+Run from the repository root:
+
+```sh
+cargo +nightly run --locked -p nitori_call --example call_composition
+cargo +nightly test --locked -p nitori_call --example call_composition
+```
