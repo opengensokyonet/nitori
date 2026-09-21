@@ -24,8 +24,9 @@ Use `io.with(|host| ...)` for synchronous access to the actual pinned Host.
 `io.as_ref().method()` and `io.as_mut().method()` are short-access conveniences;
 their Host references cannot escape. Projection chains run inside that access,
 so use `.with` for complex synchronous expressions and compute asynchronous
-arguments before entering them. `io.sync_name(args)` also uses short access. A yielding synchronous binding cannot escape
-this short access; consume it within `.with`.
+arguments before entering them. `io.sync_name(args)` also uses short access. A
+yielding synchronous binding cannot escape this short access; consume it within
+`.with`.
 
 `pin!(expression)`, `std::pin::pin!(expression)` and `core::pin::pin!(expression)`
 are reserved macro intrinsics expanded to `::core::pin::pin!`. Other opaque
@@ -137,6 +138,18 @@ Alternatively, a `.with` callback may construct a real `host.sync_child(args)`
 binding, pin it, and consume its iterator before returning owned results.
 `let events = io.sync_child(args)` cannot retain that binding outside the short
 access: the binding borrows the Host. This is rejected by the borrow checker.
+
+This is a current limitation of explicit synchronous child composition inside
+`#[call]`. The macro recognizes `sync_*`; the obstacle is that SyncBoundCall
+combines persistent operation state with a persistent Host borrow, while the
+virtual receiver grants only short access. Outside the macro, a real Host or
+Receiver can supply the longer borrow and the binding can be retained.
+
+Driving the whole parent synchronously does not express a separate requirement
+that one particular child be advanced synchronously inside an otherwise
+asynchronous parent. There is currently no generated host-free synchronous event
+handle that automatically reacquires the Host on each step. Such an adapter
+would be a possible future extension, not an implemented or committed API.
 
 The operation can be `!Unpin` even when the host is `Unpin`. Pin the event binding
 before advancing it; `Pin<&mut SyncBoundCall>` implements Iterator and
