@@ -322,17 +322,17 @@ trait ReadPairExt<T: ReadSource>: ::nitori_call::Host<Family = T> {
 }
 impl<T: ReadSource, __CallHost: ::nitori_call::Host<Family = T> + ?Sized>
     ReadPairExt<T> for __CallHost {}
-trait ReceiverReadPairExt<T: ReadSource>: ::nitori_call::Route<Target = T> +
-    Sized {
+trait ReceiverReadPairExt<T: ReadSource>: ::nitori_call::CallReceiver<Target =
+    T> + Sized {
     fn read_pair(self)
         ->
             ::nitori_call::Child<Self::Root,
-            ::nitori_call::Routed<Self, ReadPair<T>>> {
+            ::nitori_call::ReceivedCall<Self, ReadPair<T>>> {
         ::nitori_call::ReceiverExt::call(self, <ReadPairArguments<T>>::new())
     }
 }
-impl<T: ReadSource, __CallRoute: ::nitori_call::Route<Target = T>>
-    ReceiverReadPairExt<T> for __CallRoute {}
+impl<T: ReadSource, __CallReceiver: ::nitori_call::CallReceiver<Target = T>>
+    ReceiverReadPairExt<T> for __CallReceiver {}
 struct Source(Bytes);
 impl ReadSource for Source {
     fn poll_read<'visit>(host: Pin<&mut Self::Host<'visit>>,

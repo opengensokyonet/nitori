@@ -1,7 +1,7 @@
 //! Capability methods on actual hosts and operation methods on real receivers.
 use crate::{Read, ReadChunk, Write};
 use bytes::{Buf, BufMut};
-use nitori_call::{Child, Host, ReceiverExt, Routed};
+use nitori_call::{Child, Host, ReceivedCall, ReceiverExt};
 use std::{
     num::NonZeroUsize,
     pin::Pin,
@@ -52,30 +52,30 @@ where
     fn read<'a, B: BufMut + ?Sized>(
         self,
         out: &'a mut B,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::Read<'a, B>>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::Read<'a, B>>> {
         self.operation(crate::calls::Read::new(out))
     }
     fn read_exact<'a, B: BufMut + ?Sized>(
         self,
         out: &'a mut B,
         length: usize,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadExact<'a, B>>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadExact<'a, B>>> {
         self.operation(crate::calls::ReadExact::new(out, length))
     }
     fn read_to_end<'a, B: BufMut + ?Sized>(
         self,
         out: &'a mut B,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadToEnd<'a, B>>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadToEnd<'a, B>>> {
         self.operation(crate::calls::ReadToEnd::new(out))
     }
     fn read_array<const N: usize>(
         self,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadArray<N>>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadArray<N>>> {
         self.operation(crate::calls::ReadArray::new())
     }
     fn read_le<T: crate::calls::EndianValue>(
         self,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadLe<T>>>
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadLe<T>>>
     where
         crate::calls::ReadLe<T>: nitori_call::CallOn<Self::Target>,
     {
@@ -83,7 +83,7 @@ where
     }
     fn read_be<T: crate::calls::EndianValue>(
         self,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadBe<T>>>
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadBe<T>>>
     where
         crate::calls::ReadBe<T>: nitori_call::CallOn<Self::Target>,
     {
@@ -98,21 +98,21 @@ where
     fn read_chunk(
         self,
         maximum: NonZeroUsize,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadChunk>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadChunk>> {
         self.operation(crate::calls::ReadChunk::new(maximum))
     }
     fn read_chunks(
         self,
         length: usize,
         maximum: NonZeroUsize,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadChunks>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadChunks>> {
         self.operation(crate::calls::ReadChunks::new(length, maximum))
     }
     fn read_chunks_exact(
         self,
         length: usize,
         maximum: NonZeroUsize,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::ReadChunksExact>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::ReadChunksExact>> {
         self.operation(crate::calls::ReadChunksExact::new(length, maximum))
     }
 }
@@ -121,13 +121,16 @@ pub trait ReceiverWriteExt: ReceiverExt
 where
     Self::Target: Write,
 {
-    fn write<B: Buf>(self, input: B) -> Child<Self::Root, Routed<Self, crate::calls::Write<B>>> {
+    fn write<B: Buf>(
+        self,
+        input: B,
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::Write<B>>> {
         self.operation(crate::calls::Write::new(input))
     }
     fn write_all<B: Buf>(
         self,
         input: B,
-    ) -> Child<Self::Root, Routed<Self, crate::calls::WriteAll<B>>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, crate::calls::WriteAll<B>>> {
         self.operation(crate::calls::WriteAll::new(input))
     }
 }
@@ -137,7 +140,7 @@ impl<R: ReceiverExt> ReceiverWriteExt for R where R::Target: Write {}
 pub type ChunkResult<F> = Result<Option<<F as ReadChunk>::Chunk>, <F as Read>::Error>;
 
 // Keep host borrowing in the ordinary BoundCall adapter; receiver methods above
-// retain only their route and child state.
+// retain only their receiver and child state.
 macro_rules! host_operation {
     ($name:ident, $unpin:ident, [$($generic:tt)*], ($($arg:ident: $arg_ty:ty),*), $call:ty) => {
         fn $name<'host, $($generic)*>(self: Pin<&'host mut Self>, $($arg: $arg_ty),*)

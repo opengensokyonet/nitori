@@ -66,9 +66,9 @@ extension traits:
 - `NameExt<...>` applies to every actual `H: Host` whose family satisfies the
   declaration. It provides `name` on `Pin<&mut H>` and `name_unpin` on `&mut H`
   when `H: Unpin`. Reconstructed host views also get these methods.
-- `ReceiverNameExt<...>` applies to any `Route` whose target family satisfies
+- `ReceiverNameExt<...>` applies to any `CallReceiver` whose target family satisfies
   the declaration, including root receivers and composed receivers. Its method
-  consumes that route and constructs a host-free child.
+  consumes that receiver and constructs a host-free child.
 
 The traits must be in scope, just like other Rust extension traits. Family
 parameters remain in the generated trait's generic parameters. Arguments whose
@@ -82,11 +82,11 @@ boundary, and hides the current-resume environment.
 
 ## Composition
 
-`io.compose(state)` returns a real `Composed<Route, State>` description. State
+`io.compose(state)` returns a real `Composed<R, State>` description. State
 implements `Compose<InnerFamily>` and supplies an associated output family.
-On each child poll the route reconstructs the inner view, then calls the state's
+On each child poll the receiver reconstructs the inner view, then calls the state's
 `compose` method to build the author-defined outer view. The child executes on
-that output family; the routed operation itself executes on the original root.
+that output family; the received call itself executes on the original root.
 Inside a child call, its receiver starts from that child's declared family.
 
 ```rust

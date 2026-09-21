@@ -541,7 +541,7 @@ fn helper_trait(
         }
     }
     let host_parameter = fresh_parameter(generics, "__CallHost");
-    let route_parameter = fresh_parameter(generics, "__CallRoute");
+    let receiver_parameter = fresh_parameter(generics, "__CallReceiver");
     let call_lifetime = fresh_lifetime(generics, "__call");
     let mut marker_name = "__arguments_marker".to_owned();
     while names.iter().any(|name| *name == marker_name) {
@@ -553,11 +553,11 @@ fn helper_trait(
         .params
         .push(parse_quote!(#host_parameter: ::nitori_call::Host<Family = #host> + ?Sized));
     let (host_params, _, host_constraints) = host_generics.split_for_impl();
-    let mut route_generics = generics.clone();
-    route_generics
+    let mut receiver_generics = generics.clone();
+    receiver_generics
         .params
-        .push(parse_quote!(#route_parameter: ::nitori_call::Route<Target = #host>));
-    let (route_params, _, route_constraints) = route_generics.split_for_impl();
+        .push(parse_quote!(#receiver_parameter: ::nitori_call::CallReceiver<Target = #host>));
+    let (receiver_params, _, receiver_constraints) = receiver_generics.split_for_impl();
     let synchronous = if sync {
         let (result, execute, bounds) = if has_yields {
             (
@@ -605,11 +605,11 @@ fn helper_trait(
             }
         }
         impl #host_params #trait_name #types for #host_parameter #host_constraints {}
-        #visibility trait #receiver_trait #params: ::nitori_call::Route<Target = #host> + Sized #constraints {
-            fn #name(self, #arguments) -> ::nitori_call::Child<Self::Root, ::nitori_call::Routed<Self,#call_type>> {
+        #visibility trait #receiver_trait #params: ::nitori_call::CallReceiver<Target = #host> + Sized #constraints {
+            fn #name(self, #arguments) -> ::nitori_call::Child<Self::Root, ::nitori_call::ReceivedCall<Self,#call_type>> {
                 ::nitori_call::ReceiverExt::call(self, <#arguments_name #types>::new(#(#names),*))
             }
         }
-        impl #route_params #receiver_trait #types for #route_parameter #route_constraints {}
+        impl #receiver_params #receiver_trait #types for #receiver_parameter #receiver_constraints {}
     })
 }

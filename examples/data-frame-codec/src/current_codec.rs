@@ -322,7 +322,7 @@ where
     fn read_at_most(
         self,
         maximum: NonZeroUsize,
-    ) -> nitori_call::Child<Self::Root, nitori_call::Routed<Self, ReadAtMost>> {
+    ) -> nitori_call::Child<Self::Root, nitori_call::ReceivedCall<Self, ReadAtMost>> {
         self.operation(ReadAtMost::new(maximum))
     }
 }
@@ -331,7 +331,7 @@ pub trait ReceiverWriteExt: nitori_call::ReceiverExt {
     fn write<I: Buf>(
         self,
         input: I,
-    ) -> nitori_call::Child<Self::Root, nitori_call::Routed<Self, Write<I>>>
+    ) -> nitori_call::Child<Self::Root, nitori_call::ReceivedCall<Self, Write<I>>>
     where
         Self::Target: WriteSink<I>,
     {

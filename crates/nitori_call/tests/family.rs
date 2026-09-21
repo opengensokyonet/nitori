@@ -61,11 +61,11 @@ fn generated_coroutine_state_does_not_shadow_author_types() {
 }
 
 #[call(sync)]
-async fn hygienic<'__call, '__visit, __CallHost: Copy, __CallRoute: Copy>(
+async fn hygienic<'__call, '__visit, __CallHost: Copy, __CallReceiver: Copy>(
     mut io: Receiver<Direct<()>>,
     marker: &'__call __CallHost,
-    other: &'__visit __CallRoute,
-) -> (__CallHost, __CallRoute) {
+    other: &'__visit __CallReceiver,
+) -> (__CallHost, __CallReceiver) {
     (&mut io).with(|_| (*marker, *other)).await
 }
 #[test]

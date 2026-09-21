@@ -305,9 +305,11 @@ fn generated_receiver_entries_support_reborrows_and_sync_events() {
 #[call]
 async fn escaped(
     io: nitori_call::Receiver<Host>,
-) -> nitori_call::Child<Host, nitori_call::Routed<nitori_call::Receiver<Host>, Decode>> {
-    let value: nitori_call::Child<Host, nitori_call::Routed<nitori_call::Receiver<Host>, Decode>> =
-        io.decode(8);
+) -> nitori_call::Child<Host, nitori_call::ReceivedCall<nitori_call::Receiver<Host>, Decode>> {
+    let value: nitori_call::Child<
+        Host,
+        nitori_call::ReceivedCall<nitori_call::Receiver<Host>, Decode>,
+    > = io.decode(8);
     value
 }
 #[call]
@@ -326,8 +328,10 @@ fn higher_order_call_returns_an_owned_child() {
 async fn input_factory<'data>(
     io: nitori_call::Receiver<Host>,
     data: &'data mut [u8],
-) -> nitori_call::Child<Host, nitori_call::Routed<nitori_call::Receiver<Host>, InputBuffer<'data>>>
-{
+) -> nitori_call::Child<
+    Host,
+    nitori_call::ReceivedCall<nitori_call::Receiver<Host>, InputBuffer<'data>>,
+> {
     io.input_buffer(data)
 }
 #[call]
@@ -337,7 +341,7 @@ async fn higher_input(io: nitori_call::Receiver<Host>) -> [u8; 2] {
     child.await;
     buffer
 }
-#[call(yields = nitori_call::Child<Host, nitori_call::Routed<nitori_call::Receiver<Host>, Decode>>)]
+#[call(yields = nitori_call::Child<Host, nitori_call::ReceivedCall<nitori_call::Receiver<Host>, Decode>>)]
 async fn children(io: nitori_call::Receiver<Host>) {
     yield io.decode(1);
     yield io.decode(4);

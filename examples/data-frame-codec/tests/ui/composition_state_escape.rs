@@ -11,7 +11,7 @@ impl Compose<Direct<()>> for State {
 #[call]
 async fn value(io:Receiver<Direct<usize>>) -> usize {io.with(|a|*a.into_pin().get_mut().0).await}
 #[call]
-async fn rejected(io:Receiver<Direct<()>>) -> nitori_call::Child<Direct<()>,nitori_call::Routed<nitori_call::Composed<Receiver<Direct<()>>, &'static mut State>, Value>> {
+async fn rejected(io:Receiver<Direct<()>>) -> nitori_call::Child<Direct<()>,nitori_call::ReceivedCall<nitori_call::Composed<Receiver<Direct<()>>, &'static mut State>, Value>> {
  let mut state=State(1);
  io.compose(&mut state).value()
 }

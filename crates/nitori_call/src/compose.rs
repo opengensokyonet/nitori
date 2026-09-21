@@ -28,7 +28,7 @@ impl<F: HostFamily> Receiver<F> {
 }
 
 /// A recipe for selecting the host of a child operation.
-pub trait Route {
+pub trait CallReceiver {
     type Root: HostFamily;
     type Target: HostFamily;
     fn view<'access, 'host>(
@@ -40,7 +40,7 @@ pub trait Route {
         Self::Target: 'access,
         'host: 'access;
 }
-impl<F: HostFamily> Route for Receiver<F> {
+impl<F: HostFamily> CallReceiver for Receiver<F> {
     type Root = F;
     type Target = F;
     fn view<'a, 'h>(self: Pin<&'a mut Self>, host: Pin<&'a mut F::Host<'h>>) -> F::Host<'a>
@@ -89,9 +89,9 @@ impl<F: HostFamily, S: Compose<F> + ?Sized> Compose<F> for Pin<&mut S> {
     }
 }
 pin_project_lite::pin_project! {
-    pub struct Composed<R, S> { #[pin] route: R, #[pin] state: S }
+    pub struct Composed<R, S> { #[pin] receiver: R, #[pin] state: S }
 }
-impl<R: Route, S: Compose<R::Target>> Route for Composed<R, S> {
+impl<R: CallReceiver, S: Compose<R::Target>> CallReceiver for Composed<R, S> {
     type Root = R::Root;
     type Target = S::Family;
     fn view<'a, 'h>(
@@ -104,10 +104,10 @@ impl<R: Route, S: Compose<R::Target>> Route for Composed<R, S> {
         'h: 'a,
     {
         let this = self.project();
-        this.state.compose(this.route.view(host))
+        this.state.compose(this.receiver.view(host))
     }
 }
-impl<R: Route + Unpin + ?Sized> Route for &mut R {
+impl<R: CallReceiver + Unpin + ?Sized> CallReceiver for &mut R {
     type Root = R::Root;
     type Target = R::Target;
     fn view<'a, 'h>(
@@ -122,7 +122,7 @@ impl<R: Route + Unpin + ?Sized> Route for &mut R {
         Pin::new(&mut **self.get_mut()).view(host)
     }
 }
-impl<R: Route + ?Sized> Route for Pin<&mut R> {
+impl<R: CallReceiver + ?Sized> CallReceiver for Pin<&mut R> {
     type Root = R::Root;
     type Target = R::Target;
     fn view<'a, 'h>(
@@ -143,22 +143,25 @@ pub trait Arguments<F: HostFamily> {
     fn into_call(self) -> Self::Call;
 }
 
-pub trait ReceiverExt: Route + Sized {
+pub trait ReceiverExt: CallReceiver + Sized {
     fn compose<S: Compose<Self::Target>>(self, state: S) -> Composed<Self, S> {
-        Composed { route: self, state }
+        Composed {
+            receiver: self,
+            state,
+        }
     }
     fn call<A: Arguments<Self::Target>>(
         self,
         arguments: A,
-    ) -> Child<Self::Root, Routed<Self, A::Call>> {
+    ) -> Child<Self::Root, ReceivedCall<Self, A::Call>> {
         self.operation(arguments.into_call())
     }
     fn operation<O: CallOn<Self::Target>>(
         self,
         operation: O,
-    ) -> Child<Self::Root, Routed<Self, O>> {
-        Child::new(Routed {
-            route: self,
+    ) -> Child<Self::Root, ReceivedCall<Self, O>> {
+        Child::new(ReceivedCall {
+            receiver: self,
             operation,
         })
     }
@@ -172,11 +175,11 @@ pub trait ReceiverExt: Route + Sized {
         })
     }
 }
-impl<R: Route> ReceiverExt for R {}
+impl<R: CallReceiver> ReceiverExt for R {}
 pin_project_lite::pin_project! {
-    pub struct Routed<R,O> { #[pin] route:R, #[pin] operation:O }
+    pub struct ReceivedCall<R,O> { #[pin] receiver:R, #[pin] operation:O }
 }
-impl<R: Route, O: CallOn<R::Target>> CallOn<R::Root> for Routed<R, O> {
+impl<R: CallReceiver, O: CallOn<R::Target>> CallOn<R::Root> for ReceivedCall<R, O> {
     type Yield = O::Yield;
     type Return = O::Return;
     fn poll_call<'h>(
@@ -188,7 +191,7 @@ impl<R: Route, O: CallOn<R::Target>> CallOn<R::Root> for Routed<R, O> {
         R::Root: 'h,
     {
         let this = self.project();
-        let mut view = std::pin::pin!(this.route.view(host));
+        let mut view = std::pin::pin!(this.receiver.view(host));
         this.operation.poll_call(view.as_mut(), cx)
     }
 }
@@ -232,10 +235,10 @@ where
 impl<R, S> Composed<R, S> {
     /// Recover the description and state once no child borrows this value.
     pub fn into_parts(self) -> (R, S) {
-        (self.route, self.state)
+        (self.receiver, self.state)
     }
 }
 
-/// A routed synchronous host-access request.
+/// A synchronous host-access request bound to a call receiver.
 pub type WithChild<R, B, Output> =
-    Child<<R as Route>::Root, Routed<R, With<<R as Route>::Target, B, Output>>>;
+    Child<<R as CallReceiver>::Root, ReceivedCall<R, With<<R as CallReceiver>::Target, B, Output>>>;
