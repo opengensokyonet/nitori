@@ -1,0 +1,184 @@
+--- a/crates/nitori_call/src/lib.rs
++++ b/crates/nitori_call/src/lib.rs
+@@ -187,3 +187,5 @@
+ /// Code-generation support, not an author-facing execution API.
+ #[doc(hidden)]
+ pub mod __private;
++
++pub mod typed;
+--- a/crates/nitori_call/src/__private.rs
++++ b/crates/nitori_call/src/__private.rs
+@@ -63,6 +63,15 @@
+     ) -> Output {
+         // SAFETY: propagated from this method's caller; references remain local.
+         unsafe { self.enter(|host, _| body(host)) }
++    }
++    /// # Safety
++    /// Same current-resume and exclusive-access requirements as with.
++    pub unsafe fn poll_await<A: crate::typed::AwaitOn<Host> + ?Sized>(
++        &mut self,
++        value: Pin<&mut A>,
++    ) -> Poll<A::Output> {
++        // SAFETY: the caller supplies the current exclusive resume access.
++        unsafe { self.enter(|host, cx| value.poll_on(host, cx)) }
+     }
+     /// # Safety
+     /// Same current-resume and exclusive-access requirements as with.
+--- a/crates/nitori_call_macros/src/current.rs
++++ b/crates/nitori_call_macros/src/current.rs
+@@ -16,6 +16,18 @@
+         ));
+     }
+     fn visit_macro_mut(&mut self, invocation: &mut Macro) {
++        if invocation
++            .path
++            .segments
++            .last()
++            .is_some_and(|part| part.ident == "pin")
++        {
++            match syn::parse2::<Expr>(invocation.tokens.clone()) {
++                Ok(mut expression) => self.visit_expr_mut(&mut expression),
++                Err(error) => self.error = Some(error),
++            }
++            return;
++        }
+         self.error = Some(Error::new_spanned(
+             invocation,
+             "opaque macros are outside the call macro safety boundary",
+@@ -27,6 +39,7 @@
+     host: Box<Type>,
+     environment: Ident,
+     has_yield: bool,
++    typed: bool,
+     error: Option<Error>,
+ }
+ impl Rewrite {
+@@ -47,7 +60,9 @@
+     fn awaited(&self, input: Tokens, child: bool) -> Expr {
+         let environment = &self.environment;
+         let state = private("__stack_child");
+-        let poll = if child {
++        let poll = if self.typed {
++            quote!(#environment.poll_await(#state.as_mut()))
++        } else if child {
+             quote!(#environment.poll_complete(#state.as_mut()))
+         } else {
+             quote!(#environment.poll_future(#state.as_mut()))
+@@ -68,7 +83,34 @@
+ }
+ impl VisitMut for Rewrite {
+     fn visit_expr_mut(&mut self, expression: &mut Expr) {
++        if let Expr::Macro(invocation) = expression
++            && invocation
++                .mac
++                .path
++                .segments
++                .last()
++                .is_some_and(|part| part.ident == "pin")
++        {
++            match syn::parse2::<Expr>(invocation.mac.tokens.clone()) {
++                Ok(mut inner) => {
++                    self.visit_expr_mut(&mut inner);
++                    *expression = parse_quote!(::core::pin::pin!(#inner));
++                }
++                Err(error) => self.error = Some(error),
++            }
++            return;
++        }
+         if let Expr::Await(awaited) = expression {
++            if self.typed {
++                let mut value = (*awaited.base).clone();
++                self.visit_expr_mut(&mut value);
++                let host = &self.host;
++                *expression = self.awaited(
++                    quote!(::nitori_call::typed::IntoAwaitOn::<#host>::into_await_on(#value)),
++                    false,
++                );
++                return;
++            }
+             if let Expr::MethodCall(method) = &*awaited.base
+                 && self.direct(&method.receiver)
+             {
+@@ -140,6 +182,59 @@
+             *expression = self.access(callback);
+             return;
+         }
++        if self.typed {
++            fn projection(expression: &Expr, receiver: &Ident) -> bool {
++                match expression {
++                    Expr::MethodCall(method) => {
++                        (matches!(&*method.receiver, Expr::Path(path) if path.path.is_ident(receiver))
++                            && (method.method == "as_ref" || method.method == "as_mut"))
++                            || projection(&method.receiver, receiver)
++                    }
++                    _ => false,
++                }
++            }
++            if projection(expression, &self.receiver) {
++                let mut invocation = expression.clone();
++                let host_name = private("__projection_host");
++                struct Replace<'a>(&'a Ident, &'a Ident);
++                impl VisitMut for Replace<'_> {
++                    fn visit_expr_path_mut(&mut self, path: &mut ExprPath) {
++                        if path.path.is_ident(self.0) {
++                            let name = self.1;
++                            path.path = parse_quote!(#name);
++                        }
++                    }
++                }
++                Replace(&self.receiver, &host_name).visit_expr_mut(&mut invocation);
++                *expression = self.access(parse_quote!(|mut #host_name| #invocation));
++                return;
++            }
++            if let Expr::MethodCall(method) = expression
++                && self.direct(&method.receiver)
++            {
++                let mut args = method.args.clone();
++                for argument in &mut args {
++                    self.visit_expr_mut(argument);
++                }
++                if method.method.to_string().starts_with("sync_") {
++                    let name = &method.method;
++                    let host_name = private("__sync_host");
++                    *expression = self.access(parse_quote!(|#host_name| #host_name.#name(#args)));
++                    return;
++                }
++                let name = Ident::new(&camel(&method.method.to_string()), method.method.span());
++                let mut ty: TypePath = parse_quote!(#name);
++                if let Some(arguments) = &method.turbofish {
++                    ty.path.segments.last_mut().unwrap().arguments =
++                        PathArguments::AngleBracketed(arguments.clone());
++                }
++                let constructor = constructor(&ty);
++                let host = &self.host;
++                *expression =
++                    parse_quote!(::nitori_call::typed::Child::<#host,_>::new(#constructor(#args)));
++                return;
++            }
++        }
+         if let Expr::MethodCall(method) = expression
+             && self.direct(&method.receiver)
+         {
+@@ -226,6 +321,14 @@
+         return Err(invalid());
+     };
+     let segment = path.path.segments.last().ok_or_else(invalid)?;
++    if segment.ident == "Receiver" {
++        if let PathArguments::AngleBracketed(arguments) = &segment.arguments
++            && let Some(GenericArgument::Type(host)) = arguments.args.last()
++        {
++            return Ok(Box::new(host.clone()));
++        }
++        return Err(invalid());
++    }
+     if path.qself.is_some() || segment.ident != "Pin" {
+         return Err(invalid());
+     }
+@@ -293,6 +396,7 @@
+         host: host.clone(),
+         environment: environment.clone(),
+         has_yield: false,
++        typed: matches!(&*parameter.ty, Type::Path(path) if path.path.segments.last().is_some_and(|part| part.ident == "Receiver")),
+         error: None,
+     };
+     rewrite.visit_expr_mut(&mut closure.body);
