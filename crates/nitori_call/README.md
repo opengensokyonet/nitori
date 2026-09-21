@@ -76,7 +76,7 @@ fn main() {
 The generated coroutine uses nominal internal Yield and Return wrappers to
 avoid a compiler inference limitation involving nested opaque associated types.
 This does not change the public CallOn types and introduces no heap allocation.
-The standalone [compiler reproduction and issue draft](../../experiments/tait-associated-output/ISSUE.md)
+The standalone [compiler reproduction and upstream report](../../experiments/tait-associated-output/ISSUE.md)
 record the limitation and controls.
 
 ## Synchronous methods

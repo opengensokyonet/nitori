@@ -1,11 +1,10 @@
-# Draft: TAIT whose Fn::Output is another TAIT fails with E0282; RPIT and nominal wrapper work
+# TAIT with Fn::Output equal to another TAIT fails with E0282; RPIT and nominal wrapper work
 
-Status: prepared locally, not submitted. No exact duplicate has been confirmed.
+Published: [163088](https://github.com/rust-lang/rust/issues/163088). Submitted using the upstream [Bug Report template](https://github.com/rust-lang/rust/blob/main/.github/ISSUE_TEMPLATE/bug_report.md).
 
-## Reproduction
+A TAIT with an associated output equal to another, separately defined TAIT is rejected with E0282. The analogous outer RPIT and a nominal output wrapper compile. This can be reproduced without dependencies, procedural macros, async code, or lifetimes.
 
-No dependencies, procedural macros, async code, lifetimes or explicit trait
-implementations are needed:
+I tried this code:
 
 ```rust
 #![feature(type_alias_impl_trait)]
@@ -21,28 +20,41 @@ fn outer() -> Outer { || inner() }
 fn main() { let _ = outer(); }
 ```
 
-Run `rustc +nightly --edition=2024 minimal.rs`.
+Command: `rustc +nightly --edition=2024 minimal.rs`.
 
-Actual result: E0282 at the closure, with the note
-`cannot infer type of hidden type of opaque`. Adding an explicit `-> Inner`
-return annotation to the closure does not resolve the error; the diagnostic
-still suggests an explicit return type. Moving Inner and its constructor into
-a separate module also fails. Both the default solver and
-`-Znext-solver=globally` reject the minimal reproduction.
+I expected to see this happen: the closure uses `Inner` as an already-defined opaque type, while `outer` defines only `Outer`, so the program compiles. If this is intentionally unsupported, a diagnostic explaining that restriction would be helpful.
 
-Expected result: the closure should use Inner as an already-defined opaque
-type and define only Outer. If this is intentionally unsupported, a diagnostic
-explaining that restriction would be helpful.
+Instead, this happened:
 
-## Controls and impact
+```text
+error[E0282]: type annotations needed
+ --> minimal.rs:9:23
+  |
+9 | fn outer() -> Outer { || inner() }
+  |                       ^^
+  |
+  = note: cannot infer type of hidden type of opaque
+help: try giving this closure an explicit return type
+  |
+9 | fn outer() -> Outer { || -> /* Type */ { inner() } }
+  |                          +++++++++++++++         +
 
-Changing only the outer function to RPIT compiles:
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0282`.
+```
+
+Adding `-> Inner` to the closure does not resolve the error (the diagnostic still suggests an explicit return type). Moving `Inner` and its constructor into a separate module also fails. The minimal example is rejected with both the default solver and `-Znext-solver=globally`.
+
+### Passing controls
+
+Keeping `Inner` and `inner` unchanged, replacing the outer TAIT and its defining function with RPIT compiles under both solvers:
 
 ```rust
 fn outer() -> impl Fn() -> Inner { || inner() }
 ```
 
-Keeping the outer TAIT, but hiding Inner behind a nominal field, also compiles:
+Keeping an outer TAIT but putting `Inner` behind a nominal field also compiles under both solvers:
 
 ```rust
 struct Value { value: Inner }
@@ -51,14 +63,25 @@ type Outer = impl Fn() -> Value;
 fn outer() -> Outer { || Value { value: inner() } }
 ```
 
-The analogous Coroutine `Return = Inner` case also fails. This affects
-statically named coroutine operations that return or yield another operation.
-A library workaround uses nominal suspension/completion wrappers, with no
-boxing, to keep nested opaque types out of the outer TAIT's associated type
-constraints. This observation narrows the trigger; it does not identify the
-exact failing compiler query or establish that all nested TAIT bounds fail.
+### Coroutine reproduction
 
-## Toolchain
+The analogous `Coroutine::Return` constraint also fails under both solvers:
+
+```rust
+#![feature(type_alias_impl_trait, coroutines, coroutine_trait)]
+use std::ops::Coroutine;
+type Inner = impl Coroutine<(), Yield=(), Return=usize>;
+#[define_opaque(Inner)] fn inner() -> Inner { #[coroutine] static |_: ()| { if false {yield;} 8 } }
+type Outer = impl Coroutine<(), Yield=(), Return=Inner>;
+#[define_opaque(Outer)] fn outer() -> Outer { #[coroutine] static |_: ()| { if false {yield;} inner() } }
+fn main() {let _ = outer();}
+```
+
+This affects named coroutine operations that return another operation. A library-level workaround uses nominal suspension/completion wrappers to avoid exposing nested opaque types directly in the outer TAIT's associated type constraints, without boxing. The repro above does not depend on that library.
+
+### Meta
+
+`rustc --version --verbose` (nightly):
 
 ```text
 rustc 1.100.0-nightly (feaadeeac 2026-09-19)
@@ -70,15 +93,9 @@ release: 1.100.0-nightly
 LLVM version: 23.1.1
 ```
 
-No regression range has been established.
+No regression range has been established. This is a normal compilation error, not an ICE; there is no panic backtrace.
 
-## Related reports checked
-
-- [TAIT tracking issue #63063](https://github.com/rust-lang/rust/issues/63063).
-- [TAIT defining-use decision #117861](https://github.com/rust-lang/rust/issues/117861).
-- [Projection ambiguity with a nested item bound, trait-system-refactor-initiative #69](https://github.com/rust-lang/trait-system-refactor-initiative/issues/69).
-
-These are related background, not confirmed duplicates of this reproduction.
+Related background I checked: #63063, #117861, and https://github.com/rust-lang/trait-system-refactor-initiative/issues/69. I have not confirmed that any of them tracks this exact reproduction.
 
 ## Local reproduction files
 
