@@ -8,7 +8,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{Direct, Host};
+use nitori_call::{Direct, Receiver};
 
 pin_project_lite::pin_project! {
     /// Add copying chunk reads to any reader, with a shared underlying cursor.
@@ -52,13 +52,13 @@ impl<T> Chunked<T> {
         self.chunk_capacity
     }
 }
-impl<T: Host> Read for Direct<Chunked<T>>
+impl<T: Receiver> Read for Direct<Chunked<T>>
 where
     T::Family: Read,
 {
     type Error = <T::Family as Read>::Error;
     fn poll_read<'visit, O: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<Result<usize, Self::Error>>
@@ -69,13 +69,13 @@ where
         this.project().inner.poll_read(cx, destination)
     }
 }
-impl<T: Host> ReadChunk for Direct<Chunked<T>>
+impl<T: Receiver> ReadChunk for Direct<Chunked<T>>
 where
     T::Family: Read,
 {
     type Chunk = Bytes;
     fn poll_read_chunk<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
     ) -> Poll<Result<Option<Bytes>, Self::Error>>
@@ -104,13 +104,13 @@ where
         )
     }
 }
-impl<T: Host> Write for Direct<Chunked<T>>
+impl<T: Receiver> Write for Direct<Chunked<T>>
 where
     T::Family: Write,
 {
     type Error = <T::Family as Write>::Error;
     fn poll_write<'visit, I: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
     ) -> Poll<Result<usize, Self::Error>>
@@ -122,4 +122,4 @@ where
     }
 }
 
-nitori_call::direct_host!(impl [T] for Chunked<T>);
+nitori_call::direct_receiver!(impl [T] for Chunked<T>);

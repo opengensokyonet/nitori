@@ -3,7 +3,7 @@
 use bytes::{Buf, Bytes};
 use nitori_call::PollCallExt as _;
 use nitori_call::call;
-use nitori_data_frame_codec_example::current_codec::ReceiverWriteExt as _;
+use nitori_data_frame_codec_example::current_codec::TargetWriteExt as _;
 use nitori_data_frame_codec_example::current_codec::{CodecError, WriteSink};
 use std::{
     ops::CoroutineState,
@@ -18,7 +18,7 @@ struct Output {
 
 impl<Input: Buf + ?Sized> WriteSink<&mut Input> for Output {
     fn poll_write<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         input: &mut &mut Input,
         cx: &mut Context<'_>,
     ) -> Poll<Result<usize, CodecError>>
@@ -41,7 +41,7 @@ impl<Input: Buf + ?Sized> WriteSink<&mut Input> for Output {
 
 #[call]
 async fn write_local_buffer(
-    io: nitori_call::Receiver<Output>,
+    io: nitori_call::Target<Output>,
 ) -> Result<(Bytes, usize, Bytes, usize), CodecError> {
     let mut buf = Bytes::from_static(b"abc");
     let returned = io.write(&mut buf).await;
@@ -63,19 +63,21 @@ fn named_call_reborrows_local_buf_across_pending() {
     assert!(
         operation
             .as_mut()
-            .poll_host(Pin::new(&mut output), &mut cx)
+            .poll_receiver(Pin::new(&mut output), &mut cx)
             .is_pending()
     );
     assert!(output.bytes.is_empty());
     assert!(
         operation
             .as_mut()
-            .poll_host(Pin::new(&mut output), &mut cx)
+            .poll_receiver(Pin::new(&mut output), &mut cx)
             .is_pending()
     );
     assert_eq!(output.bytes, b"ab");
     let Poll::Ready(CoroutineState::Complete(Ok((buf, first_count, tail, second_count)))) =
-        operation.as_mut().poll_host(Pin::new(&mut output), &mut cx)
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut output), &mut cx)
     else {
         panic!("expected completion")
     };
@@ -86,4 +88,4 @@ fn named_call_reborrows_local_buf_across_pending() {
     assert_eq!(output.bytes, b"abc");
 }
 
-nitori_call::family_host!(impl [] for Output);
+nitori_call::family_receiver!(impl [] for Output);

@@ -1,13 +1,13 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::{Direct, HostFamily, Receiver, ReceiverExt, call, run_sync};
+use nitori_call::{Direct, ReceiverFamily, Target, TargetExt, call, run_sync};
 use std::pin::Pin;
 #[call(sync)]
-async fn value<F: HostFamily>(io: Receiver<F>, n: usize) -> usize {
+async fn value<F: ReceiverFamily>(io: Target<F>, n: usize) -> usize {
     let other = io;
     other.with(|_| n + 1).await
 }
 #[call(sync)]
-async fn parent<F: HostFamily>(io: Receiver<F>) -> usize {
+async fn parent<F: ReceiverFamily>(io: Target<F>) -> usize {
     io.value(4).await
 }
 #[test]
@@ -20,23 +20,24 @@ fn real_receiver_and_host_extension() {
 struct LocalState(usize);
 impl nitori_call::Compose<Direct<()>> for LocalState {
     type Family = Direct<usize>;
-    fn compose<'v>(
+    fn compose<'v, 'p>(
         self: Pin<&'v mut Self>,
-        _: nitori_call::DirectView<'v, ()>,
+        _: Pin<&'v mut nitori_call::DirectView<'p, ()>>,
     ) -> nitori_call::DirectView<'v, usize>
     where
-        Direct<()>: 'v,
+        Direct<()>: 'p,
+        'p: 'v,
         Self::Family: 'v,
     {
         nitori_call::DirectView(Pin::new(&mut self.get_mut().0))
     }
 }
 #[call(sync)]
-async fn read_state(io: Receiver<Direct<usize>>) -> usize {
+async fn read_state(io: Target<Direct<usize>>) -> usize {
     io.with(|a| *a.into_pin().get_mut().0).await
 }
 #[call(sync)]
-async fn owned_state(io: Receiver<Direct<()>>) -> usize {
+async fn owned_state(io: Target<Direct<()>>) -> usize {
     let mut description = io.compose(LocalState(9));
     let first = (&mut description).read_state().await;
     let second = (&mut description).call(ReadStateArguments::new()).await;
@@ -52,7 +53,7 @@ fn owned_description_can_be_borrowed_reused_and_split() {
 // A source type named State must remain visible inside the generated module.
 struct State(usize);
 #[call(sync)]
-async fn state_argument(_io: Receiver<Direct<()>>, state: State) -> State {
+async fn state_argument(_io: Target<Direct<()>>, state: State) -> State {
     state
 }
 #[test]
@@ -62,7 +63,7 @@ fn generated_coroutine_state_does_not_shadow_author_types() {
 
 #[call(sync)]
 async fn hygienic<'__call, '__visit, __CallHost: Copy, __CallReceiver: Copy>(
-    mut io: Receiver<Direct<()>>,
+    mut io: Target<Direct<()>>,
     marker: &'__call __CallHost,
     other: &'__visit __CallReceiver,
 ) -> (__CallHost, __CallReceiver) {

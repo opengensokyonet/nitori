@@ -135,7 +135,7 @@ fn host_type(annotation: &Type) -> Result<Box<Type>> {
     if let Type::Path(path) = annotation
         && path.qself.is_none()
         && let Some(segment) = path.path.segments.last()
-        && segment.ident == "Receiver"
+        && segment.ident == "Target"
         && let PathArguments::AngleBracketed(arguments) = &segment.arguments
         && arguments.args.len() == 1
         && let Some(GenericArgument::Type(family)) = arguments.args.first()
@@ -144,7 +144,7 @@ fn host_type(annotation: &Type) -> Result<Box<Type>> {
     }
     Err(Error::new_spanned(
         annotation,
-        "call receiver must be Receiver<Family>",
+        "call receiver must be Target<Family>",
     ))
 }
 
@@ -157,7 +157,7 @@ fn coroutine(mut closure: ExprClosure) -> Result<(Tokens, Box<Type>, bool)> {
     if closure.inputs.len() != 1 {
         return Err(Error::new_spanned(
             &closure.inputs,
-            "expected |io: Receiver<F>| { ... }",
+            "expected |io: Target<F>| { ... }",
         ));
     }
     if closure.asyncness.is_some() || closure.constness.is_some() || closure.lifetimes.is_some() {
@@ -168,7 +168,7 @@ fn coroutine(mut closure: ExprClosure) -> Result<(Tokens, Box<Type>, bool)> {
     }
     if let Some(Pat::Ident(binding)) = closure.inputs.first() {
         let binding = binding.clone();
-        closure.inputs[0] = Pat::Type(parse_quote!(#binding: ::nitori_call::Receiver<_>));
+        closure.inputs[0] = Pat::Type(parse_quote!(#binding: ::nitori_call::Target<_>));
     }
     let Some(Pat::Type(parameter)) = closure.inputs.first() else {
         return Err(Error::new_spanned(
@@ -208,7 +208,7 @@ fn coroutine(mut closure: ExprClosure) -> Result<(Tokens, Box<Type>, bool)> {
     let capture = closure.capture;
     let output = closure.output;
     Ok((
-        quote!(::core::convert::identity(#[coroutine] static #capture |mut #environment: ::nitori_call::__private::ResumeEnv<#host>| #output { #[allow(unused_variables)] let #receiver: #annotation = #environment.receiver(); #body })),
+        quote!(::core::convert::identity(#[coroutine] static #capture |mut #environment: ::nitori_call::__private::ResumeContext<#host>| #output { #[allow(unused_variables)] let #receiver: #annotation = #environment.target(); #body })),
         host,
         rewrite.has_yield,
     ))
@@ -443,7 +443,7 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
         #visibility mod #module {
             use super::*;
             pub type __State #implementation #constraints = impl ::core::ops::Coroutine<
-                ::nitori_call::__private::ResumeEnv<#host>,
+                ::nitori_call::__private::ResumeContext<#host>,
                 Yield=__Yield #types, Return=__Return #types>;
             #[define_opaque(__State)]
             pub(super) fn make #implementation (#arguments) -> __State #types #constraints {
@@ -498,7 +498,7 @@ pub(super) fn expand_function(attribute: Tokens, mut function: ItemFn) -> Result
             type Yield = #item_type;
             type Return = #output;
             #[allow(unreachable_code)]
-            fn poll_call<#visit>(self: ::core::pin::Pin<&mut Self>, host: ::core::pin::Pin<&mut <#host as ::nitori_call::HostFamily>::Host<#visit>>, cx: &mut ::core::task::Context<'_>)
+            fn poll_call<#visit>(self: ::core::pin::Pin<&mut Self>, host: ::core::pin::Pin<&mut dyn ::nitori_call::ReceiverScope<#visit, Family = #host>>, cx: &mut ::core::task::Context<'_>)
                 -> ::core::task::Poll<::core::ops::CoroutineState<Self::Yield, Self::Return>> where #host: #visit {
                 ::nitori_call::CallOn::poll_call(self.project().inner, host, cx).map(|event| match event {
                     ::core::ops::CoroutineState::Yielded(value) => ::core::ops::CoroutineState::Yielded(value),
@@ -522,7 +522,7 @@ fn helper_trait(
     let sync_name = format_ident!("sync_{}", name);
     let sync_unpin_name = format_ident!("sync_{}_unpin", name);
     let trait_name = format_ident!("{}Ext", call_name);
-    let receiver_trait = format_ident!("Receiver{}Ext", call_name);
+    let receiver_trait = format_ident!("Target{}Ext", call_name);
     let arguments_name = format_ident!("{}Arguments", call_name);
     let visibility = &function.vis;
     let generics = &function.sig.generics;
@@ -549,14 +549,14 @@ fn helper_trait(
     }
     let marker = private(&marker_name);
     let mut host_generics = generics.clone();
-    host_generics
-        .params
-        .push(parse_quote!(#host_parameter: ::nitori_call::Host<Family = #host> + ?Sized));
+    host_generics.params.push(
+        parse_quote!(#host_parameter: ::nitori_call::ResourceDriver<Family = #host> + ?Sized),
+    );
     let (host_params, _, host_constraints) = host_generics.split_for_impl();
     let mut receiver_generics = generics.clone();
     receiver_generics
         .params
-        .push(parse_quote!(#receiver_parameter: ::nitori_call::CallReceiver<Target = #host>));
+        .push(parse_quote!(#receiver_parameter: ::nitori_call::CallTarget<Target = #host>));
     let (receiver_params, _, receiver_constraints) = receiver_generics.split_for_impl();
     let synchronous = if sync {
         let (result, execute, bounds) = if has_yields {
@@ -573,10 +573,10 @@ fn helper_trait(
             )
         };
         quote! {
-            fn #sync_name<#call_lifetime>(self: ::core::pin::Pin<&#call_lifetime mut Self>, #arguments) -> #result where #bounds {
+            fn #sync_name<#call_lifetime>(self: ::core::pin::Pin<&#call_lifetime mut Self>, #arguments) -> #result where #bounds Self: ::nitori_call::Receiver<Family=#host> {
                 #execute(self, <#call_type>::new(#(#names),*))
             }
-            fn #sync_unpin_name<#call_lifetime>(&#call_lifetime mut self, #arguments) -> #result where #bounds Self: Unpin {
+            fn #sync_unpin_name<#call_lifetime>(&#call_lifetime mut self, #arguments) -> #result where #bounds Self: ::nitori_call::Receiver<Family=#host> + Unpin {
                 #execute(::core::pin::Pin::new(self), <#call_type>::new(#(#names),*))
             }
         }
@@ -595,19 +595,19 @@ fn helper_trait(
             type Call = #call_type;
             fn into_call(self) -> Self::Call { <#call_type>::new(#(self.#names),*) }
         }
-        #visibility trait #trait_name #params: ::nitori_call::Host<Family = #host> #constraints {
+        #visibility trait #trait_name #params: ::nitori_call::ResourceDriver<Family = #host> #constraints {
             #synchronous
-            fn #name<#call_lifetime>(self: ::core::pin::Pin<&#call_lifetime mut Self>, #arguments) -> ::nitori_call::BoundCall<#call_lifetime,Self,#call_type> {
-                ::nitori_call::BoundCall::new(self, <#call_type>::new(#(#names),*))
+            fn #name<#call_lifetime>(self: ::core::pin::Pin<&#call_lifetime mut Self>, #arguments) -> <Self as ::nitori_call::ResourceDriver>::Execution<#call_lifetime,#call_type> {
+                ::nitori_call::ResourceDriver::execute(self, <#call_type>::new(#(#names),*))
             }
-            fn #unpin_name<#call_lifetime>(&#call_lifetime mut self, #arguments) -> ::nitori_call::BoundCall<#call_lifetime,Self,#call_type> where Self: Unpin {
-                ::nitori_call::BoundCall::new(::core::pin::Pin::new(self), <#call_type>::new(#(#names),*))
+            fn #unpin_name<#call_lifetime>(&#call_lifetime mut self, #arguments) -> <Self as ::nitori_call::ResourceDriver>::Execution<#call_lifetime,#call_type> where Self: Unpin {
+                ::nitori_call::ResourceDriver::execute(::core::pin::Pin::new(self), <#call_type>::new(#(#names),*))
             }
         }
         impl #host_params #trait_name #types for #host_parameter #host_constraints {}
-        #visibility trait #receiver_trait #params: ::nitori_call::CallReceiver<Target = #host> + Sized #constraints {
-            fn #name(self, #arguments) -> ::nitori_call::Child<Self::Root, ::nitori_call::ReceivedCall<Self,#call_type>> {
-                ::nitori_call::ReceiverExt::call(self, <#arguments_name #types>::new(#(#names),*))
+        #visibility trait #receiver_trait #params: ::nitori_call::CallTarget<Target = #host> + Sized #constraints {
+            fn #name(self, #arguments) -> ::nitori_call::Child<Self::Root, ::nitori_call::AdaptedCall<Self,#call_type>> {
+                ::nitori_call::TargetExt::call(self, <#arguments_name #types>::new(#(#names),*))
             }
         }
         impl #receiver_params #receiver_trait #types for #receiver_parameter #receiver_constraints {}

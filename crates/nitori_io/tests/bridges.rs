@@ -25,7 +25,7 @@ enum Action {
     Ready,
 }
 pin_project_lite::pin_project! {
-    struct Host {
+    struct Receiver {
         action: Rc<Cell<Action>>,
         source: Bytes,
         written: Vec<u8>,
@@ -33,7 +33,7 @@ pin_project_lite::pin_project! {
         marker: PhantomPinned,
     }
 }
-impl Host {
+impl Receiver {
     fn new(action: Rc<Cell<Action>>) -> Self {
         Self {
             action,
@@ -87,7 +87,7 @@ impl Host {
     }
 }
 #[cfg(feature = "tokio")]
-impl tokio::io::AsyncRead for Host {
+impl tokio::io::AsyncRead for Receiver {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -99,7 +99,7 @@ impl tokio::io::AsyncRead for Host {
     }
 }
 #[cfg(feature = "tokio")]
-impl tokio::io::AsyncWrite for Host {
+impl tokio::io::AsyncWrite for Receiver {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -115,7 +115,7 @@ impl tokio::io::AsyncWrite for Host {
     }
 }
 #[cfg(feature = "futures")]
-impl futures_io::AsyncRead for Host {
+impl futures_io::AsyncRead for Receiver {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -125,7 +125,7 @@ impl futures_io::AsyncRead for Host {
     }
 }
 #[cfg(feature = "futures")]
-impl futures_io::AsyncWrite for Host {
+impl futures_io::AsyncWrite for Receiver {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -153,7 +153,7 @@ fn ready<T>(value: Poll<io::Result<T>>) -> T {
         Poll::Pending => panic!("unexpected Pending"),
     }
 }
-fn check<T: nitori_call::Host>(host: T, action: Rc<Cell<Action>>)
+fn check<T: nitori_call::Receiver>(host: T, action: Rc<Cell<Action>>)
 where
     T::Family: Read<Error = io::Error> + Write<Error = io::Error>,
 {
@@ -247,7 +247,7 @@ where
 fn tokio_preserves_poll_contract_for_pinned_local_hosts() {
     let action = Rc::new(Cell::new(Action::Pending));
     check(
-        nitori_io::bridge::Tokio::new(Host::new(action.clone())),
+        nitori_io::bridge::Tokio::new(Receiver::new(action.clone())),
         action,
     );
 }
@@ -256,7 +256,7 @@ fn tokio_preserves_poll_contract_for_pinned_local_hosts() {
 fn futures_preserves_poll_contract_for_pinned_local_hosts() {
     let action = Rc::new(Cell::new(Action::Pending));
     check(
-        nitori_io::bridge::Futures::new(Host::new(action.clone())),
+        nitori_io::bridge::Futures::new(Receiver::new(action.clone())),
         action,
     );
 }
@@ -265,8 +265,8 @@ fn futures_preserves_poll_contract_for_pinned_local_hosts() {
 fn pinned_pointer_forwards_to_non_unpin_host() {
     let action = Rc::new(Cell::new(Action::Pending));
     #[cfg(feature = "tokio")]
-    let host = nitori_io::bridge::Tokio::new(Host::new(action.clone()));
+    let host = nitori_io::bridge::Tokio::new(Receiver::new(action.clone()));
     #[cfg(all(feature = "futures", not(feature = "tokio")))]
-    let host = nitori_io::bridge::Futures::new(Host::new(action.clone()));
+    let host = nitori_io::bridge::Futures::new(Receiver::new(action.clone()));
     check(Box::pin(host), action);
 }

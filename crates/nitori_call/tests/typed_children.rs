@@ -1,6 +1,6 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 use nitori_call::{CallOn, call, run_sync};
-use nitori_call::{PollCallExt as _, ReceiverExt as _};
+use nitori_call::{PollCallExt as _, TargetExt as _};
 use std::{
     cell::Cell,
     convert::Infallible,
@@ -16,11 +16,11 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
-struct Host {
+struct Receiver {
     count: Rc<Cell<usize>>,
     _pin: PhantomPinned,
 }
-impl Host {
+impl Receiver {
     fn count(&self) -> usize {
         self.count.get()
     }
@@ -39,7 +39,7 @@ impl Future for Pause {
     }
 }
 #[call(yields=usize)]
-async fn decode(io: nitori_call::Receiver<Host>, base: usize) -> usize {
+async fn decode(io: nitori_call::Target<Receiver>, base: usize) -> usize {
     let local = [base, base + 1];
     let borrowed = &local;
     io.with(|__access| {
@@ -69,7 +69,7 @@ impl IntoFuture for Custom {
     }
 }
 #[call(yields=usize)]
-async fn stream(io: nitori_call::Receiver<Host>) -> usize {
+async fn stream(io: nitori_call::Target<Receiver>) -> usize {
     let (first, second) = (io.decode(10), io.decode(20));
     let mut container = Some(if ready(true).await { first } else { second });
     let selected = identity(container.take().unwrap());
@@ -106,16 +106,16 @@ async fn stream(io: nitori_call::Receiver<Host>) -> usize {
             .await
 }
 #[call]
-async fn discard(io: nitori_call::Receiver<Host>) -> usize {
+async fn discard(io: nitori_call::Target<Receiver>) -> usize {
     let child = io.decode(3);
     child.await
 }
 #[call]
-async fn direct(io: nitori_call::Receiver<Host>) -> usize {
+async fn direct(io: nitori_call::Target<Receiver>) -> usize {
     io.decode(4).await
 }
 #[call(yields=usize)]
-async fn inline_pin(io: nitori_call::Receiver<Host>) -> usize {
+async fn inline_pin(io: nitori_call::Target<Receiver>) -> usize {
     let mut child = std::pin::pin!(io.decode(6));
     while let Some(event) = child.as_mut().next().await {
         match event {
@@ -128,7 +128,7 @@ async fn inline_pin(io: nitori_call::Receiver<Host>) -> usize {
     0
 }
 #[call]
-async fn input_buffer<'data>(io: nitori_call::Receiver<Host>, data: &'data mut [u8]) -> usize {
+async fn input_buffer<'data>(io: nitori_call::Target<Receiver>, data: &'data mut [u8]) -> usize {
     data[0] = 7;
     Pause(false).await;
     data[1] = 9;
@@ -139,7 +139,7 @@ async fn input_buffer<'data>(io: nitori_call::Receiver<Host>, data: &'data mut [
     .await
 }
 #[call]
-async fn local_input(io: nitori_call::Receiver<Host>) -> [u8; 2] {
+async fn local_input(io: nitori_call::Target<Receiver>) -> [u8; 2] {
     let mut buffer = [0; 2];
     let view = buffer.as_mut_slice();
     let child = io.input_buffer(view);
@@ -147,7 +147,7 @@ async fn local_input(io: nitori_call::Receiver<Host>) -> [u8; 2] {
     buffer
 }
 #[call(sync)]
-async fn instant(io: nitori_call::Receiver<Host>) -> usize {
+async fn instant(io: nitori_call::Target<Receiver>) -> usize {
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
         host.count()
@@ -155,7 +155,7 @@ async fn instant(io: nitori_call::Receiver<Host>) -> usize {
     .await
 }
 #[call(sync)]
-async fn synchronous(io: nitori_call::Receiver<Host>) -> usize {
+async fn synchronous(io: nitori_call::Target<Receiver>) -> usize {
     let value = io.instant().await;
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
@@ -174,15 +174,15 @@ impl Wake for Counter {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
-fn poll<O: CallOn<Host>>(
+fn poll<O: CallOn<Receiver>>(
     op: Pin<&mut O>,
-    host: Pin<&mut Host>,
+    host: Pin<&mut Receiver>,
     waker: &Waker,
 ) -> Poll<CoroutineState<O::Yield, O::Return>> {
-    op.poll_host(host, &mut Context::from_waker(waker))
+    op.poll_receiver(host, &mut Context::from_waker(waker))
 }
-fn host() -> Host {
-    Host {
+fn host() -> Receiver {
+    Receiver {
         count: Rc::new(Cell::new(0)),
         _pin: PhantomPinned,
     }
@@ -216,7 +216,7 @@ fn events_are_pulled_without_prefetch_and_resume_with_fresh_host_access() {
         Poll::Ready(CoroutineState::Complete(29))
     );
 }
-fn check_discard<O: CallOn<Host, Yield = Infallible, Return = usize>>(
+fn check_discard<O: CallOn<Receiver, Yield = Infallible, Return = usize>>(
     operation: O,
     expected: usize,
 ) {
@@ -270,17 +270,17 @@ fn sync_and_receiver_access() {
 }
 
 #[call(sync, yields = usize)]
-async fn sync_events(io: nitori_call::Receiver<Host>) -> usize {
+async fn sync_events(io: nitori_call::Target<Receiver>) -> usize {
     yield io.instant().await;
     io.with(|access| access.into_pin().as_ref().get_ref().0.count())
         .await
 }
 #[call(sync)]
-async fn generic_echo<T: Copy>(io: nitori_call::Receiver<Host>, value: T) -> T {
+async fn generic_echo<T: Copy>(io: nitori_call::Target<Receiver>, value: T) -> T {
     value
 }
 #[call(sync)]
-async fn generic_sync_caller(io: nitori_call::Receiver<Host>) -> usize {
+async fn generic_sync_caller(io: nitori_call::Target<Receiver>) -> usize {
     io.generic_echo(42usize).await
 }
 #[test]
@@ -304,16 +304,16 @@ fn generated_receiver_entries_support_reborrows_and_sync_events() {
 // Returns a real host-free child through a normal function/closure boundary.
 #[call]
 async fn escaped(
-    io: nitori_call::Receiver<Host>,
-) -> nitori_call::Child<Host, nitori_call::ReceivedCall<nitori_call::Receiver<Host>, Decode>> {
+    io: nitori_call::Target<Receiver>,
+) -> nitori_call::Child<Receiver, nitori_call::AdaptedCall<nitori_call::Target<Receiver>, Decode>> {
     let value: nitori_call::Child<
-        Host,
-        nitori_call::ReceivedCall<nitori_call::Receiver<Host>, Decode>,
+        Receiver,
+        nitori_call::AdaptedCall<nitori_call::Target<Receiver>, Decode>,
     > = io.decode(8);
     value
 }
 #[call]
-async fn reentered(io: nitori_call::Receiver<Host>) -> usize {
+async fn reentered(io: nitori_call::Target<Receiver>) -> usize {
     let value = io.escaped().await;
     let factory = move || value;
     factory().await
@@ -326,28 +326,28 @@ fn higher_order_call_returns_an_owned_child() {
 
 #[call]
 async fn input_factory<'data>(
-    io: nitori_call::Receiver<Host>,
+    io: nitori_call::Target<Receiver>,
     data: &'data mut [u8],
 ) -> nitori_call::Child<
-    Host,
-    nitori_call::ReceivedCall<nitori_call::Receiver<Host>, InputBuffer<'data>>,
+    Receiver,
+    nitori_call::AdaptedCall<nitori_call::Target<Receiver>, InputBuffer<'data>>,
 > {
     io.input_buffer(data)
 }
 #[call]
-async fn higher_input(io: nitori_call::Receiver<Host>) -> [u8; 2] {
+async fn higher_input(io: nitori_call::Target<Receiver>) -> [u8; 2] {
     let mut buffer = [0; 2];
     let child = io.input_factory(&mut buffer).await;
     child.await;
     buffer
 }
-#[call(yields = nitori_call::Child<Host, nitori_call::ReceivedCall<nitori_call::Receiver<Host>, Decode>>)]
-async fn children(io: nitori_call::Receiver<Host>) {
+#[call(yields = nitori_call::Child<Receiver, nitori_call::AdaptedCall<nitori_call::Target<Receiver>, Decode>>)]
+async fn children(io: nitori_call::Target<Receiver>) {
     yield io.decode(1);
     yield io.decode(4);
 }
 #[call]
-async fn flattened(io: nitori_call::Receiver<Host>) -> usize {
+async fn flattened(io: nitori_call::Target<Receiver>) -> usize {
     let mut source = pin!(io.children());
     let mut sum = 0;
     while let Some(event) = source.as_mut().next().await {
@@ -387,7 +387,7 @@ fn returned_child_keeps_borrowed_input_and_yielded_children_can_be_awaited() {
 }
 
 #[call(sync, yields = usize)]
-async fn counter_events(io: nitori_call::Receiver<Host>) -> usize {
+async fn counter_events(io: nitori_call::Target<Receiver>) -> usize {
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
         host.count.set(host.count() + 1)
@@ -409,7 +409,7 @@ async fn counter_events(io: nitori_call::Receiver<Host>) -> usize {
 }
 
 #[call(sync, yields = usize)]
-async fn relay_sync_events(io: nitori_call::Receiver<Host>) -> usize {
+async fn relay_sync_events(io: nitori_call::Target<Receiver>) -> usize {
     let mut child = pin!(io.counter_events());
     while let Some(event) = child.as_mut().next().await {
         match event {
@@ -428,7 +428,9 @@ async fn relay_sync_events(io: nitori_call::Receiver<Host>) -> usize {
 }
 
 #[call(sync)]
-async fn collect_sync_events(io: nitori_call::Receiver<Host>) -> Vec<CoroutineState<usize, usize>> {
+async fn collect_sync_events(
+    io: nitori_call::Target<Receiver>,
+) -> Vec<CoroutineState<usize, usize>> {
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
         {
@@ -444,7 +446,7 @@ fn sync_yielding_children_are_lazy_and_allow_parent_host_access() {
     let mut host = pin!(host());
     let count = host.count.clone();
     let mut receiver = host.as_mut();
-    // UFCS also verifies the public Receiver<Name>Ext spelling.
+    // UFCS also verifies the public Target<Name>Ext spelling.
     let mut events = pin!(RelaySyncEventsExt::sync_relay_sync_events(
         receiver.as_mut()
     ));
@@ -471,4 +473,4 @@ fn with_can_consume_a_sync_event_binding_and_return_owned_events() {
     assert_eq!(host.count(), 2);
 }
 
-nitori_call::family_host!(impl [] for Host);
+nitori_call::family_receiver!(impl [] for Receiver);

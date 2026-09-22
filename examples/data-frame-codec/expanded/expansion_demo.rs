@@ -8,10 +8,10 @@ extern crate std;
 use std::prelude::rust_2024::*;
 use bytes::Bytes;
 use nitori_call::CallOn;
-use nitori_call::{PollCallExt as _, ReceiverExt as _};
+use nitori_call::{PollCallExt as _, TargetExt as _};
 use nitori_call::{call, call_closure};
 use nitori_data_frame_codec_example::{
-    current_codec::ReceiverReadVarintExt,
+    current_codec::TargetReadVarintExt,
     current_codec::{CodecError, ReadSource},
 };
 use std::{
@@ -23,19 +23,19 @@ use std::{
 mod __call_read_pair {
     use super::*;
     pub type __State<T: ReadSource> =
-        impl ::core::ops::Coroutine<::nitori_call::__private::ResumeEnv<T>,
+        impl ::core::ops::Coroutine<::nitori_call::__private::ResumeContext<T>,
         Yield = __Yield<T>, Return = __Return<T>>;
     #[define_opaque(__State)]
     pub(super) fn make<T: ReadSource>() -> __State<T> {
         ::nitori_call::__private::map_coroutine(::core::convert::identity(#[coroutine] static
                     move
                     |mut __stack_environment:
-                        ::nitori_call::__private::ResumeEnv<T>|
+                        ::nitori_call::__private::ResumeContext<T>|
                     -> Result<u64, CodecError>
                     {
                         #[allow(unused_variables)]
-                        let io: nitori_call::Receiver<T> =
-                            __stack_environment.receiver();
+                        let io: nitori_call::Target<T> =
+                            __stack_environment.target();
                         let first =
                             {
                                     let __await_input = io.read_varint();
@@ -280,9 +280,8 @@ impl<T: ReadSource> ::nitori_call::CallOn<T> for ReadPair<T> {
     #[allow(unreachable_code)]
     fn poll_call<'__visit>(self: ::core::pin::Pin<&mut Self>,
         host:
-            ::core::pin::Pin<&mut <T as
-            ::nitori_call::HostFamily>::Host<'__visit>>,
-        cx: &mut ::core::task::Context<'_>)
+            ::core::pin::Pin<&mut dyn ::nitori_call::ReceiverScope<'__visit,
+            Family = T>>, cx: &mut ::core::task::Context<'_>)
         ->
             ::core::task::Poll<::core::ops::CoroutineState<Self::Yield,
             Self::Return>> where T: '__visit {
@@ -308,34 +307,38 @@ impl<T: ReadSource> ::nitori_call::Arguments<T> for ReadPairArguments<T> {
     type Call = ReadPair<T>;
     fn into_call(self) -> Self::Call { <ReadPair<T>>::new() }
 }
-trait ReadPairExt<T: ReadSource>: ::nitori_call::Host<Family = T> {
+trait ReadPairExt<T: ReadSource>: ::nitori_call::ResourceDriver<Family = T> {
     fn read_pair<'__call>(self: ::core::pin::Pin<&'__call mut Self>)
-        -> ::nitori_call::BoundCall<'__call, Self, ReadPair<T>> {
-        ::nitori_call::BoundCall::new(self, <ReadPair<T>>::new())
+        ->
+            <Self as
+            ::nitori_call::ResourceDriver>::Execution<'__call, ReadPair<T>> {
+        ::nitori_call::ResourceDriver::execute(self, <ReadPair<T>>::new())
     }
     fn read_pair_unpin<'__call>(&'__call mut self)
-        -> ::nitori_call::BoundCall<'__call, Self, ReadPair<T>> where
-        Self: Unpin {
-        ::nitori_call::BoundCall::new(::core::pin::Pin::new(self),
+        ->
+            <Self as
+            ::nitori_call::ResourceDriver>::Execution<'__call, ReadPair<T>>
+        where Self: Unpin {
+        ::nitori_call::ResourceDriver::execute(::core::pin::Pin::new(self),
             <ReadPair<T>>::new())
     }
 }
-impl<T: ReadSource, __CallHost: ::nitori_call::Host<Family = T> + ?Sized>
-    ReadPairExt<T> for __CallHost {}
-trait ReceiverReadPairExt<T: ReadSource>: ::nitori_call::CallReceiver<Target =
+impl<T: ReadSource, __CallHost: ::nitori_call::ResourceDriver<Family = T> +
+    ?Sized> ReadPairExt<T> for __CallHost {}
+trait TargetReadPairExt<T: ReadSource>: ::nitori_call::CallTarget<Target =
     T> + Sized {
     fn read_pair(self)
         ->
             ::nitori_call::Child<Self::Root,
-            ::nitori_call::ReceivedCall<Self, ReadPair<T>>> {
-        ::nitori_call::ReceiverExt::call(self, <ReadPairArguments<T>>::new())
+            ::nitori_call::AdaptedCall<Self, ReadPair<T>>> {
+        ::nitori_call::TargetExt::call(self, <ReadPairArguments<T>>::new())
     }
 }
-impl<T: ReadSource, __CallReceiver: ::nitori_call::CallReceiver<Target = T>>
-    ReceiverReadPairExt<T> for __CallReceiver {}
+impl<T: ReadSource, __CallReceiver: ::nitori_call::CallTarget<Target = T>>
+    TargetReadPairExt<T> for __CallReceiver {}
 struct Source(Bytes);
 impl ReadSource for Source {
-    fn poll_read<'visit>(host: Pin<&mut Self::Host<'visit>>,
+    fn poll_read<'visit>(host: Pin<&mut Self::ReceiverView<'visit>>,
         maximum: NonZeroUsize, _: &mut Context<'_>)
         -> Poll<Result<Option<Bytes>, CodecError>> where Self: 'visit {
         let mut this = host.get_mut().0.as_mut();
@@ -355,12 +358,12 @@ fn check<Operation>(operation: Operation) where
         };
     let mut source = Source(Bytes::from_static(b"\x01\x02"));
     let mut cx = Context::from_waker(Waker::noop());
-    if !#[allow(non_exhaustive_omitted_patterns)] match operation.as_mut().poll_host(Pin::new(&mut source),
+    if !#[allow(non_exhaustive_omitted_patterns)] match operation.as_mut().poll_receiver(Pin::new(&mut source),
                     &mut cx) {
                 Poll::Ready(CoroutineState::Yielded(1)) => true,
                 _ => false,
             } {
-        ::core::panicking::panic("assertion failed: matches!(operation.as_mut().poll_host(Pin::new(&mut source), &mut cx),\n    Poll::Ready(CoroutineState::Yielded(1)))")
+        ::core::panicking::panic("assertion failed: matches!(operation.as_mut().poll_receiver(Pin::new(&mut source), &mut cx),\n    Poll::Ready(CoroutineState::Yielded(1)))")
     };
     {
         match (&source.0.as_ref(), &b"\x02") {
@@ -373,12 +376,12 @@ fn check<Operation>(operation: Operation) where
             }
         }
     };
-    if !#[allow(non_exhaustive_omitted_patterns)] match operation.as_mut().poll_host(Pin::new(&mut source),
+    if !#[allow(non_exhaustive_omitted_patterns)] match operation.as_mut().poll_receiver(Pin::new(&mut source),
                     &mut cx) {
                 Poll::Ready(CoroutineState::Complete(Ok(3))) => true,
                 _ => false,
             } {
-        ::core::panicking::panic("assertion failed: matches!(operation.as_mut().poll_host(Pin::new(&mut source), &mut cx),\n    Poll::Ready(CoroutineState::Complete(Ok(3))))")
+        ::core::panicking::panic("assertion failed: matches!(operation.as_mut().poll_receiver(Pin::new(&mut source), &mut cx),\n    Poll::Ready(CoroutineState::Complete(Ok(3))))")
     };
     if !source.0.is_empty() {
         ::core::panicking::panic("assertion failed: source.0.is_empty()")
@@ -390,12 +393,12 @@ fn main() {
             let __stack_state =
                 ::core::convert::identity(#[coroutine] static
                         |mut __stack_environment:
-                            ::nitori_call::__private::ResumeEnv<Source>|
+                            ::nitori_call::__private::ResumeContext<Source>|
                         -> Result<u64, CodecError>
                         {
                             #[allow(unused_variables)]
-                            let io: nitori_call::Receiver<Source> =
-                                __stack_environment.receiver();
+                            let io: nitori_call::Target<Source> =
+                                __stack_environment.target();
                             let first =
                                 {
                                         let __await_input = io.read_varint();
@@ -512,14 +515,14 @@ fn main() {
             }
         });
 }
-impl ::nitori_call::HostFamily for Source {
-    type Host<'visit> = ::nitori_call::BorrowedHost<'visit, Self> where
-        Self: 'visit;
+impl ::nitori_call::ReceiverFamily for Source {
+    type ReceiverView<'visit> = ::nitori_call::BorrowedReceiver<'visit, Self>
+        where Self: 'visit;
 }
-impl ::nitori_call::Host for Source {
+impl ::nitori_call::Receiver for Source {
     type Family = Self;
     fn view<'visit>(self: ::core::pin::Pin<&'visit mut Self>)
-        -> ::nitori_call::BorrowedHost<'visit, Self> where Self: 'visit {
-        ::nitori_call::BorrowedHost(self)
+        -> ::nitori_call::BorrowedReceiver<'visit, Self> where Self: 'visit {
+        ::nitori_call::BorrowedReceiver(self)
     }
 }

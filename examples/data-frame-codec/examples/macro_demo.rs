@@ -15,7 +15,7 @@ use std::{
 struct Input(Bytes);
 impl ReadSource for Input {
     fn poll_read<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         maximum: NonZeroUsize,
         _: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, CodecError>>
@@ -36,7 +36,7 @@ fn main() {
     let mut call = pin!(read_data_frame::<Input>(NonZeroUsize::new(2).unwrap()));
     let mut cx = Context::from_waker(Waker::noop());
     loop {
-        match call.as_mut().poll_host(Pin::new(&mut input), &mut cx) {
+        match call.as_mut().poll_receiver(Pin::new(&mut input), &mut cx) {
             Poll::Ready(CoroutineState::Yielded(bytes)) => println!("macro chunk: {bytes:?}"),
             Poll::Ready(CoroutineState::Complete(result)) => {
                 println!("macro complete: {result:?}; unconsumed: {:?}", input.0);
@@ -49,4 +49,4 @@ fn main() {
     }
 }
 
-nitori_call::family_host!(impl [] for Input);
+nitori_call::family_receiver!(impl [] for Input);

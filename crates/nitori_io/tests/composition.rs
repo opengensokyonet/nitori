@@ -1,8 +1,10 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 #![allow(clippy::multiple_bound_locations)] // pin-project-lite generated projection bounds
 use bytes::BufMut;
-use nitori_call::{Access, Compose, Host, HostFamily, PollCallExt, Receiver, ReceiverExt, call};
-use nitori_io::{Read, ReceiverReadExt};
+use nitori_call::{
+    Access, Compose, PollCallExt, Receiver, ReceiverFamily, Target, TargetExt, call,
+};
+use nitori_io::{Read, TargetReadExt};
 use std::{
     cell::Cell,
     marker::{PhantomData, PhantomPinned},
@@ -27,46 +29,35 @@ struct Counted<'data, F>(PhantomData<fn() -> (&'data str, F)>);
 pin_project_lite::pin_project! {
     // pin-project-lite parses the trait and lifetime bounds separately.
     #[allow(clippy::multiple_bound_locations)]
-    struct View<'visit,'data,F:HostFamily> where F:'visit {
-        #[pin] inner:F::Host<'visit>,
+    struct View<'visit,'data,F:ReceiverFamily> where F:'visit {
+        inner:nitori_call::ViewLoan<'visit,F>,
         state:Pin<&'visit mut Count<'data>>,
         invariant:PhantomData<fn(&'visit ())->&'visit ()>,
         #[pin] pinned:PhantomPinned,
     }
 }
-impl<'data, F: HostFamily> HostFamily for Counted<'data, F> {
-    type Host<'visit>
+impl<'data, F: ReceiverFamily> ReceiverFamily for Counted<'data, F> {
+    type ReceiverView<'visit>
         = View<'visit, 'data, F>
     where
         Self: 'visit;
 }
-impl<'data, F: HostFamily> Host for View<'_, 'data, F> {
+impl<'data, F: ReceiverFamily> nitori_call::HasReceiverFamily for View<'_, 'data, F> {
     type Family = Counted<'data, F>;
-    fn view<'visit>(self: Pin<&'visit mut Self>) -> View<'visit, 'data, F>
-    where
-        Self::Family: 'visit,
-    {
-        let this = self.project();
-        View {
-            inner: this.inner.view(),
-            state: this.state.as_mut(),
-            invariant: PhantomData,
-            pinned: PhantomPinned,
-        }
-    }
 }
-impl<'data, F: HostFamily> Compose<F> for Count<'data> {
+impl<'data, F: ReceiverFamily> Compose<F> for Count<'data> {
     type Family = Counted<'data, F>;
-    fn compose<'visit>(
+    fn compose<'visit, 'parent>(
         self: Pin<&'visit mut Self>,
-        inner: F::Host<'visit>,
+        inner: Pin<&'visit mut F::ReceiverView<'parent>>,
     ) -> View<'visit, 'data, F>
     where
-        F: 'visit,
+        F: 'parent,
+        'parent: 'visit,
         Self::Family: 'visit,
     {
         View {
-            inner,
+            inner: nitori_call::ViewLoan::new(inner),
             state: self,
             invariant: PhantomData,
             pinned: PhantomPinned,
@@ -76,7 +67,7 @@ impl<'data, F: HostFamily> Compose<F> for Count<'data> {
 impl<F: Read> Read for Counted<'_, F> {
     type Error = F::Error;
     fn poll_read<'v, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'v>>,
+        host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -85,18 +76,19 @@ impl<F: Read> Read for Counted<'_, F> {
     {
         let host = host.project();
         host.state.polls.set(host.state.polls.get() + 1);
-        F::poll_read(host.inner, cx, out)
+        host.inner
+            .with(|access| F::poll_read(access.into_pin(), cx, out))
     }
 }
 trait TaggedFamily: Read {
     type Tag;
-    fn tag<'v>(host: Pin<&mut Self::Host<'v>>) -> Self::Tag
+    fn tag<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> Self::Tag
     where
         Self: 'v;
 }
 impl<'data, F: Read> TaggedFamily for Counted<'data, F> {
     type Tag = &'data str;
-    fn tag<'v>(host: Pin<&mut Self::Host<'v>>) -> &'data str
+    fn tag<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> &'data str
     where
         Self: 'v,
     {
@@ -105,7 +97,7 @@ impl<'data, F: Read> TaggedFamily for Counted<'data, F> {
 }
 #[call(yields = F::Tag)]
 async fn tagged<F: TaggedFamily>(
-    io: Receiver<F>,
+    io: Target<F>,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<F::Error>> {
     let tag = io.with(|a: Access<'_, '_, F>| F::tag(a.into_pin())).await;
     yield tag;
@@ -113,7 +105,7 @@ async fn tagged<F: TaggedFamily>(
 }
 #[call(yields = usize)]
 async fn inner<F: Read>(
-    io: Receiver<F>,
+    io: Target<F>,
     drops: Rc<Cell<usize>>,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<F::Error>> {
     let label = String::from("inner");
@@ -140,7 +132,7 @@ fn unreachable_result<T>() -> T {
 }
 #[call(yields=usize)]
 async fn outer<F: Read>(
-    io: Receiver<F>,
+    io: Target<F>,
     drops: Rc<Cell<usize>>,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<F::Error>> {
     let label = String::from("outer");
@@ -165,11 +157,11 @@ struct Delayed<'data> {
     bytes: &'data [u8],
     waiting: bool,
 }
-nitori_call::family_host!(impl ['data] for Delayed<'data>);
+nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
     type Error = std::convert::Infallible;
     fn poll_read<'v, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'v>>,
+        host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -200,23 +192,27 @@ fn nested_child_local_state_nonstatic_family_and_invariant_pinned_views() {
     let mut operation = Box::pin(outer::<Delayed<'_>>(drops.clone()));
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut host), &mut cx),
         Poll::Ready(CoroutineState::Yielded(5))
     ));
     assert!(
         operation
             .as_mut()
-            .poll_host(Pin::new(&mut host), &mut cx)
+            .poll_receiver(Pin::new(&mut host), &mut cx)
             .is_pending()
     );
     assert!(
         operation
             .as_mut()
-            .poll_host(Pin::new(&mut host), &mut cx)
+            .poll_receiver(Pin::new(&mut host), &mut cx)
             .is_pending()
     );
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut host), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut host), &mut cx),
         Poll::Ready(CoroutineState::Complete(Ok([1, 2])))
     ));
     assert_eq!(host.bytes, &[3]);
@@ -232,11 +228,13 @@ fn cancellation_drops_local_states_without_consuming_source() {
     let drops = Rc::new(Cell::new(0));
     let mut operation = Box::pin(outer::<Delayed<'_>>(drops.clone()));
     let mut cx = Context::from_waker(Waker::noop());
-    let _ = operation.as_mut().poll_host(Pin::new(&mut host), &mut cx);
+    let _ = operation
+        .as_mut()
+        .poll_receiver(Pin::new(&mut host), &mut cx);
     assert!(
         operation
             .as_mut()
-            .poll_host(Pin::new(&mut host), &mut cx)
+            .poll_receiver(Pin::new(&mut host), &mut cx)
             .is_pending()
     );
     drop(operation);
@@ -244,7 +242,7 @@ fn cancellation_drops_local_states_without_consuming_source() {
     assert_eq!(host.bytes, &[1, 2]);
 }
 #[test]
-fn generated_extension_is_available_on_author_defined_view() {
+fn explicit_view_executes_without_reconstruction() {
     let mut bytes = &b"abcd"[..];
     let drops = Rc::new(Cell::new(0));
     let label = String::from("owned outside call");
@@ -254,14 +252,52 @@ fn generated_extension_is_available_on_author_defined_view() {
         dropped: drops.clone(),
         _pin: PhantomPinned
     });
+    let mut parent = pin!(Pin::new(&mut bytes).view());
     let mut view = pin!(<Count<'_> as Compose<nitori_call::Direct<&[u8]>>>::compose(
         state.as_mut(),
-        Pin::new(&mut bytes).view()
+        parent.as_mut()
     ));
-    use std::future::Future;
-    let mut call = pin!(view.as_mut().tagged());
+    use nitori_call::CallOn;
+    let mut scope = pin!(nitori_call::ViewScope::<
+        Counted<'_, nitori_call::Direct<&[u8]>>,
+    >::new(view.as_mut()));
+    let mut call = pin!(tagged::<Counted<'_, nitori_call::Direct<&[u8]>>>());
     assert!(matches!(
-        call.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        call.as_mut()
+            .poll_return(scope.as_mut(), &mut Context::from_waker(Waker::noop())),
         Poll::Ready(Ok([b'a', b'b']))
     ));
+}
+
+#[call]
+async fn chained<F: Read>(
+    io: Target<F>,
+    drops: Rc<Cell<usize>>,
+) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<F::Error>> {
+    let label = String::from("chain");
+    let a = Count {
+        label: &label,
+        polls: Cell::new(0),
+        dropped: drops.clone(),
+        _pin: PhantomPinned,
+    };
+    let b = Count {
+        label: &label,
+        polls: Cell::new(0),
+        dropped: drops.clone(),
+        _pin: PhantomPinned,
+    };
+    io.compose(a).compose(b).read_array::<2>().await
+}
+#[test]
+fn chained_target_keeps_both_intermediate_views_alive() {
+    let mut bytes = &b"abc"[..];
+    let drops = Rc::new(Cell::new(0));
+    let result = nitori_call::run_sync(
+        Pin::new(&mut bytes),
+        chained::<nitori_call::Direct<&[u8]>>(drops.clone()),
+    );
+    assert_eq!(result.unwrap(), *b"ab");
+    assert_eq!(bytes, b"c");
+    assert_eq!(drops.get(), 2);
 }

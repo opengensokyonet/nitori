@@ -6,8 +6,8 @@ numeric decoding and does not reference `std::io::FromEndianBytes`.
 
 ## Capabilities and operations
 
-`Read`, `ReadChunk`, and `Write` are capabilities on `HostFamily` types.
-Each method accepts a pinned `Self::Host<'visit>` for any valid visit lifetime;
+`Read`, `ReadChunk`, and `Write` are capabilities on `ReceiverFamily` types.
+Each method accepts a pinned `Self::ReceiverView<'visit>` for any valid visit lifetime;
 errors and chunks are stable associated types independent of that visit.
 `Read` fills any `BufMut`; `ReadChunk: Read` additionally returns owned `Buf`
 chunks from the same cursor. `Write` accepts any `Buf`. Buffer generics belong
@@ -19,12 +19,12 @@ Import receiver extension traits for child calls, and operation types from
 
 ```rust
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::{call, Receiver};
-use nitori_io::{Read as ReadHost, ReceiverReadExt};
+use nitori_call::{call, Target};
+use nitori_io::{Read as ReadHost, TargetReadExt};
 use nitori_io::calls::ReadExactError;
 
 #[call]
-async fn header<H: ReadHost>(io: Receiver<H>) -> Result<[u8; 3], ReadExactError<H::Error>> {
+async fn header<H: ReadHost>(io: Target<H>) -> Result<[u8; 3], ReadExactError<H::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
@@ -60,14 +60,17 @@ before synchronous decoding. Pointer-sized encodings depend on the target width.
 
 Actual hosts provide `ReadExt`, `ChunkExt`, and `WriteExt` operation methods
 returning bound calls, with pinned and `_unpin` entries. They also provide `PollReadExt` / `PollWriteExt` for synchronous poll
-access through their canonical family. `ReceiverReadExt`, `ReceiverChunkExt`,
-and `ReceiverWriteExt` work on both root and composed receivers. A local
-resource can use `nitori_call::family_host!` and implement the family capability
-on itself; custom wrapper families implement their own view reconstruction.
+access through their canonical family. `TargetReadExt`, `TargetChunkExt`,
+and `TargetWriteExt` work on both root and composed receivers. A local
+resource can use `nitori_call::family_receiver!` and implement the family capability
+on itself; custom wrapper families define their own views and capability identity.
+IO operations request the current scope lazily and invoke capabilities on its
+cached view, without reconstructing it. Resource extension methods also work
+on custom `ResourceDriver` implementations.
 
 ## Built-in hosts and bridges
 
-| Host | Read | Write | Native ReadChunk |
+| Receiver | Read | Write | Native ReadChunk |
 | --- | --- | --- | --- |
 | `&[u8]` | yes | — | borrowed subslice |
 | `&mut [u8]` | — | bounded | — |

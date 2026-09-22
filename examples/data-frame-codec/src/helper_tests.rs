@@ -4,7 +4,7 @@ use crate::current_codec::{
 use bytes::Bytes;
 use nitori_call::call;
 use nitori_call::{CallOn, Stream};
-use nitori_call::{PollCallExt as _, ReceiverExt as _};
+use nitori_call::{PollCallExt as _, TargetExt as _};
 use std::{
     cell::{Cell, RefCell},
     future::Future,
@@ -32,7 +32,7 @@ impl Memory {
 }
 impl ReadSource for Memory {
     fn poll_read<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         maximum: NonZeroUsize,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, CodecError>>
@@ -71,7 +71,7 @@ struct PinnedMemory {
 }
 impl ReadSource for PinnedMemory {
     fn poll_read<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         maximum: NonZeroUsize,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, CodecError>>
@@ -93,7 +93,7 @@ fn pinned_helper_supports_non_unpin_and_dyn_targets() {
         let mut future = pin!(source.as_mut().read_varint());
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(1))));
     }
-    let mut view = nitori_call::Host::view(source.as_mut());
+    let mut view = nitori_call::Receiver::view(source.as_mut());
     let erased = Pin::new(&mut view);
     let mut future = pin!(erased.read_varint());
     assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(2))));
@@ -171,7 +171,7 @@ impl Drop for DropGuard {
     }
 }
 #[call]
-async fn wait_forever(io: nitori_call::Receiver<nitori_call::Direct<usize>>, guard: DropGuard) {
+async fn wait_forever(io: nitori_call::Target<nitori_call::Direct<usize>>, guard: DropGuard) {
     io.with(|__access| {
         let mut target = __access.into_pin().get_mut().0.as_mut();
         *target += 1
@@ -204,7 +204,7 @@ impl Fallible for usize {
 }
 #[call(yields = &'data str)]
 async fn generic_helper<'data, T: Fallible + ?Sized, const EXTRA: usize>(
-    io: nitori_call::Receiver<nitori_call::Direct<T>>,
+    io: nitori_call::Target<nitori_call::Direct<T>>,
     text: &'data str,
 ) -> Result<usize, T::Error> {
     yield text;
@@ -240,12 +240,14 @@ impl<T: Copy> CallOn<nitori_call::Direct<T>> for Identity {
     type Return = T;
     fn poll_call<'v>(
         self: Pin<&mut Self>,
-        target: Pin<&mut nitori_call::DirectView<'v, T>>,
-        _: &mut Context<'_>,
+        target: Pin<&mut dyn nitori_call::ReceiverScope<'v, Family = nitori_call::Direct<T>>>,
+        cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Self::Yield, T>>
     where
         nitori_call::Direct<T>: 'v,
     {
+        let target = std::task::ready!(target.poll_view(cx));
+
         Poll::Ready(CoroutineState::Complete(*target.get_mut().0))
     }
 }
@@ -255,18 +257,18 @@ fn one_operation_type_has_a_signature_for_each_target() {
     let mut number = 7u32;
     let mut flag = true;
     assert_eq!(
-        Pin::new(&mut Identity).poll_host(Pin::new(&mut number), &mut cx),
+        Pin::new(&mut Identity).poll_receiver(Pin::new(&mut number), &mut cx),
         Poll::Ready(CoroutineState::Complete(7))
     );
     assert_eq!(
-        Pin::new(&mut Identity).poll_host(Pin::new(&mut flag), &mut cx),
+        Pin::new(&mut Identity).poll_receiver(Pin::new(&mut flag), &mut cx),
         Poll::Ready(CoroutineState::Complete(true))
     );
 }
 
 impl crate::current_codec::WriteSink<Bytes> for nitori_call::Direct<Vec<u8>> {
     fn poll_write<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         input: &mut Bytes,
         _: &mut Context<'_>,
     ) -> Poll<Result<usize, CodecError>>
@@ -354,6 +356,6 @@ async fn write_through_trait_only<
     target.write_all_unpin(input).await
 }
 
-nitori_call::family_host!(impl [] for Memory);
+nitori_call::family_receiver!(impl [] for Memory);
 
-nitori_call::family_host!(impl [] for PinnedMemory);
+nitori_call::family_receiver!(impl [] for PinnedMemory);

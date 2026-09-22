@@ -1,6 +1,6 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 use nitori_call::{BoundCall, call};
-use nitori_io::{PollReadExt as _, ReceiverReadExt as _, ReceiverWriteExt as _};
+use nitori_io::{PollReadExt as _, TargetReadExt as _, TargetWriteExt as _};
 use nitori_io::{
     Read, Write,
     calls::{ReadArrayError, WriteAllError, WriteReturn},
@@ -13,25 +13,25 @@ use std::{
 };
 
 #[call(sync)]
-async fn header<Host: Read>(
-    io: nitori_call::Receiver<Host>,
-) -> Result<[u8; 3], ReadArrayError<Host::Error>> {
+async fn header<Receiver: Read>(
+    io: nitori_call::Target<Receiver>,
+) -> Result<[u8; 3], ReadArrayError<Receiver::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let rest = io.read_array::<2>().await?;
     Ok([tag, rest[0], rest[1]])
 }
 #[call(sync)]
-async fn encode<'input, Host: Write>(
-    io: nitori_call::Receiver<Host>,
+async fn encode<'input, Receiver: Write>(
+    io: nitori_call::Target<Receiver>,
     input: &'input [u8],
-) -> WriteReturn<&'input [u8], WriteAllError<Host::Error>> {
+) -> WriteReturn<&'input [u8], WriteAllError<Receiver::Error>> {
     io.write_all(input).await
 }
 #[call(sync, yields = [u8; 3])]
-async fn headers<Host: Read>(
-    io: nitori_call::Receiver<Host>,
+async fn headers<Receiver: Read>(
+    io: nitori_call::Target<Receiver>,
     count: usize,
-) -> Result<(), ReadArrayError<Host::Error>> {
+) -> Result<(), ReadArrayError<Receiver::Error>> {
     for _ in 0..count {
         yield io.header().await?;
     }
@@ -72,7 +72,7 @@ struct Delayed<'a> {
 impl Read for Delayed<'_> {
     type Error = std::convert::Infallible;
     fn poll_read<'visit, Output: bytes::BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
     ) -> Poll<Result<usize, Self::Error>>
@@ -102,4 +102,4 @@ fn same_codec_can_resume_on_async_host() {
     assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(value)) if value == *b"abc"));
 }
 
-nitori_call::family_host!(impl ['data] for Delayed<'data>);
+nitori_call::family_receiver!(impl ['data] for Delayed<'data>);

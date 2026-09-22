@@ -1,6 +1,6 @@
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 
-use nitori_call::ReceiverExt as _;
+use nitori_call::TargetExt as _;
 use nitori_call::{BoundCall, CallOn, SyncBoundCall, call, call_closure, run_sync, step_sync};
 use std::{
     cell::Cell,
@@ -15,7 +15,7 @@ use std::{
 };
 
 #[call(sync)]
-async fn increment(io: nitori_call::Receiver<nitori_call::Direct<usize>>, amount: usize) -> usize {
+async fn increment(io: nitori_call::Target<nitori_call::Direct<usize>>, amount: usize) -> usize {
     io.with(|__access| {
         let mut host = __access.into_pin().get_mut().0.as_mut();
         {
@@ -27,14 +27,14 @@ async fn increment(io: nitori_call::Receiver<nitori_call::Direct<usize>>, amount
 }
 
 #[call(sync)]
-async fn twice(io: nitori_call::Receiver<nitori_call::Direct<usize>>, amount: usize) -> usize {
+async fn twice(io: nitori_call::Target<nitori_call::Direct<usize>>, amount: usize) -> usize {
     io.increment(amount).await;
     io.increment(amount).await
 }
 
 #[call(sync, yields = usize)]
 async fn sequence(
-    io: nitori_call::Receiver<nitori_call::Direct<Cell<usize>>>,
+    io: nitori_call::Target<nitori_call::Direct<Cell<usize>>>,
     count: usize,
 ) -> Result<usize, &'static str> {
     for value in 0..count {
@@ -49,7 +49,7 @@ async fn sequence(
 }
 
 #[call(yields = Infallible, sync,)]
-async fn declared_empty(io: nitori_call::Receiver<nitori_call::Direct<usize>>) -> usize {
+async fn declared_empty(io: nitori_call::Target<nitori_call::Direct<usize>>) -> usize {
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
         *host
@@ -58,12 +58,12 @@ async fn declared_empty(io: nitori_call::Receiver<nitori_call::Direct<usize>>) -
 }
 
 #[call(sync)]
-async fn wait_forever(io: nitori_call::Receiver<nitori_call::Direct<usize>>) {
+async fn wait_forever(io: nitori_call::Target<nitori_call::Direct<usize>>) {
     pending::<()>().await
 }
 
 #[call(sync, yields = usize)]
-async fn yield_then_wait(io: nitori_call::Receiver<nitori_call::Direct<usize>>) {
+async fn yield_then_wait(io: nitori_call::Target<nitori_call::Direct<usize>>) {
     yield 1;
     pending::<()>().await;
 }
@@ -73,13 +73,13 @@ fn fail_operation() {
 }
 
 #[call(sync, yields = usize)]
-async fn yield_then_panic(io: nitori_call::Receiver<nitori_call::Direct<usize>>) {
+async fn yield_then_panic(io: nitori_call::Target<nitori_call::Direct<usize>>) {
     yield 1;
     fail_operation();
 }
 
 #[call(sync, yields = usize)]
-async fn borrowed_local(io: nitori_call::Receiver<nitori_call::Direct<usize>>) -> usize {
+async fn borrowed_local(io: nitori_call::Target<nitori_call::Direct<usize>>) -> usize {
     let values = [3, 5];
     let borrowed = &values[..];
     yield borrowed[0];
@@ -92,16 +92,16 @@ async fn borrowed_local(io: nitori_call::Receiver<nitori_call::Direct<usize>>) -
 }
 
 #[call(sync)]
-async fn borrowed_result<'value, Host: nitori_call::HostFamily, const LENGTH: usize>(
-    io: nitori_call::Receiver<Host>,
+async fn borrowed_result<'value, Receiver: nitori_call::ReceiverFamily, const LENGTH: usize>(
+    io: nitori_call::Target<Receiver>,
     value: &'value [u8; LENGTH],
 ) -> Result<&'value [u8], &'value [u8]> {
     Ok(value)
 }
 
 #[call(sync)]
-async fn length<Host: AsRef<[u8]> + ?Sized>(
-    io: nitori_call::Receiver<nitori_call::Direct<Host>>,
+async fn length<Receiver: AsRef<[u8]> + ?Sized>(
+    io: nitori_call::Target<nitori_call::Direct<Receiver>>,
 ) -> usize {
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
@@ -206,7 +206,7 @@ struct PinnedHost {
     _pin: PhantomPinned,
 }
 #[call(sync, yields = usize)]
-async fn counted(io: nitori_call::Receiver<PinnedHost>) -> usize {
+async fn counted(io: nitori_call::Target<PinnedHost>) -> usize {
     let count = io
         .with(|__access| {
             let host = __access.into_pin().get_mut().0.as_mut();
@@ -219,7 +219,7 @@ async fn counted(io: nitori_call::Receiver<PinnedHost>) -> usize {
     count.get()
 }
 #[call(sync)]
-async fn current(io: nitori_call::Receiver<PinnedHost>) -> usize {
+async fn current(io: nitori_call::Target<PinnedHost>) -> usize {
     io.with(|__access| {
         let host = __access.into_pin().get_mut().0.as_mut();
         host.count.get()
@@ -250,12 +250,14 @@ impl CallOn<nitori_call::Direct<usize>> for Manual {
     type Return = usize;
     fn poll_call<'v>(
         self: Pin<&mut Self>,
-        view: Pin<&mut nitori_call::DirectView<'v, usize>>,
-        _: &mut Context<'_>,
+        view: Pin<&mut dyn nitori_call::ReceiverScope<'v, Family = nitori_call::Direct<usize>>>,
+        cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Infallible, usize>>
     where
         nitori_call::Direct<usize>: 'v,
     {
+        let view = std::task::ready!(view.poll_view(cx));
+
         let mut host = view.get_mut().0.as_mut();
         *host += 1;
         Poll::Ready(CoroutineState::Complete(*host))
@@ -270,7 +272,7 @@ fn adapters_accept_manual_and_anonymous_operations() {
         step_sync(operation.as_mut(), Pin::new(&mut host)),
         CoroutineState::Complete(2)
     );
-    let operation = call_closure!(|io: nitori_call::Receiver<nitori_call::Direct<usize>>| {
+    let operation = call_closure!(|io: nitori_call::Target<nitori_call::Direct<usize>>| {
         yield io
             .with(|__access| {
                 let host = __access.into_pin().get_mut().0.as_mut();
@@ -294,4 +296,4 @@ fn async_driver_can_still_wait_for_the_same_operation() {
     assert!(bound.as_mut().poll(&mut cx).is_pending());
 }
 
-nitori_call::family_host!(impl [] for PinnedHost);
+nitori_call::family_receiver!(impl [] for PinnedHost);

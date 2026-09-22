@@ -58,7 +58,7 @@ impl<T> From<T> for Std<T> {
 impl<T: io::Read> Read for Direct<Std<T>> {
     type Error = io::Error;
     fn poll_read<'visit, O: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<io::Result<usize>>
@@ -74,7 +74,7 @@ impl<T: io::Read> Read for Direct<Std<T>> {
 impl<T: io::Write> Write for Direct<Std<T>> {
     type Error = io::Error;
     fn poll_write<'visit, I: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
     ) -> Poll<io::Result<usize>>
@@ -128,7 +128,7 @@ impl<T> From<T> for Tokio<T> {
 impl<T: tokio::io::AsyncRead> Read for Direct<Tokio<T>> {
     type Error = io::Error;
     fn poll_read<'visit, O: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<io::Result<usize>>
@@ -147,7 +147,7 @@ impl<T: tokio::io::AsyncRead> Read for Direct<Tokio<T>> {
 impl<T: tokio::io::AsyncWrite> Write for Direct<Tokio<T>> {
     type Error = io::Error;
     fn poll_write<'visit, I: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
     ) -> Poll<io::Result<usize>>
@@ -201,7 +201,7 @@ impl<T> From<T> for Futures<T> {
 impl<T: futures_io::AsyncRead> Read for Direct<Futures<T>> {
     type Error = io::Error;
     fn poll_read<'visit, O: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
     ) -> Poll<io::Result<usize>>
@@ -218,7 +218,7 @@ impl<T: futures_io::AsyncRead> Read for Direct<Futures<T>> {
 impl<T: futures_io::AsyncWrite> Write for Direct<Futures<T>> {
     type Error = io::Error;
     fn poll_write<'visit, I: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
     ) -> Poll<io::Result<usize>>
@@ -232,8 +232,8 @@ impl<T: futures_io::AsyncWrite> Write for Direct<Futures<T>> {
     }
 }
 
-nitori_call::direct_host!(impl [T] for Std<T>);
+nitori_call::direct_receiver!(impl [T] for Std<T>);
 #[cfg(feature = "tokio")]
-nitori_call::direct_host!(impl [T] for Tokio<T>);
+nitori_call::direct_receiver!(impl [T] for Tokio<T>);
 #[cfg(feature = "futures")]
-nitori_call::direct_host!(impl [T] for Futures<T>);
+nitori_call::direct_receiver!(impl [T] for Futures<T>);

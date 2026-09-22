@@ -2,7 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 use nitori_call::CallOn;
 use nitori_call::call_closure;
-use nitori_call::{PollCallExt as _, ReceiverExt as _};
+use nitori_call::{PollCallExt as _, TargetExt as _};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -58,19 +58,21 @@ impl CallOn<nitori_call::Direct<u8>> for ReadByte {
     type Return = u8;
     fn poll_call<'v>(
         self: Pin<&mut Self>,
-        view: Pin<&mut nitori_call::DirectView<'v, u8>>,
-        _: &mut Context<'_>,
+        view: Pin<&mut dyn nitori_call::ReceiverScope<'v, Family = nitori_call::Direct<u8>>>,
+        cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Infallible, u8>>
     where
         nitori_call::Direct<u8>: 'v,
     {
+        let view = std::task::ready!(view.poll_view(cx));
+
         let mut target = view.get_mut().0.as_mut();
         *target += 1;
         Poll::Ready(CoroutineState::Complete(*target))
     }
 }
 #[nitori_call::call]
-async fn named_byte(io: nitori_call::Receiver<nitori_call::Direct<u8>>) -> u8 {
+async fn named_byte(io: nitori_call::Target<nitori_call::Direct<u8>>) -> u8 {
     io.operation(ReadByte::new()).await
 }
 #[test]
@@ -80,7 +82,7 @@ fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
     ALLOCATIONS.with(|count| count.set(0));
     COUNTING.with(|flag| flag.set(true));
     let (emitted, waits, returned) = {
-        let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+        let mut operation = pin!(call_closure!(|io: nitori_call::Target<
             nitori_call::Direct<u8>,
         >| {
             let mut sum = 0usize;
@@ -105,7 +107,10 @@ fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
         let mut emitted = 0;
         let mut waits = 0;
         let returned = loop {
-            match operation.as_mut().poll_host(Pin::new(&mut target), &mut cx) {
+            match operation
+                .as_mut()
+                .poll_receiver(Pin::new(&mut target), &mut cx)
+            {
                 Poll::Pending => waits += 1,
                 Poll::Ready(CoroutineState::Yielded(_)) => emitted += 1,
                 Poll::Ready(CoroutineState::Complete(value)) => break value,

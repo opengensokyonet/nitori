@@ -1,5 +1,5 @@
 // expect: type mismatch resolving
-use nitori_call::{HostFamily,DirectView};
+use nitori_call::{ReceiverFamily,DirectView};
 struct Wrong;
-impl HostFamily for Wrong {type Host<'v> = DirectView<'v,()>;}
+impl ReceiverFamily for Wrong {type ReceiverView<'v> = DirectView<'v,()>;}
 fn main() {}

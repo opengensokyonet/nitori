@@ -25,10 +25,10 @@ pub mod helpers;
 /// `Pending` and `Err` must not consume source bytes or advance the destination.
 /// Report a completed prefix before a subsequent error. Register the waker
 /// before returning `Pending`; retain no pointer into this temporary borrow.
-pub trait Read: nitori_call::HostFamily {
+pub trait Read: nitori_call::ReceiverFamily {
     type Error;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
     ) -> Poll<Result<usize, Self::Error>>
@@ -45,7 +45,7 @@ pub trait Read: nitori_call::HostFamily {
 pub trait ReadChunk: Read {
     type Chunk: Buf;
     fn poll_read_chunk<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
     ) -> Poll<Result<Option<Self::Chunk>, Self::Error>>
@@ -60,10 +60,10 @@ pub trait ReadChunk: Read {
 /// never `Ok(0)`; [`calls::WriteAll`] reports zero progress as an error.
 /// Acceptance does not imply flushing or remote delivery. Empty requests reach
 /// the host. The buffer borrow lasts only for this poll.
-pub trait Write: nitori_call::HostFamily {
+pub trait Write: nitori_call::ReceiverFamily {
     type Error;
     fn poll_write<'visit, Input: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
     ) -> Poll<Result<usize, Self::Error>>

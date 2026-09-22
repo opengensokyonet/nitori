@@ -11,19 +11,43 @@ use std::{
 /// Standard Stream contract exposed for consumers of bound operations.
 pub use futures_core::Stream;
 
-mod host;
-pub use host::{BorrowedHost, Direct, DirectView, Host, HostFamily};
+mod receiver;
+pub use receiver::{
+    BorrowedReceiver, Direct, DirectView, HasReceiverFamily, Receiver, ReceiverFamily,
+};
+mod scope;
+pub use scope::{BorrowedScope, ReceiverScope, ViewScope};
+mod driver;
+pub use driver::{Drive, DriveMode, Execution, ExecutionControl, ResourceDriver, drive};
+mod loan;
+pub use loan::{ViewLoan, ViewOperation};
 
-pub trait CallOn<F: HostFamily> {
+pub trait CallOn<F: ReceiverFamily> {
     type Yield;
     type Return;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut F::Host<'visit>>,
+        host: Pin<&mut dyn ReceiverScope<'visit, Family = F>>,
         cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Self::Yield, Self::Return>>
     where
         F: 'visit;
+    fn poll_return<'view>(
+        mut self: Pin<&mut Self>,
+        mut scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Self::Return>
+    where
+        F: 'view,
+    {
+        loop {
+            match self.as_mut().poll_call(scope.as_mut(), cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(CoroutineState::Yielded(value)) => drop(value),
+                Poll::Ready(CoroutineState::Complete(value)) => return Poll::Ready(value),
+            }
+        }
+    }
 }
 
 pin_project_lite::pin_project! {
@@ -37,7 +61,7 @@ pin_project_lite::pin_project! {
         terminal: bool,
     }
 }
-impl<'host, H: Host + ?Sized, Operation: CallOn<H::Family>> BoundCall<'host, H, Operation> {
+impl<'host, H: Receiver + ?Sized, Operation: CallOn<H::Family>> BoundCall<'host, H, Operation> {
     pub fn new(host: Pin<&'host mut H>, operation: Operation) -> Self {
         Self {
             host,
@@ -54,7 +78,7 @@ impl<'host, H: Host + ?Sized, Operation: CallOn<H::Family>> BoundCall<'host, H, 
         poll_fn(move |cx| self.as_mut().poll_next(cx))
     }
 }
-impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Stream for BoundCall<'_, H, Operation> {
+impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> Stream for BoundCall<'_, H, Operation> {
     type Item = CoroutineState<Operation::Yield, Operation::Return>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -63,8 +87,11 @@ impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Stream for BoundCall<'_, H,
         }
         // Poison on unwinding; no attempt is made to resume a panicked operation.
         *this.terminal = true;
-        let mut view = std::pin::pin!(this.host.as_mut().view());
-        match this.operation.poll_call(view.as_mut(), cx) {
+        let result = {
+            let mut scope = std::pin::pin!(BorrowedScope::new(this.host.as_mut()));
+            this.operation.poll_call(scope.as_mut(), cx)
+        };
+        match result {
             Poll::Pending => {
                 *this.terminal = false;
                 Poll::Pending
@@ -80,17 +107,20 @@ impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Stream for BoundCall<'_, H,
     }
 }
 /// Awaiting a bound call discards all intermediate yields and returns completion.
-impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Future for BoundCall<'_, H, Operation> {
+impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> Future for BoundCall<'_, H, Operation> {
     type Output = Operation::Return;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        loop {
-            match self.as_mut().poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(CoroutineState::Yielded(_))) => (),
-                Poll::Ready(Some(CoroutineState::Complete(value))) => return Poll::Ready(value),
-                Poll::Ready(None) => panic!("call polled after completion or panic"),
-            }
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        assert!(!*this.terminal, "call polled after completion or panic");
+        *this.terminal = true;
+        let result = {
+            let mut scope = std::pin::pin!(BorrowedScope::new(this.host.as_mut()));
+            this.operation.poll_return(scope.as_mut(), cx)
+        };
+        if result.is_pending() {
+            *this.terminal = false;
         }
+        result
     }
 }
 
@@ -100,12 +130,12 @@ impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Future for BoundCall<'_, H,
 /// `Pending`; this is a contract violation, not an incomplete-input result.
 /// After a panic, the caller must not resume the operation. The caller also
 /// owns tracking completion and must not poll a completed operation again.
-pub fn step_sync<H: Host + ?Sized, Operation: CallOn<H::Family>>(
+pub fn step_sync<H: Receiver + ?Sized, Operation: CallOn<H::Family>>(
     operation: Pin<&mut Operation>,
     host: Pin<&mut H>,
 ) -> CoroutineState<Operation::Yield, Operation::Return> {
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    let mut view = std::pin::pin!(host.view());
+    let mut view = std::pin::pin!(BorrowedScope::new(host));
     match operation.poll_call(view.as_mut(), &mut cx) {
         Poll::Ready(event) => event,
         Poll::Pending => panic!("synchronous call returned Pending"),
@@ -116,7 +146,7 @@ pub fn step_sync<H: Host + ?Sized, Operation: CallOn<H::Family>>(
 ///
 /// The operation is pinned on the stack. See [`step_sync`] for the synchronous
 /// execution contract. Previously consumed or written data is not rolled back.
-pub fn run_sync<H: Host + ?Sized, Operation>(
+pub fn run_sync<H: Receiver + ?Sized, Operation>(
     host: Pin<&mut H>,
     operation: Operation,
 ) -> Operation::Return
@@ -143,7 +173,7 @@ pin_project_lite::pin_project! {
         terminal: bool,
     }
 }
-impl<'host, H: Host + ?Sized, Operation: CallOn<H::Family>> SyncBoundCall<'host, H, Operation> {
+impl<'host, H: Receiver + ?Sized, Operation: CallOn<H::Family>> SyncBoundCall<'host, H, Operation> {
     pub fn new(host: Pin<&'host mut H>, operation: Operation) -> Self {
         Self {
             bound: BoundCall::new(host, operation),
@@ -175,7 +205,7 @@ impl<'host, H: Host + ?Sized, Operation: CallOn<H::Family>> SyncBoundCall<'host,
         }
     }
 }
-impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Iterator
+impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> Iterator
     for Pin<&mut SyncBoundCall<'_, H, Operation>>
 {
     type Item = CoroutineState<Operation::Yield, Operation::Return>;
@@ -183,7 +213,7 @@ impl<H: Host + ?Sized, Operation: CallOn<H::Family>> Iterator
         SyncBoundCall::next(self.as_mut())
     }
 }
-impl<H: Host + ?Sized, Operation: CallOn<H::Family>> std::iter::FusedIterator
+impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> std::iter::FusedIterator
     for Pin<&mut SyncBoundCall<'_, H, Operation>>
 {
 }
@@ -196,15 +226,18 @@ pub use nitori_call_macros::{call, call_closure};
 pub mod __private;
 
 mod typed;
-/// Host receivers, owned child operations and host-aware await adapters.
+/// Owned child operations and receiver-aware await adapters.
 pub use typed::{AwaitOn, Child, IntoAwaitOn, Next};
 
 mod compose;
-pub use compose::*;
+pub use compose::{
+    Access, AdaptedCall, Arguments, CallTarget, Compose, Composed, Target, TargetExt, With,
+    WithChild,
+};
 
-/// Poll using an actual resource; construct and discard its view in this poll.
+/// Poll using a resource; construct its view lazily and discard it before returning.
 pub trait PollCallExt: Sized {
-    fn poll_host<H: Host + ?Sized>(
+    fn poll_receiver<H: Receiver + ?Sized>(
         self: Pin<&mut Self>,
         host: Pin<&mut H>,
         cx: &mut Context<'_>,
@@ -212,10 +245,13 @@ pub trait PollCallExt: Sized {
     where
         Self: CallOn<H::Family>,
     {
-        <Self as CallOn<H::Family>>::poll_call(self, std::pin::pin!(host.view()), cx)
+        <Self as CallOn<H::Family>>::poll_call(self, std::pin::pin!(BorrowedScope::new(host)), cx)
     }
 }
 impl<O> PollCallExt for O {}
 
 /// One event from an operation executing on a family.
 pub type CallEvent<F, O> = CoroutineState<<O as CallOn<F>>::Yield, <O as CallOn<F>>::Return>;
+
+mod acquisition;
+pub use acquisition::{AcquiredScope, AcquisitionState, MapAcquisition, ViewAcquisition};

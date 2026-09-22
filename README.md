@@ -6,13 +6,14 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Layout
 
-- `crates/nitori_call`: `Host`, `HostFamily`, `CallOn`, composition, asynchronous and synchronous adapters, and the public macro re-exports; see its [README](crates/nitori_call/README.md) for `#[call(sync)]` and synchronous event iteration.
+- `crates/nitori_call`: `ReceiverFamily`, `ReceiverScope`, `ResourceDriver`, `CallOn`, composition, asynchronous and synchronous adapters, and the public macro re-exports; see its [README](crates/nitori_call/README.md) for `#[call(sync)]` and synchronous event iteration.
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
 - `experiments/tait-associated-output`: standalone [compiler reproductions and upstream report](experiments/tait-associated-output/ISSUE.md) for nested opaque output inference.
 - `experiments/typed-await`: isolated [typed child-await prototype](experiments/typed-await/README.md) with manual pinning, event consumption, and a reproducible validation runner.
 - `experiments/host-family`: isolated [host-family execution experiment](experiments/host-family/README.md), including scoped coroutine resumption, explicit view reconstruction for nested composition, and non-static host-access callbacks.
+- `experiments/host-context`: isolated [asynchronous host-context experiment](experiments/host-context/README.md), including lazy owned views, round-scoped reuse, coroutine integration and compiler checks for projection boundaries.
 
 ## Development
 

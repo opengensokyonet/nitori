@@ -6,7 +6,7 @@
 )]
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nitori_call::{BoundCall, call};
-use nitori_io::{PollReadExt as _, ReceiverReadExt as _, ReceiverWriteExt as _};
+use nitori_io::{PollReadExt as _, TargetReadExt as _, TargetWriteExt as _};
 use nitori_io::{
     Read as ReadHost, ReadChunk as ChunkHost, Write as WriteHost,
     calls::*,
@@ -92,7 +92,7 @@ impl Source {
 impl ReadHost for Source {
     type Error = io::Error;
     fn poll_read<'visit, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         mut out: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -116,7 +116,7 @@ struct ChunkSource(Source);
 impl ReadHost for ChunkSource {
     type Error = io::Error;
     fn poll_read<'visit, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         out: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -133,7 +133,7 @@ impl ReadHost for ChunkSource {
 impl ChunkHost for ChunkSource {
     type Chunk = Bytes;
     fn poll_read_chunk<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
     ) -> Poll<Result<Option<Bytes>, Self::Error>>
@@ -174,7 +174,7 @@ impl Sink {
 impl WriteHost for Sink {
     type Error = io::Error;
     fn poll_write<'visit, B: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -439,7 +439,7 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
 
 #[call]
 async fn local_codec<H: ReadHost>(
-    io: nitori_call::Receiver<H>,
+    io: nitori_call::Target<H>,
 ) -> Result<[u8; 3], nitori_io::calls::ReadExactError<H::Error>> {
     let [first] = io.read_array::<1>().await?;
     let mut rest = [0; 2];
@@ -449,7 +449,7 @@ async fn local_codec<H: ReadHost>(
 }
 #[call]
 async fn number_codec<H: ReadHost>(
-    io: nitori_call::Receiver<H>,
+    io: nitori_call::Target<H>,
 ) -> Result<u32, nitori_io::calls::ReadLeError<H::Error>> {
     io.read_le::<u32>().await
 }
@@ -686,7 +686,7 @@ pin_project_lite::pin_project! {
 impl ReadHost for PinnedHost {
     type Error = io::Error;
     fn poll_read<'visit, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -713,7 +713,7 @@ struct BorrowedErrorHost<'a>(&'a str);
 impl<'a> ReadHost for BorrowedErrorHost<'a> {
     type Error = &'a str;
     fn poll_read<'visit, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -734,7 +734,7 @@ fn host_errors_need_neither_error_trait_nor_static_lifetime() {
 
 #[call]
 async fn borrowed_write<H: WriteHost>(
-    io: nitori_call::Receiver<H>,
+    io: nitori_call::Target<H>,
 ) -> Result<usize, nitori_io::calls::WriteAllError<H::Error>> {
     let mut input = Bytes::from_static(b"abc");
     let returned = io.write_all(&mut input).await;
@@ -762,7 +762,7 @@ struct RawHost<'a> {
 impl<'a> ReadHost for RawHost<'a> {
     type Error = RawFailure<'a>;
     fn poll_read<'visit, B: BufMut + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -776,7 +776,7 @@ impl<'a> ReadHost for RawHost<'a> {
 impl ChunkHost for RawHost<'_> {
     type Chunk = Bytes;
     fn poll_read_chunk<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: NonZeroUsize,
     ) -> Poll<Result<Option<Bytes>, Self::Error>>
@@ -790,7 +790,7 @@ impl ChunkHost for RawHost<'_> {
 impl<'a> WriteHost for RawHost<'a> {
     type Error = RawFailure<'a>;
     fn poll_write<'visit, B: Buf + ?Sized>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
     ) -> Poll<Result<usize, Self::Error>>
@@ -874,7 +874,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
                             completed: 0,
                         },
                 } => {}
-                $error::Incomplete { .. } | $error::Host { .. } => {
+                $error::Incomplete { .. } | $error::Receiver { .. } => {
                     panic!("expected incomplete read")
                 }
             }
@@ -922,8 +922,8 @@ fn numeric_errors_preserve_progress_and_original_source() {
             ));
             assert_eq!(snafu::ErrorCompat::iter_chain(&error).count(), 2);
             match error {
-                $error::Host { completed: 2, .. } => {}
-                $error::Host { .. } | $error::Incomplete { .. } => {
+                $error::Receiver { completed: 2, .. } => {}
+                $error::Receiver { .. } | $error::Incomplete { .. } => {
                     panic!("expected partial host failure")
                 }
             }
@@ -933,14 +933,50 @@ fn numeric_errors_preserve_progress_and_original_source() {
     check!(ReadBe::<u32>::new(), ReadBeError);
 }
 
-nitori_call::family_host!(impl [] for Source);
+nitori_call::family_receiver!(impl [] for Source);
 
-nitori_call::family_host!(impl [] for ChunkSource);
+nitori_call::family_receiver!(impl [] for ChunkSource);
 
-nitori_call::family_host!(impl [] for Sink);
+nitori_call::family_receiver!(impl [] for Sink);
 
-nitori_call::family_host!(impl [] for PinnedHost);
+nitori_call::family_receiver!(impl [] for PinnedHost);
 
-nitori_call::family_host!(impl ['a] for BorrowedErrorHost<'a>);
+nitori_call::family_receiver!(impl ['a] for BorrowedErrorHost<'a>);
 
-nitori_call::family_host!(impl ['a] for RawHost<'a>);
+nitori_call::family_receiver!(impl ['a] for RawHost<'a>);
+
+#[test]
+fn local_validation_and_zero_length_composites_do_not_request_a_view() {
+    use nitori_call::{CallOn, Direct, DirectView, ReceiverScope};
+    struct Unavailable;
+    impl<'v> ReceiverScope<'v> for Unavailable {
+        type Family = Direct<std::io::Cursor<Vec<u8>>>;
+        fn poll_view(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Pin<&mut DirectView<'v, std::io::Cursor<Vec<u8>>>>> {
+            panic!("receiver should not be requested")
+        }
+    }
+    let mut scope = Unavailable;
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let mut destination = &mut [0u8; 0][..];
+    let mut insufficient = nitori_io::calls::ReadExact::new(&mut destination, 1);
+    assert!(matches!(
+        Pin::new(&mut insufficient).poll_call(Pin::<&mut Unavailable>::new(&mut scope), &mut cx),
+        Poll::Ready(CoroutineState::Complete(Err(_)))
+    ));
+    let mut empty = nitori_io::calls::ReadArray::<0>::new();
+    assert!(matches!(
+        Pin::new(&mut empty).poll_call(Pin::<&mut Unavailable>::new(&mut scope), &mut cx),
+        Poll::Ready(CoroutineState::Complete(Ok([])))
+    ));
+    let mut empty = nitori_io::calls::WriteAll::new(&b""[..]);
+    assert!(matches!(
+        Pin::new(&mut empty).poll_call(Pin::<&mut Unavailable>::new(&mut scope), &mut cx),
+        Poll::Ready(CoroutineState::Complete(nitori_io::calls::WriteReturn {
+            result: Ok(_),
+            ..
+        }))
+    ));
+}

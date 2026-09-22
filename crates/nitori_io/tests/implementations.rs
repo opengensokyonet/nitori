@@ -22,7 +22,7 @@ fn ready<T, E: std::fmt::Debug>(poll: Poll<Result<T, E>>) -> T {
         Poll::Pending => panic!("unexpected Pending"),
     }
 }
-fn check_reader<T: nitori_call::Host + Unpin>(mut source: T)
+fn check_reader<T: nitori_call::Receiver + Unpin>(mut source: T)
 where
     T::Family: Read<Error = Infallible>,
 {
@@ -69,7 +69,7 @@ fn memory_readers_and_forwarding_share_cursors() {
     );
     assert_eq!(cursor.position(), u64::MAX);
 }
-fn check_chunks<T: nitori_call::Host + Unpin>(mut source: T)
+fn check_chunks<T: nitori_call::Receiver + Unpin>(mut source: T)
 where
     T::Family: ReadChunk<Error = Infallible>,
 {
@@ -94,7 +94,7 @@ fn native_chunks_are_bounded_and_zero_copy() {
     check_chunks(&b"abcde"[..]);
     check_chunks(Box::pin(Bytes::from_static(b"abcde")));
 }
-fn write<T: nitori_call::Host + Unpin>(sink: &mut T) -> usize
+fn write<T: nitori_call::Receiver + Unpin>(sink: &mut T) -> usize
 where
     T::Family: Write,
     <T::Family as Write>::Error: std::fmt::Debug,
@@ -198,7 +198,7 @@ fn std_errors_preserve_buffers_and_empty_requests_reach_host() {
 
 #[test]
 fn operations_extend_actual_resources_and_views() {
-    use nitori_call::Host;
+    use nitori_call::Receiver;
     use nitori_io::{ReadExt, WriteExt};
     use std::{future::Future, pin::pin};
     let mut source = &b"abcd"[..];

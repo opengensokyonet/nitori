@@ -6,14 +6,14 @@ use core::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use nitori_call::Host;
+use nitori_call::Receiver;
 
 /// Fill from one chunk, copying its entire contents without retaining a tail.
 ///
 /// Call this after any host-specific terminal-error checks: an empty destination
 /// returns zero locally because a chunk request must be nonzero. In particular,
 /// this helper must not bypass an error that the host prioritizes over emptiness.
-pub fn poll_read_from_chunk<H: Host + ?Sized, B: BufMut + ?Sized>(
+pub fn poll_read_from_chunk<H: Receiver + ?Sized, B: BufMut + ?Sized>(
     host: Pin<&mut H>,
     cx: &mut Context<'_>,
     mut destination: &mut B,
@@ -52,7 +52,7 @@ pub fn poll_chunk_from_read<H, B, C>(
     finish: impl FnOnce(B) -> C,
 ) -> Poll<Result<Option<C>, <H::Family as Read>::Error>>
 where
-    H: Host + ?Sized,
+    H: Receiver + ?Sized,
     H::Family: Read,
     B: BufMut,
     C: Buf,

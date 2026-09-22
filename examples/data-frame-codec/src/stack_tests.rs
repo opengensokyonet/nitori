@@ -1,9 +1,9 @@
 use crate::current_codec::{CodecError, ReadSource};
-use crate::current_codec::{ReceiverReadAtMostExt, ReceiverReadVarintExt};
+use crate::current_codec::{TargetReadAtMostExt, TargetReadVarintExt};
 use bytes::Bytes;
 use nitori_call::CallOn;
 use nitori_call::call_closure;
-use nitori_call::{PollCallExt as _, ReceiverExt as _};
+use nitori_call::{PollCallExt as _, TargetExt as _};
 use std::num::NonZeroUsize;
 use std::{
     cell::Cell,
@@ -53,12 +53,14 @@ impl CallOn<nitori_call::Direct<Target>> for WriteLocal<'_> {
     type Return = usize;
     fn poll_call<'v>(
         self: Pin<&mut Self>,
-        view: Pin<&mut nitori_call::DirectView<'v, Target>>,
+        view: Pin<&mut dyn nitori_call::ReceiverScope<'v, Family = nitori_call::Direct<Target>>>,
         cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Infallible, usize>>
     where
         nitori_call::Direct<Target>: 'v,
     {
+        let view = std::task::ready!(view.poll_view(cx));
+
         let target = view.get_mut().0.as_mut();
         let this = self.get_mut();
         if !this.waited {
@@ -73,7 +75,7 @@ impl CallOn<nitori_call::Direct<Target>> for WriteLocal<'_> {
 }
 #[test]
 fn locals_and_child_borrows_survive_pending_then_emit() {
-    let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+    let mut operation = pin!(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<Target>,
     >| {
         let mut text = String::from("local");
@@ -107,29 +109,29 @@ fn locals_and_child_borrows_survive_pending_then_emit() {
     assert!(
         operation
             .as_mut()
-            .poll_host(target.as_mut(), &mut cx)
+            .poll_receiver(target.as_mut(), &mut cx)
             .is_pending()
     );
     target.value.set(100);
     assert!(
         operation
             .as_mut()
-            .poll_host(target.as_mut(), &mut cx)
+            .poll_receiver(target.as_mut(), &mut cx)
             .is_pending()
     );
     assert!(matches!(
-        operation.as_mut().poll_host(target.as_mut(), &mut cx),
+        operation.as_mut().poll_receiver(target.as_mut(), &mut cx),
         Poll::Ready(CoroutineState::Yielded((5, 6, 6)))
     ));
     assert!(
-        matches!(operation.as_mut().poll_host(target.as_mut(),&mut cx),Poll::Ready(CoroutineState::Complete((text,6))) if text=="local!")
+        matches!(operation.as_mut().poll_receiver(target.as_mut(),&mut cx),Poll::Ready(CoroutineState::Complete((text,6))) if text=="local!")
     );
 }
 #[test]
 fn send_sync_are_derived_from_state_not_target() {
     fn require_both(_: &(impl Send + Sync)) {}
     // Rc<Cell<_>> is neither Send nor Sync, but it is not captured by the call.
-    let operation = call_closure!(|io: nitori_call::Receiver<
+    let operation = call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<Rc<Cell<usize>>>,
     >| {
         yield io
@@ -148,7 +150,7 @@ fn send_sync_are_derived_from_state_not_target() {
     let mut operation = Box::pin(operation);
     let mut first = Rc::new(Cell::new(7));
     assert!(matches!(
-        operation.as_mut().poll_host(
+        operation.as_mut().poll_receiver(
             Pin::new(&mut first),
             &mut Context::from_waker(Waker::noop())
         ),
@@ -157,7 +159,7 @@ fn send_sync_are_derived_from_state_not_target() {
     // Only the pinned state owner is moved; neither target nor the first cx follows it.
     let result = std::thread::spawn(move || {
         let mut second = Rc::new(Cell::new(9));
-        operation.as_mut().poll_host(
+        operation.as_mut().poll_receiver(
             Pin::new(&mut second),
             &mut Context::from_waker(Waker::noop()),
         )
@@ -177,7 +179,7 @@ impl Wake for WakeCount {
 fn new_context_after_pending_on_another_thread() {
     let first = Arc::new(WakeCount(AtomicUsize::new(0)));
     let second = Arc::new(WakeCount(AtomicUsize::new(0)));
-    let mut operation = Box::pin(call_closure!(|io: nitori_call::Receiver<
+    let mut operation = Box::pin(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         let mut waited = false;
@@ -202,7 +204,7 @@ fn new_context_after_pending_on_another_thread() {
     assert!(
         operation
             .as_mut()
-            .poll_host(Pin::new(&mut target), &mut Context::from_waker(&waker))
+            .poll_receiver(Pin::new(&mut target), &mut Context::from_waker(&waker))
             .is_pending()
     );
     let next = second.clone();
@@ -212,7 +214,7 @@ fn new_context_after_pending_on_another_thread() {
             let waker = Waker::from(next);
             operation
                 .as_mut()
-                .poll_host(Pin::new(&mut target), &mut Context::from_waker(&waker))
+                .poll_receiver(Pin::new(&mut target), &mut Context::from_waker(&waker))
         })
         .join()
         .unwrap(),
@@ -237,7 +239,7 @@ impl Future for DropProbe {
 fn cancellation_on_another_thread_drops_only_captured_state() {
     let drops = Arc::new(AtomicUsize::new(0));
     let capture = drops.clone();
-    let mut operation = Box::pin(call_closure!(move |io: nitori_call::Receiver<
+    let mut operation = Box::pin(call_closure!(move |io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         io.with(|__access| {
@@ -256,7 +258,7 @@ fn cancellation_on_another_thread_drops_only_captured_state() {
     assert!(
         operation
             .as_mut()
-            .poll_host(
+            .poll_receiver(
                 Pin::new(&mut target),
                 &mut Context::from_waker(Waker::noop())
             )
@@ -268,7 +270,7 @@ fn cancellation_on_another_thread_drops_only_captured_state() {
 }
 #[test]
 fn nested_call_closure_and_real_with_alias_need_no_shared_slot() {
-    let inner = call_closure!(|io: nitori_call::Receiver<nitori_call::Direct<usize>>| {
+    let inner = call_closure!(|io: nitori_call::Target<nitori_call::Direct<usize>>| {
         ready(()).await;
         io.with(|__access| {
             let io = __access.into_pin().get_mut().0.as_mut();
@@ -284,7 +286,7 @@ fn nested_call_closure_and_real_with_alias_need_no_shared_slot() {
         })
         .await
     });
-    let mut operation = pin!(call_closure!(move |io: nitori_call::Receiver<
+    let mut operation = pin!(call_closure!(move |io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         let value = io.operation(inner).await;
@@ -299,19 +301,23 @@ fn nested_call_closure_and_real_with_alias_need_no_shared_slot() {
     let mut target = 0usize;
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut target), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut target), &mut cx),
         Poll::Ready(CoroutineState::Yielded(1))
     ));
     assert_eq!(target, 1);
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut target), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut target), &mut cx),
         Poll::Ready(CoroutineState::Complete(2))
     ));
     assert_eq!(target, 2);
 }
 #[test]
 fn hidden_environment_cannot_be_shadowed_by_spelling() {
-    let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+    let mut operation = pin!(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         let __stack_environment = 41;
@@ -332,11 +338,15 @@ fn hidden_environment_cannot_be_shadowed_by_spelling() {
     let mut target = 0usize;
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut target), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut target), &mut cx),
         Poll::Ready(CoroutineState::Yielded(41))
     ));
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut target), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut target), &mut cx),
         Poll::Ready(CoroutineState::Complete(3))
     ));
 }
@@ -352,7 +362,7 @@ impl Source {
 }
 impl ReadSource for Source {
     fn poll_read<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         maximum: NonZeroUsize,
         _: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, CodecError>>
@@ -371,7 +381,7 @@ impl ReadSource for Source {
 }
 #[test]
 fn data_frame_yields_without_reading_ahead_and_keeps_next_frame() {
-    let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<Source>| {
+    let mut operation = pin!(call_closure!(|io: nitori_call::Target<Source>| {
         let kind = io.read_varint().await?;
         if kind != 0 {
             return Err(CodecError::WrongType);
@@ -398,8 +408,9 @@ fn data_frame_yields_without_reading_ahead_and_keeps_next_frame() {
         (b"ll".as_slice(), 3, 4),
         (b"o".as_slice(), 2, 5),
     ] {
-        let Poll::Ready(CoroutineState::Yielded(part)) =
-            operation.as_mut().poll_host(Pin::new(&mut target), &mut cx)
+        let Poll::Ready(CoroutineState::Yielded(part)) = operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut target), &mut cx)
         else {
             panic!("expected chunk")
         };
@@ -407,7 +418,9 @@ fn data_frame_yields_without_reading_ahead_and_keeps_next_frame() {
         assert_eq!((target.remaining(), target.reads), (remaining, reads));
     }
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut target), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut target), &mut cx),
         Poll::Ready(CoroutineState::Complete(Ok(5)))
     ));
     assert_eq!(target.reads, 5);
@@ -420,7 +433,7 @@ fn panic_drops_user_state_and_poisoning_prevents_another_resume() {
     }
     let drops = Arc::new(AtomicUsize::new(0));
     let capture = drops.clone();
-    let mut operation = Box::pin(call_closure!(move |io: nitori_call::Receiver<
+    let mut operation = Box::pin(call_closure!(move |io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         let _guard = DropProbe(capture);
@@ -438,7 +451,7 @@ fn panic_drops_user_state_and_poisoning_prevents_another_resume() {
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation
             .as_mut()
-            .poll_host(Pin::new(&mut target), &mut cx)))
+            .poll_receiver(Pin::new(&mut target), &mut cx)))
         .is_err()
     );
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -446,7 +459,7 @@ fn panic_drops_user_state_and_poisoning_prevents_another_resume() {
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation
             .as_mut()
-            .poll_host(Pin::new(&mut target), &mut cx)))
+            .poll_receiver(Pin::new(&mut target), &mut cx)))
         .is_err()
     );
     drop(operation);
@@ -457,7 +470,7 @@ fn panic_drops_user_state_and_poisoning_prevents_another_resume() {
 #[test]
 fn temporary_target_reborrows_allow_nested_synchronous_calls() {
     fn inner(mut target: Pin<&mut usize>) -> usize {
-        let mut child = pin!(call_closure!(|io: nitori_call::Receiver<
+        let mut child = pin!(call_closure!(|io: nitori_call::Target<
             nitori_call::Direct<usize>,
         >| {
             io.with(|__access| {
@@ -471,13 +484,13 @@ fn temporary_target_reborrows_allow_nested_synchronous_calls() {
         }));
         match child
             .as_mut()
-            .poll_host(target.as_mut(), &mut Context::from_waker(Waker::noop()))
+            .poll_receiver(target.as_mut(), &mut Context::from_waker(Waker::noop()))
         {
             Poll::Ready(CoroutineState::Complete(value)) => value,
             _ => panic!("expected completion"),
         }
     }
-    let mut outer = pin!(call_closure!(|io: nitori_call::Receiver<
+    let mut outer = pin!(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         io.with(|__access| {
@@ -492,7 +505,7 @@ fn temporary_target_reborrows_allow_nested_synchronous_calls() {
     }));
     let mut target = 0usize;
     assert!(matches!(
-        outer.as_mut().poll_host(
+        outer.as_mut().poll_receiver(
             Pin::new(&mut target),
             &mut Context::from_waker(Waker::noop())
         ),
@@ -513,7 +526,7 @@ fn non_static_dyn_target_needs_no_owned_access_storage() {
     }
     let number = 7;
     let mut target = pin!(Borrowed(&number));
-    let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+    let mut operation = pin!(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<dyn Value + '_>,
     >| {
         yield io
@@ -527,18 +540,18 @@ fn non_static_dyn_target_needs_no_owned_access_storage() {
     let mut target = Pin::new(&mut view);
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
-        operation.as_mut().poll_host(target.as_mut(), &mut cx),
+        operation.as_mut().poll_receiver(target.as_mut(), &mut cx),
         Poll::Ready(CoroutineState::Yielded(7))
     ));
     assert!(matches!(
-        operation.as_mut().poll_host(target.as_mut(), &mut cx),
+        operation.as_mut().poll_receiver(target.as_mut(), &mut cx),
         Poll::Ready(CoroutineState::Complete(8))
     ));
 }
 
 #[test]
 fn callback_construction_can_suspend_without_retaining_the_old_environment() {
-    let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+    let mut operation = pin!(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<usize>,
     >| {
         io.with({
@@ -555,14 +568,18 @@ fn callback_construction_can_suspend_without_retaining_the_old_environment() {
     {
         let mut first = 10usize;
         assert!(matches!(
-            operation.as_mut().poll_host(Pin::new(&mut first), &mut cx),
+            operation
+                .as_mut()
+                .poll_receiver(Pin::new(&mut first), &mut cx),
             Poll::Ready(CoroutineState::Yielded(()))
         ));
         assert_eq!(first, 10);
     }
     let mut second = 20usize;
     assert!(matches!(
-        operation.as_mut().poll_host(Pin::new(&mut second), &mut cx),
+        operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut second), &mut cx),
         Poll::Ready(CoroutineState::Complete(21))
     ));
     assert_eq!(second, 21);
@@ -570,7 +587,7 @@ fn callback_construction_can_suspend_without_retaining_the_old_environment() {
 
 #[nitori_call::call(yields = usize)]
 async fn named_local<'data>(
-    io: nitori_call::Receiver<nitori_call::Direct<Target>>,
+    io: nitori_call::Target<nitori_call::Direct<Target>>,
     text: &'data mut String,
 ) -> usize {
     let first = io.operation(WriteLocal::new(text)).await;
@@ -589,7 +606,7 @@ async fn named_local<'data>(
 
 #[nitori_call::call]
 async fn named_value<Target: ValueSource + ?Sized>(
-    io: nitori_call::Receiver<nitori_call::Direct<Target>>,
+    io: nitori_call::Target<nitori_call::Direct<Target>>,
     offset: usize,
 ) -> usize {
     io.with(|__access| {
@@ -610,7 +627,7 @@ impl ValueSource for Target {
 
 #[nitori_call::call]
 async fn named_parent<Target: ValueSource + ?Sized>(
-    io: nitori_call::Receiver<nitori_call::Direct<Target>>,
+    io: nitori_call::Target<nitori_call::Direct<Target>>,
 ) -> usize {
     io.named_value(2).await
 }
@@ -624,23 +641,23 @@ fn named_operation_preserves_pending_borrows_and_business_yields() {
     assert!(
         operation
             .as_mut()
-            .poll_host(target.as_mut(), &mut cx)
+            .poll_receiver(target.as_mut(), &mut cx)
             .is_pending()
     );
     assert_eq!(
-        operation.as_mut().poll_host(target.as_mut(), &mut cx),
+        operation.as_mut().poll_receiver(target.as_mut(), &mut cx),
         Poll::Ready(CoroutineState::Yielded(6))
     );
     assert_eq!(target.value(), 6);
     assert_eq!(
-        operation.as_mut().poll_host(target.as_mut(), &mut cx),
+        operation.as_mut().poll_receiver(target.as_mut(), &mut cx),
         Poll::Ready(CoroutineState::Complete(7))
     );
 }
 
 #[test]
 fn named_generic_composition_and_closure_return_annotation() {
-    let mut operation = pin!(call_closure!(|io: nitori_call::Receiver<
+    let mut operation = pin!(call_closure!(|io: nitori_call::Target<
         nitori_call::Direct<Target>,
     >|
      -> usize { io.named_parent().await }));
@@ -648,18 +665,18 @@ fn named_generic_composition_and_closure_return_annotation() {
     target.value.set(10);
     let mut cx = Context::from_waker(Waker::noop());
     assert_eq!(
-        operation.as_mut().poll_host(target.as_mut(), &mut cx),
+        operation.as_mut().poll_receiver(target.as_mut(), &mut cx),
         Poll::Ready(CoroutineState::Complete(12))
     );
     let mut named = pin!(named_parent::<dyn ValueSource>());
     let mut view = nitori_call::DirectView(target.as_mut() as Pin<&mut dyn ValueSource>);
     let erased = Pin::new(&mut view);
     assert_eq!(
-        named.as_mut().poll_host(erased, &mut cx),
+        named.as_mut().poll_receiver(erased, &mut cx),
         Poll::Ready(CoroutineState::Complete(12))
     );
 }
 
-nitori_call::family_host!(impl [] for Source);
+nitori_call::family_receiver!(impl [] for Source);
 
-nitori_call::direct_host!(impl [] for Target);
+nitori_call::direct_receiver!(impl [] for Target);

@@ -1,6 +1,6 @@
 // expect: E0277
 #![feature(coroutines, coroutine_trait)]
-use nitori_call::{ReceiverExt as _, PollCallExt as _};
+use nitori_call::{TargetExt as _, PollCallExt as _};
 use std::ops::Coroutine;
 fn make<T>() -> impl for<'visit> Coroutine<&'visit mut T,Yield=(),Return=()> {
     #[coroutine]

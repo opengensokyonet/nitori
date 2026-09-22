@@ -1,6 +1,5 @@
 //! Read operations and their operation-specific failures.
 use super::Step;
-use crate::PollReadExt as _;
 use crate::{
     Read as ReadHost, ReadChunk as ChunkHost,
     error::{self, Incomplete, InsufficientCapacity},
@@ -29,13 +28,14 @@ impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for Read<'_, B> {
     type Return = Result<usize, H::Error>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
         H: 'visit,
     {
-        host.poll_read(cx, self.get_mut().0).map(Complete)
+        let host = ready!(host.poll_view(cx));
+        H::poll_read(host, cx, self.get_mut().0).map(Complete)
     }
 }
 
@@ -51,13 +51,14 @@ impl<H: ChunkHost> CallOn<H> for ReadChunk {
     type Return = Result<Option<H::Chunk>, H::Error>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
         H: 'visit,
     {
-        host.poll_read_chunk(cx, self.0).map(Complete)
+        let host = ready!(host.poll_view(cx));
+        H::poll_read_chunk(host, cx, self.0).map(Complete)
     }
 }
 
@@ -78,7 +79,7 @@ pub enum ReadExactError<E> {
     #[snafu(transparent)]
     Incomplete { source: Incomplete },
     #[snafu(display("read failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> ReadExactError<E> {
@@ -87,14 +88,14 @@ impl<E> ReadExactError<E> {
         match self {
             Self::InsufficientCapacity { source } => source.completed,
             Self::Incomplete { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::InsufficientCapacity { .. } | Self::Incomplete { .. } => None,
         }
     }
@@ -104,8 +105,8 @@ impl<E> From<ReadArrayError<E>> for ReadExactError<E> {
     fn from(error: ReadArrayError<E>) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => source.into(),
-            ReadArrayError::Host { source, completed } => {
-                read_exact::HostSnafu { completed }.into_error(source)
+            ReadArrayError::Receiver { source, completed } => {
+                read_exact::ReceiverSnafu { completed }.into_error(source)
             }
         }
     }
@@ -125,7 +126,7 @@ impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadExact<'_, B> {
     type Return = Result<(), ReadExactError<H::Error>>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
@@ -145,13 +146,17 @@ impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadExact<'_, B> {
                 .into())));
             }
         }
+        if this.completed == this.length {
+            return Poll::Ready(Complete(Ok(())));
+        }
+        let host = ready!(host.poll_view(cx));
         poll_exact::<H, _>(host, cx, this.destination, this.length, &mut this.completed)
             .map(|result| Complete(result.map_err(ReadExactError::from)))
     }
 }
 
 fn poll_exact<'visit, H: ReadHost + 'visit, B: BufMut + ?Sized>(
-    mut host: Pin<&mut H::Host<'visit>>,
+    mut host: Pin<&mut H::ReceiverView<'visit>>,
     cx: &mut Context<'_>,
     mut destination: &mut B,
     length: usize,
@@ -159,10 +164,11 @@ fn poll_exact<'visit, H: ReadHost + 'visit, B: BufMut + ?Sized>(
 ) -> Poll<Result<(), ReadArrayError<H::Error>>> {
     while *completed < length {
         let remaining = length - *completed;
-        let result = ready!(
-            host.as_mut()
-                .poll_read(cx, &mut (&mut destination).limit(remaining))
-        );
+        let result = ready!(H::poll_read(
+            host.as_mut(),
+            cx,
+            &mut (&mut destination).limit(remaining)
+        ));
         match result {
             Ok(0) => {
                 return Poll::Ready(Err(error::IncompleteSnafu {
@@ -177,7 +183,7 @@ fn poll_exact<'visit, H: ReadHost + 'visit, B: BufMut + ?Sized>(
                 *completed += count;
             }
             Err(source) => {
-                return Poll::Ready(Err(read_array::HostSnafu {
+                return Poll::Ready(Err(read_array::ReceiverSnafu {
                     completed: *completed,
                 }
                 .into_error(source)));
@@ -200,7 +206,7 @@ pub enum ReadToEndError<E> {
     #[snafu(transparent)]
     InsufficientCapacity { source: InsufficientCapacity },
     #[snafu(display("read failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> ReadToEndError<E> {
@@ -208,14 +214,14 @@ impl<E> ReadToEndError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::InsufficientCapacity { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::InsufficientCapacity { .. } => None,
         }
     }
@@ -233,7 +239,7 @@ impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadToEnd<'_, B> {
     type Return = Result<usize, ReadToEndError<H::Error>>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        mut host: Pin<&mut H::Host<'visit>>,
+        mut host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
@@ -250,7 +256,11 @@ impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadToEnd<'_, B> {
                 .build()
                 .into())));
             }
-            match ready!(host.as_mut().poll_read(cx, this.destination)) {
+            match ready!(H::poll_read(
+                ready!(host.as_mut().poll_view(cx)),
+                cx,
+                this.destination
+            )) {
                 Ok(0) => return Poll::Ready(Complete(Ok(this.completed))),
                 Ok(count) => {
                     this.completed = this
@@ -259,7 +269,7 @@ impl<H: ReadHost, B: BufMut + ?Sized> CallOn<H> for ReadToEnd<'_, B> {
                         .expect("read byte count overflow")
                 }
                 Err(source) => {
-                    return Poll::Ready(Complete(Err(read_to_end::HostSnafu {
+                    return Poll::Ready(Complete(Err(read_to_end::ReceiverSnafu {
                         completed: this.completed,
                     }
                     .into_error(source))));
@@ -309,7 +319,7 @@ impl<H: ChunkHost> CallOn<H> for ReadChunks {
     type Return = Result<usize, ReadChunksError<H::Error>>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
@@ -321,7 +331,8 @@ impl<H: ChunkHost> CallOn<H> for ReadChunks {
         else {
             return Poll::Ready(Complete(Ok(this.completed)));
         };
-        match ready!(host.poll_read_chunk(cx, maximum)) {
+        let host = ready!(host.poll_view(cx));
+        match ready!(H::poll_read_chunk(host, cx, maximum)) {
             Ok(Some(chunk)) => {
                 let count = chunk.remaining();
                 assert!(count > 0 && count <= maximum.get(), "invalid chunk length");
@@ -347,7 +358,7 @@ pub enum ReadChunksExactError<E> {
     #[snafu(transparent)]
     Incomplete { source: Incomplete },
     #[snafu(display("read failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> ReadChunksExactError<E> {
@@ -355,14 +366,14 @@ impl<E> ReadChunksExactError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::Incomplete { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::Incomplete { .. } => None,
         }
     }
@@ -377,7 +388,7 @@ impl<H: ChunkHost> CallOn<H> for ReadChunksExact {
     type Return = Result<(), ReadChunksExactError<H::Error>>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
@@ -386,7 +397,7 @@ impl<H: ChunkHost> CallOn<H> for ReadChunksExact {
         let this = self.get_mut();
         CallOn::<H>::poll_call(Pin::new(&mut this.0), host, cx).map(|state| match state {
             Yielded(chunk) => Yielded(chunk),
-            Complete(Err(error)) => Complete(Err(read_chunks_exact::HostSnafu {
+            Complete(Err(error)) => Complete(Err(read_chunks_exact::ReceiverSnafu {
                 completed: error.completed,
             }
             .into_error(error.source))),
@@ -414,7 +425,7 @@ pub enum ReadArrayError<E> {
     #[snafu(transparent)]
     Incomplete { source: Incomplete },
     #[snafu(display("read failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> ReadArrayError<E> {
@@ -422,14 +433,14 @@ impl<E> ReadArrayError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::Incomplete { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::Incomplete { .. } => None,
         }
     }
@@ -452,13 +463,17 @@ impl<H: ReadHost, const LENGTH: usize> CallOn<H> for ReadArray<LENGTH> {
     type Return = Result<[u8; LENGTH], ReadArrayError<H::Error>>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
         H: 'visit,
     {
         let this = self.get_mut();
+        if this.completed == LENGTH {
+            return Poll::Ready(Complete(Ok(this.bytes)));
+        }
+        let host = ready!(host.poll_view(cx));
         let mut destination = &mut this.bytes[this.completed..];
         let result = ready!(poll_exact::<H, _>(
             host,
@@ -484,7 +499,7 @@ pub enum ReadLeError<E> {
     #[snafu(transparent)]
     Incomplete { source: Incomplete },
     #[snafu(display("read failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> ReadLeError<E> {
@@ -492,14 +507,14 @@ impl<E> ReadLeError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::Incomplete { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::Incomplete { .. } => None,
         }
     }
@@ -509,8 +524,8 @@ impl<E> From<ReadArrayError<E>> for ReadLeError<E> {
     fn from(error: ReadArrayError<E>) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => source.into(),
-            ReadArrayError::Host { source, completed } => {
-                read_le::HostSnafu { completed }.into_error(source)
+            ReadArrayError::Receiver { source, completed } => {
+                read_le::ReceiverSnafu { completed }.into_error(source)
             }
         }
     }
@@ -528,7 +543,7 @@ pub enum ReadBeError<E> {
     #[snafu(transparent)]
     Incomplete { source: Incomplete },
     #[snafu(display("read failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> ReadBeError<E> {
@@ -536,14 +551,14 @@ impl<E> ReadBeError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::Incomplete { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::Incomplete { .. } => None,
         }
     }
@@ -553,8 +568,8 @@ impl<E> From<ReadArrayError<E>> for ReadBeError<E> {
     fn from(error: ReadArrayError<E>) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => source.into(),
-            ReadArrayError::Host { source, completed } => {
-                read_be::HostSnafu { completed }.into_error(source)
+            ReadArrayError::Receiver { source, completed } => {
+                read_be::ReceiverSnafu { completed }.into_error(source)
             }
         }
     }
@@ -599,7 +614,7 @@ macro_rules! endian_impl {
         impl<H: ReadHost> CallOn<H> for $name<$number> {
             type Yield = Infallible;
             type Return = Result<$number, $error<H::Error>>;
-            fn poll_call<'visit>(self: Pin<&mut Self>, host: Pin<&mut H::Host<'visit>>, cx: &mut Context<'_>) -> Step<Self::Yield, Self::Return> where H: 'visit {
+            fn poll_call<'visit>(self: Pin<&mut Self>, host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family=H>>, cx: &mut Context<'_>) -> Step<Self::Yield, Self::Return> where H: 'visit {
                 use std::io::Read as _;
                 CallOn::<H>::poll_call(Pin::new(&mut self.get_mut().array), host, cx).map(|state| match state {
                     Yielded(never) => match never {},

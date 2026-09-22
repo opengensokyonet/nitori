@@ -43,6 +43,7 @@ dependencies = [
  "futures-core",
  "nitori_call_macros",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

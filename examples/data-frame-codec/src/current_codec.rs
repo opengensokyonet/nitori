@@ -20,9 +20,9 @@ pub enum CodecError {
     #[snafu(display("input/output failed"))]
     Io,
 }
-pub trait ReadSource: nitori_call::HostFamily {
+pub trait ReadSource: nitori_call::ReceiverFamily {
     fn poll_read<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         maximum: NonZeroUsize,
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, CodecError>>
@@ -41,19 +41,21 @@ impl<Target: ReadSource> CallOn<Target> for ReadAtMost {
     type Return = Result<Option<Bytes>, CodecError>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        target: Pin<&mut Target::Host<'visit>>,
+        target: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = Target>>,
         cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Self::Yield, Self::Return>>
     where
         Target: 'visit,
     {
+        let target = std::task::ready!(target.poll_view(cx));
+
         Target::poll_read(target, self.0, cx).map(CoroutineState::Complete)
     }
 }
 
-pub trait WriteSink<Input: ?Sized>: nitori_call::HostFamily {
+pub trait WriteSink<Input: ?Sized>: nitori_call::ReceiverFamily {
     fn poll_write<'visit>(
-        host: Pin<&mut Self::Host<'visit>>,
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         input: &mut Input,
         cx: &mut Context<'_>,
     ) -> Poll<Result<usize, CodecError>>
@@ -78,12 +80,14 @@ impl<Target: WriteSink<Input>, Input: Buf> CallOn<Target> for Write<Input> {
     type Return = WriteReturn<Input>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        target: Pin<&mut Target::Host<'visit>>,
+        target: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = Target>>,
         cx: &mut Context<'_>,
     ) -> Poll<CoroutineState<Self::Yield, Self::Return>>
     where
         Target: 'visit,
     {
+        let target = std::task::ready!(target.poll_view(cx));
+
         let input = &mut self.get_mut().0;
         let before = input.as_ref().expect("write input").remaining();
         let result = Target::poll_write(target, input.as_mut().unwrap(), cx);
@@ -112,7 +116,7 @@ impl<Target: WriteSink<Input>, Input: Buf> CallOn<Target> for Write<Input> {
 
 #[call]
 pub async fn read_varint<Target: ReadSource>(
-    io: nitori_call::Receiver<Target>,
+    io: nitori_call::Target<Target>,
 ) -> Result<u64, CodecError> {
     let mut first = io
         .read_at_most(NonZeroUsize::new(1).unwrap())
@@ -143,7 +147,7 @@ pub struct DataChunk {
 
 #[call(yields = DataChunk)]
 pub async fn read_data_frame<Target: ReadSource>(
-    io: nitori_call::Receiver<Target>,
+    io: nitori_call::Target<Target>,
     quantum: NonZeroUsize,
 ) -> Result<u64, CodecError> {
     let frame_type = io.read_varint().await?;
@@ -163,7 +167,7 @@ pub async fn read_data_frame<Target: ReadSource>(
 
 #[call]
 pub async fn write_all<Target: WriteSink<Input>, Input: Buf>(
-    io: nitori_call::Receiver<Target>,
+    io: nitori_call::Target<Target>,
     mut input: Input,
 ) -> WriteReturn<Input> {
     let mut written = 0;
@@ -199,7 +203,7 @@ mod tests {
     pub(super) struct Input(Bytes);
     impl ReadSource for Input {
         fn poll_read<'visit>(
-            host: Pin<&mut Self::Host<'visit>>,
+            host: Pin<&mut Self::ReceiverView<'visit>>,
             maximum: NonZeroUsize,
             _: &mut Context<'_>,
         ) -> Poll<Result<Option<Bytes>, CodecError>>
@@ -221,8 +225,9 @@ mod tests {
         let mut operation = pin!(read_data_frame::<Input>(NonZeroUsize::new(2).unwrap()));
         let mut cx = Context::from_waker(Waker::noop());
         for (expected, remaining) in [(b"ab".as_slice(), 1), (b"c".as_slice(), 0)] {
-            let Poll::Ready(CoroutineState::Yielded(chunk)) =
-                operation.as_mut().poll_host(Pin::new(&mut input), &mut cx)
+            let Poll::Ready(CoroutineState::Yielded(chunk)) = operation
+                .as_mut()
+                .poll_receiver(Pin::new(&mut input), &mut cx)
             else {
                 panic!("expected chunk")
             };
@@ -231,7 +236,9 @@ mod tests {
             assert_eq!(input.0.len(), remaining as usize + 2);
         }
         assert!(matches!(
-            operation.as_mut().poll_host(Pin::new(&mut input), &mut cx),
+            operation
+                .as_mut()
+                .poll_receiver(Pin::new(&mut input), &mut cx),
             Poll::Ready(CoroutineState::Complete(Ok(3)))
         ));
         assert_eq!(input.0.as_ref(), b"\0\0");
@@ -242,7 +249,7 @@ mod tests {
     }
     impl WriteSink<Bytes> for Output {
         fn poll_write<'visit>(
-            host: Pin<&mut Self::Host<'visit>>,
+            host: Pin<&mut Self::ReceiverView<'visit>>,
             input: &mut Bytes,
             cx: &mut Context<'_>,
         ) -> Poll<Result<usize, CodecError>>
@@ -273,19 +280,20 @@ mod tests {
         assert!(
             operation
                 .as_mut()
-                .poll_host(Pin::new(&mut output), &mut cx)
+                .poll_receiver(Pin::new(&mut output), &mut cx)
                 .is_pending()
         );
         assert!(output.bytes.is_empty());
         assert!(
             operation
                 .as_mut()
-                .poll_host(Pin::new(&mut output), &mut cx)
+                .poll_receiver(Pin::new(&mut output), &mut cx)
                 .is_pending()
         );
         assert_eq!(output.bytes, b"ab");
-        let Poll::Ready(CoroutineState::Complete(returned)) =
-            operation.as_mut().poll_host(Pin::new(&mut output), &mut cx)
+        let Poll::Ready(CoroutineState::Complete(returned)) = operation
+            .as_mut()
+            .poll_receiver(Pin::new(&mut output), &mut cx)
         else {
             panic!("expected completion")
         };
@@ -296,13 +304,13 @@ mod tests {
 }
 
 #[cfg(test)]
-nitori_call::family_host!(impl [] for tests::Input);
+nitori_call::family_receiver!(impl [] for tests::Input);
 
 #[cfg(test)]
-nitori_call::family_host!(impl [] for tests::Output);
+nitori_call::family_receiver!(impl [] for tests::Output);
 
 /// Capability access on actual resources and reconstructed views.
-pub trait ReadSourceExt: nitori_call::Host
+pub trait ReadSourceExt: nitori_call::Receiver
 where
     Self::Family: ReadSource,
 {
@@ -314,28 +322,28 @@ where
         Self::Family::poll_read(std::pin::pin!(self.view()), maximum, cx)
     }
 }
-impl<H: nitori_call::Host + ?Sized> ReadSourceExt for H where H::Family: ReadSource {}
-pub trait ReceiverReadAtMostExt: nitori_call::ReceiverExt
+impl<H: nitori_call::Receiver + ?Sized> ReadSourceExt for H where H::Family: ReadSource {}
+pub trait TargetReadAtMostExt: nitori_call::TargetExt
 where
     Self::Target: ReadSource,
 {
     fn read_at_most(
         self,
         maximum: NonZeroUsize,
-    ) -> nitori_call::Child<Self::Root, nitori_call::ReceivedCall<Self, ReadAtMost>> {
+    ) -> nitori_call::Child<Self::Root, nitori_call::AdaptedCall<Self, ReadAtMost>> {
         self.operation(ReadAtMost::new(maximum))
     }
 }
-impl<R: nitori_call::ReceiverExt> ReceiverReadAtMostExt for R where R::Target: ReadSource {}
-pub trait ReceiverWriteExt: nitori_call::ReceiverExt {
+impl<R: nitori_call::TargetExt> TargetReadAtMostExt for R where R::Target: ReadSource {}
+pub trait TargetWriteExt: nitori_call::TargetExt {
     fn write<I: Buf>(
         self,
         input: I,
-    ) -> nitori_call::Child<Self::Root, nitori_call::ReceivedCall<Self, Write<I>>>
+    ) -> nitori_call::Child<Self::Root, nitori_call::AdaptedCall<Self, Write<I>>>
     where
         Self::Target: WriteSink<I>,
     {
         self.operation(Write::new(input))
     }
 }
-impl<R: nitori_call::ReceiverExt> ReceiverWriteExt for R {}
+impl<R: nitori_call::TargetExt> TargetWriteExt for R {}

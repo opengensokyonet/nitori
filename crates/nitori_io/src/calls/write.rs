@@ -1,6 +1,5 @@
 //! Write operations and their operation-specific failures.
 use super::Step;
-use crate::PollWriteExt as _;
 use crate::{
     Write as WriteHost,
     error::{self, WriteZero},
@@ -36,14 +35,19 @@ impl<H: WriteHost, B: Buf> CallOn<H> for Write<B> {
     type Return = WriteReturn<B, H::Error>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        host: Pin<&mut H::Host<'visit>>,
+        host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
         H: 'visit,
     {
+        let host = ready!(host.poll_view(cx));
         let input = &mut self.get_mut().0;
-        let result = ready!(host.poll_write(cx, input.as_mut().expect("completed write")));
+        let result = ready!(H::poll_write(
+            host,
+            cx,
+            input.as_mut().expect("completed write")
+        ));
         Poll::Ready(Complete(WriteReturn {
             input: input.take().unwrap(),
             result,
@@ -64,7 +68,7 @@ pub enum WriteAllError<E> {
     #[snafu(transparent)]
     WriteZero { source: WriteZero },
     #[snafu(display("write failed after {completed} bytes"))]
-    Host { source: E, completed: usize },
+    Receiver { source: E, completed: usize },
 }
 
 impl<E> WriteAllError<E> {
@@ -72,14 +76,14 @@ impl<E> WriteAllError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::WriteZero { source } => source.completed,
-            Self::Host { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => *completed,
         }
     }
 
     /// The original host error, if the failure came from the host.
     pub fn host_error(&self) -> Option<&E> {
         match self {
-            Self::Host { source, .. } => Some(source),
+            Self::Receiver { source, .. } => Some(source),
             Self::WriteZero { .. } => None,
         }
     }
@@ -98,7 +102,7 @@ impl<H: WriteHost, B: Buf> CallOn<H> for WriteAll<B> {
     type Return = WriteReturn<B, WriteAllError<H::Error>>;
     fn poll_call<'visit>(
         self: Pin<&mut Self>,
-        mut host: Pin<&mut H::Host<'visit>>,
+        mut host: Pin<&mut dyn nitori_call::ReceiverScope<'visit, Family = H>>,
         cx: &mut Context<'_>,
     ) -> Step<Self::Yield, Self::Return>
     where
@@ -111,7 +115,11 @@ impl<H: WriteHost, B: Buf> CallOn<H> for WriteAll<B> {
                 break Ok(this.completed);
             }
             let before = input.remaining();
-            match ready!(host.as_mut().poll_write(cx, input)) {
+            match ready!(H::poll_write(
+                ready!(host.as_mut().poll_view(cx)),
+                cx,
+                input
+            )) {
                 Ok(0) => {
                     break Err(error::WriteZeroSnafu {
                         completed: this.completed,
@@ -128,7 +136,7 @@ impl<H: WriteHost, B: Buf> CallOn<H> for WriteAll<B> {
                     this.completed += count;
                 }
                 Err(source) => {
-                    break Err(write_all::HostSnafu {
+                    break Err(write_all::ReceiverSnafu {
                         completed: this.completed,
                     }
                     .into_error(source));
