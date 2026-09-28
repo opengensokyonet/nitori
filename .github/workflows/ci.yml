@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: |
+          rustup show
+          rustc --version --verbose
+          python3 --version
+      - name: Fetch and verify dependency sources
+        run: |
+          cargo fetch --locked
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          python3 - "$RUNNER_TEMP/metadata.json" <<'PY'
+          import json
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          dependency = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["dependencies"]["snafu"]
+          expected = f'git+{dependency["git"]}?rev={dependency["rev"]}#{dependency["rev"]}'
+          packages = json.loads(Path(sys.argv[1]).read_text())["packages"]
+          for name in ("snafu", "snafu-derive"):
+              matches = [package for package in packages if package["name"] == name]
+              assert len(matches) == 1 and matches[0]["source"] == expected, matches
+          PY
+      - name: Format and lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace and documentation
+        run: |
+          cargo test --locked --workspace --all-targets
+          cargo test --locked --workspace --all-targets --all-features
+          cargo test --locked --workspace --doc
+          cargo test --locked --workspace --doc --all-features
+          cargo test --locked -p nitori_io --features tokio
+          cargo test --locked -p nitori_io --features futures
+      - name: Check compiler boundaries and examples
+        run: |
+          python3 examples/data-frame-codec/scripts/check_boundaries.py
+          python3 examples/data-frame-codec/scripts/check_resume.py
+          cargo run --locked --example macro_demo
+          cargo run --locked --example expansion_demo
+          cargo run --locked -p nitori_call --example call_composition
+          python3 examples/data-frame-codec/scripts/expand_example.py
+          git diff --exit-code
+      - name: Preserve compiler probe logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-probe-logs
+          if-no-files-found: ignore
+          path: |
+            examples/data-frame-codec/target/boundary-consumer/*.log
+            examples/data-frame-codec/target/resume-probes/*.log

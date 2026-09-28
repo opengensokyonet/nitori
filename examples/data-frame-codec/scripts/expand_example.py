@@ -5,7 +5,7 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 result = subprocess.run(
-    ["cargo", "+nightly", "rustc", "--locked", "--example", "expansion_demo", "--", "-Zunpretty=expanded"],
+    ["cargo", "rustc", "--locked", "--example", "expansion_demo", "--", "-Zunpretty=expanded"],
     cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
 )
 if result.returncode:

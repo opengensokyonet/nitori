@@ -10,7 +10,7 @@ for source in sorted((root/'tests/resume').glob('*.rs')):
     expected=source.read_text().splitlines()[0].removeprefix('// expect: ')
     for mode,flags in settings.items():
         binary=output/f'{source.stem}-{mode}'
-        result=subprocess.run(['rustc','+nightly','--edition=2024',str(source),'-o',str(binary),*flags],text=True,capture_output=True)
+        result=subprocess.run(['rustc','--edition=2024',str(source),'-o',str(binary),*flags],cwd=root,text=True,capture_output=True)
         log=result.stdout+result.stderr
         passed=(result.returncode==0) if expected=='pass' else (result.returncode!=0 and expected in log)
         if passed and expected=='pass':

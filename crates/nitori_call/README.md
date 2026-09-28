@@ -192,7 +192,7 @@ The [sequential composition example](examples/call_composition.rs) consumes an
 iterator or Stream of operations without prefetching and either yields each
 completion or relays every child event. It demonstrates asynchronous waiting,
 synchronous iteration, and cancellation. Run it from the repository root with
-`cargo +nightly run --locked -p nitori_call --example call_composition`.
+`cargo run --locked -p nitori_call --example call_composition`.
 
 The runtime uses a stack-local dispatch slot per resume; it performs no per-poll
 allocation or TLS lookup and never casts one lifetime-indexed host type to

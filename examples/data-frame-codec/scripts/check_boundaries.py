@@ -39,8 +39,8 @@ for source in sorted((root / "tests" / "ui").glob("*.rs")):
     (scratch / "Cargo.lock").write_text((workspace / "Cargo.lock").read_text())
     (scratch / "src" / "main.rs").write_text(text)
     result = subprocess.run(
-        ["cargo", "+nightly", "check", "--offline", "--quiet", "--manifest-path", str(scratch / "Cargo.toml")],
-        env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        ["cargo", "check", "--offline", "--quiet", "--manifest-path", str(scratch / "Cargo.toml")],
+        cwd=workspace, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
     (scratch / f"{source.stem}.log").write_text(result.stdout)
     passed = (result.returncode == 0) if expected == "pass" else (result.returncode != 0 and expected in result.stdout)

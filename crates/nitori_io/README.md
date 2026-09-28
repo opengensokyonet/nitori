@@ -208,11 +208,11 @@ remain outside this first implementation.
 ## Verification
 
 From the repository root, run the checks listed in the root README. The focused
-suite is `cargo +nightly test --locked -p nitori_io`; it includes real BoundCall
+suite is `cargo test --locked -p nitori_io`; it includes real BoundCall
 execution, family macro calls, Pending/wakeup behavior, typed errors, buffer
 ownership, cancellation, conversion helpers, and numeric decoding.
 
-For the optional bridges, also run `cargo +nightly test --locked -p nitori_io --features tokio`, `cargo +nightly test --locked -p nitori_io --features futures`,
-and `cargo +nightly test --locked -p nitori_io --all-features`. The bridge tests
+For the optional bridges, also run `cargo test --locked -p nitori_io --features tokio`, `cargo test --locked -p nitori_io --features futures`,
+and `cargo test --locked -p nitori_io --all-features`. The bridge tests
 exercise pinned non-Send hosts, wakeups, error identity, partial progress,
 segmented buffers, and cancellation followed by a different chunk maximum.
