@@ -1,9 +1,7 @@
 //! Read one DATA frame with built-in slice IO and synchronous event iteration.
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+#![feature(coroutine_trait)]
 
-mod codec;
-
-use codec::ReadDataFrameExt;
+use nitori_data_frame_codec_example::current_codec::ReadDataFrameExt;
 use std::{num::NonZeroUsize, ops::CoroutineState, pin::pin};
 
 fn main() {

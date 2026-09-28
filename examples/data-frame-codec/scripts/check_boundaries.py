@@ -19,6 +19,7 @@ edition = "2024"
 dependencies = [
     ("nitori_call", workspace / "crates" / "nitori_call"),
     ("nitori-data-frame-codec-example", root),
+    ("nitori_io", workspace / "crates" / "nitori_io"),
 ]
 for name, path in dependencies:
     manifest += f'{name} = {{ path = {json.dumps(str(path))} }}\n'

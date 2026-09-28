@@ -1,9 +1,9 @@
-use crate::current_codec::{CodecError, ReadSource};
-use crate::current_codec::{TargetReadAtMostExt, TargetReadVarintExt};
-use bytes::Bytes;
+use crate::current_codec::TargetReadDataFrameExt;
+use bytes::{BufMut, Bytes};
 use nitori_call::CallOn;
 use nitori_call::call_closure;
 use nitori_call::{PollCallExt as _, TargetExt as _};
+use nitori_io::{Read, ReadChunk};
 use std::num::NonZeroUsize;
 use std::{
     cell::Cell,
@@ -360,12 +360,26 @@ impl Source {
         self.bytes.len()
     }
 }
-impl ReadSource for Source {
-    fn poll_read<'visit>(
+impl Read for Source {
+    type Error = Infallible;
+    fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
-        maximum: NonZeroUsize,
+        cx: &mut Context<'_>,
+        out: &mut B,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        nitori_io::helpers::poll_read_from_chunk(host, cx, out)
+    }
+}
+impl ReadChunk for Source {
+    type Chunk = Bytes;
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>>
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<Bytes>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -382,21 +396,14 @@ impl ReadSource for Source {
 #[test]
 fn data_frame_yields_without_reading_ahead_and_keeps_next_frame() {
     let mut operation = pin!(call_closure!(|io: nitori_call::Target<Source>| {
-        let kind = io.read_varint().await?;
-        if kind != 0 {
-            return Err(CodecError::WrongType);
+        let mut frame = pin!(io.read_data_frame(NonZeroUsize::new(3).unwrap()));
+        while let Some(event) = frame.as_mut().next().await {
+            match event {
+                CoroutineState::Yielded(chunk) => yield chunk,
+                CoroutineState::Complete(result) => return result,
+            }
         }
-        let length = io.read_varint().await?;
-        let mut remaining = length as usize;
-        while remaining != 0 {
-            let part = io
-                .read_at_most(NonZeroUsize::new(remaining.min(3)).unwrap())
-                .await?
-                .ok_or(CodecError::Eof)?;
-            remaining -= part.len();
-            yield part;
-        }
-        Ok(length)
+        unreachable_frame_result()
     }));
     let mut target = Source {
         bytes: Bytes::from_static(b"\x00\x05hello\x00\x00"),
@@ -680,3 +687,7 @@ fn named_generic_composition_and_closure_return_annotation() {
 nitori_call::family_receiver!(impl [] for Source);
 
 nitori_call::direct_receiver!(impl [] for Target);
+
+fn unreachable_frame_result<T>() -> T {
+    panic!("frame completed without a result")
+}

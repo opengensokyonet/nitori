@@ -42,6 +42,7 @@ python3 examples/data-frame-codec/scripts/check_resume.py
 cargo run --locked --example macro_demo
 cargo run --locked --example expansion_demo
 cargo run --locked -p nitori_call --example call_composition
+cargo run --locked -p nitori_io --example limited_read
 python3 examples/data-frame-codec/scripts/expand_example.py
 ```
 

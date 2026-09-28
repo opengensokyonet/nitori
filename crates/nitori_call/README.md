@@ -7,73 +7,113 @@ for usage; the sections below cover the execution and borrowing contracts.
 
 ## Why calls?
 
-An ordinary async method taking `&mut self` keeps that borrow for the lifetime of
-its future. Sometimes the operation should keep its parsing or protocol state
-while a driver supplies resource access only when execution needs it, for
-example by acquiring an asynchronous lock. `CallOn<F>` separates that operation
-state from access to a resource family `F`.
+Consider an outgoing message that must wait for permission before using a shared
+connection. With an ordinary async function, acquiring the connection first
+holds it throughout that unrelated wait:
 
-Inside `#[call]`, a `Target<F>` describes where child calls run; it does not hold
-the resource. The driver provides a lazy receiver scope on each poll. Waiting
-on an unrelated future does not acquire a receiver. This also lets an operation
-yield progress or data and still return a distinct final result.
+```rust
+use std::future::Future;
+use tokio::sync::Mutex;
 
-The usual entry point binds a call to a resource and therefore **does** retain
-that resource borrow until the binding is dropped. Custom drivers control
-acquisition; the call abstraction does not automatically release every borrow
-or make blocking IO asynchronous.
+async fn send(shared: &Mutex<Vec<u8>>, permission: impl Future<Output = ()>) {
+    let mut output = shared.lock().await;
+    permission.await; // Other writers cannot use output during this wait.
+    output.extend_from_slice(b"PING\n");
+}
+```
 
-## A first call
+Moving the lock below the wait solves this particular case. Calls are useful
+when that access policy belongs to a driver and the protocol is reused across
+memory buffers, sockets, and acquired views. The protocol can await permission
+and request IO without owning the lock or borrowing a connection at construction:
 
-This example uses `nitori_io` for the actual reads, so no custom receiver or
-poll implementation is needed. In this repository, both crates are workspace
-dependencies; add them to the consuming package. They are not yet published to
-crates.io.
+```rust
+#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+use nitori_call::{call, Direct, Target, run_sync};
+use nitori_io::{Write, TargetWriteExt, calls::WriteAllError};
+use std::{future::{Future, ready}, pin::Pin};
+
+#[call(sync)]
+async fn send<'data, H: Write, Permission: Future<Output = ()>>(
+    io: Target<H>, permission: Permission, message: &'data [u8],
+) -> Result<usize, WriteAllError<H::Error>> {
+    permission.await;
+    io.write_all(message).await.result
+}
+
+fn main() {
+    // Prepare work before selecting or borrowing a particular output buffer.
+    let operation = send::<Direct<Vec<u8>>, _>(ready(()), b"PING\n");
+    let mut output = Vec::new();
+    output.extend_from_slice(b"HELLO\n");
+    assert_eq!(run_sync(Pin::new(&mut output), operation).unwrap(), 5);
+    assert_eq!(output, b"HELLO\nPING\n");
+}
+```
+
+`permission.await` needs no receiver access. A lazy acquisition driver therefore
+need not lock anything until `write_all` requests IO. The
+[async Mutex driver tests](tests/resource_driver.rs) implement that policy.
+The ordinary bound entry point, `output.send_unpin(permission, message).await`,
+retains its resource borrow until dropped: binding a call does not automatically
+turn that borrow into a lock-per-poll policy. Ordinary async remains simpler
+when one borrowed resource for the whole operation is the desired contract.
+
+## Read a length-prefixed record
+
+The following parser reads a one-byte length and appends exactly that payload.
+It uses `nitori_io` capabilities directly, so the same code works with a memory
+slice or an asynchronous IO bridge. Neither the record format nor its error
+handling needs a separate polling state machine.
 
 ```rust
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
 use nitori_call::{call, Target};
-use nitori_io::{Read, TargetReadExt, calls::ReadBeError};
+use nitori_io::{Read, TargetReadExt, calls::ReadExactError};
 
 #[call(sync)]
-async fn read_sum<H: Read>(io: Target<H>) -> Result<u32, ReadBeError<H::Error>> {
-    let first = io.read_be::<u16>().await?;
-    let second = io.read_be::<u16>().await?;
-    Ok(u32::from(first) + u32::from(second))
+async fn read_record<'data, H: Read>(
+    io: Target<H>, output: &'data mut Vec<u8>,
+) -> Result<usize, ReadExactError<H::Error>> {
+    let [length] = io.read_array::<1>().await?;
+    io.read_exact(output, usize::from(length)).await?;
+    Ok(usize::from(length))
 }
 
 fn main() {
-    let mut input = b"\x00\x02\x00\x03".as_slice();
-    assert_eq!(input.sync_read_sum_unpin().unwrap(), 5);
-    assert!(input.is_empty());
+    let mut input = b"\x03cat\x03dog".as_slice();
+    let mut output = Vec::new();
+    assert_eq!(input.sync_read_record_unpin(&mut output).unwrap(), 3);
+    assert_eq!(output, b"cat");
+    assert_eq!(input, b"\x03dog"); // The next record has not been read.
 }
 ```
 
-- `H: Read` asks for a capability; a byte slice already provides it.
-- Each `io.read_be().await` runs a child on the same receiver and propagates its
-  typed error with `?`.
-- `#[call(sync)]` adds a synchronous entry point alongside the asynchronous one.
-  Memory reads are immediately ready. A synchronous call panics if an operation
-  returns `Pending`; use `input.read_sum_unpin().await` inside an async function
-  when the receiver may need to wait.
-- `ReadSumExt` and `TargetReadSumExt` are generated extension traits. Import them
-  when calling these methods from another module, just as `TargetReadExt` is
-  imported above. `_unpin` accepts an ordinary mutable reference; the pinned
-  entry point is `input.as_mut().read_sum()` when `input` is pinned.
+`#[call(sync)]` adds a synchronous entry point alongside the asynchronous one.
+Use it only for immediately ready resources: it panics on `Pending`. For a
+receiver that may wait, use `input.read_record_unpin(&mut output).await` inside
+an async function. `_unpin` accepts `&mut H`; pinned resources use
+`input.as_mut().read_record(&mut output)`. Import the generated `ReadRecordExt`
+when the call is declared in another module.
 
-To emit intermediate values, declare `#[call(sync, yields = u16)]` and write
-`yield first;` in the body. Pin the synchronous binding and iterate over
-`CoroutineState::Yielded(value)` and one `CoroutineState::Complete(result)`.
-The [read-pair example](examples/call_composition.rs) demonstrates this in full:
+For large payloads, collecting into a Vec is often undesirable. A call can
+instead declare `yields = H::Chunk` and yield one bounded chunk at a time,
+then return a separate success or error. The
+[DATA parser](../../examples/data-frame-codec/src/current_codec.rs) does this
+using `read_chunks_exact`; the [consumer](../../examples/data-frame-codec/examples/macro_demo/main.rs)
+processes chunks without buffering a whole frame. Awaiting a yielding call
+ignores its yielded values; iterate its events when those values are needed.
+The [write example](examples/call_composition.rs) similarly reports progress
+before returning its final byte count.
+
+Both crates are workspace dependencies in this repository and are not yet
+published to crates.io. From the repository root:
 
 ```sh
 cargo run --locked -p nitori_call --example call_composition
+cargo run --locked --example macro_demo
+cargo run --locked -p nitori_io --example limited_read
 ```
-
-For a protocol parser, the [DATA frame example](../../examples/data-frame-codec/examples/macro_demo/main.rs)
-uses the same syntax to read a header and yield bounded payload chunks. Its
-[parser](../../examples/data-frame-codec/examples/macro_demo/codec.rs) composes
-`nitori_io` operations and preserves their error sources.
 
 ## Receivers and families
 
@@ -109,30 +149,6 @@ value. It may be moved, stored, renamed, captured by a closure, or returned.
 `call_closure!(|io: Target<F>| { ... })` defines an anonymous operation;
 an omitted receiver annotation can be inferred from the execution context.
 
-```rust
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::{call, Direct, Target, TargetExt};
-
-#[call(sync)]
-async fn add(io: Target<Direct<usize>>, amount: usize) -> usize {
-    io.with(|access| {
-        let host = &mut *access.into_pin().get_mut().0;
-        *host += amount;
-        *host
-    }).await
-}
-#[call(sync)]
-async fn twice(io: Target<Direct<usize>>, amount: usize) -> usize {
-    let receiver = io;
-    receiver.add(amount).await;
-    receiver.add(amount).await
-}
-fn main() {
-    let mut host = 0usize;
-    assert_eq!(host.sync_twice_unpin(2), 4);
-}
-```
-
 A named call generates its operation, constructor, `NameArguments`, and two
 extension traits:
 
@@ -153,44 +169,71 @@ constructed `CallOn<Self::Target>`. The macro does not identify methods by name
 or track receiver variables. It lowers awaits and yields, validates the syntax
 boundary, and hides the current-resume environment.
 
-## Composition
+## Composition: keep a child parser inside its record
 
-`io.compose(state)` returns a real `Composed<R, State>` description. State
-implements `Compose<InnerFamily>` and supplies an associated output family.
-Each child drive builds nested lazy scopes. On demand, `compose` borrows the
-existing parent view and pinned state to construct its target view. Intermediate
-views stay pinned in their respective scopes until the drive returns. The child
-executes on the target family; `AdaptedCall` executes on the original root.
-Inside a child call, its receiver starts from that child's declared family.
+Suppose a record contains a one-byte length followed by a two-byte word. If a
+malformed record declares only one payload byte, calling an unrestricted word
+parser would consume the next record's length as its second byte. A length
+check inside every child parser would couple each parser to its caller's framing.
+
+Instead, compose the receiver with a byte budget. `ReadLimit` implements
+`Compose<F>` and produces a view that still implements `nitori_io::Read`, but
+returns EOF at the record boundary. The child stays generic over `Read`.
+Here is the [complete example](../nitori_io/examples/limited_read/main.rs), using
+the [ReadLimit adapter](../nitori_io/examples/limited_read/limit.rs):
 
 ```rust
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::{call, Compose, Direct, DirectView, Target, TargetExt};
-use std::pin::Pin;
 
-struct State(usize);
-impl Compose<Direct<()>> for State {
-    type Family = Direct<usize>;
-    fn compose<'v, 'p>(self: Pin<&'v mut Self>, _: Pin<&'v mut DirectView<'p, ()>>)
-        -> DirectView<'v, usize> where Direct<()>: 'p, Self::Family: 'v, 'p: 'v {
-        DirectView(Pin::new(&mut self.get_mut().0))
-    }
-}
-#[call]
-async fn read(io: Target<Direct<usize>>) -> usize {
-    io.with(|access| *access.into_pin().get_mut().0).await
-}
+# mod limit { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../nitori_io/examples/limited_read/limit.rs")); }
+
+use limit::ReadLimit;
+use nitori_call::{Target, TargetExt, call};
+use nitori_io::{Read, TargetReadExt, calls::ReadArrayError};
+
+// This parser can be reused with either an unrestricted or a limited receiver.
 #[call(sync)]
-async fn parent(io: Target<Direct<()>>) -> usize {
-    let mut state = State(7);
-    let mut composed = io.compose(&mut state);
-    let first = (&mut composed).read().await;
-    let second = (&mut composed).call(ReadArguments::new()).await;
-    let (_, state) = composed.into_parts();
-    first + second + state.0
+async fn read_word<H: Read>(io: Target<H>) -> Result<[u8; 2], ReadArrayError<H::Error>> {
+    io.read_array::<2>().await
 }
-fn main() { assert_eq!(().sync_parent_unpin(), 21); }
+
+#[call(sync)]
+async fn read_record<H: Read>(io: Target<H>) -> Result<[u8; 2], ReadArrayError<H::Error>> {
+    let [length] = io.read_array::<1>().await?;
+    io.compose(ReadLimit(usize::from(length))).read_word().await
+}
+
+fn main() {
+    // Without the boundary, a two-byte parser consumes the next record's length.
+    let mut payload = b"A\x02BC".as_slice();
+    assert_eq!(payload.sync_read_word_unpin().unwrap(), *b"A\x02");
+
+    // The malformed first record has only one byte; the next record stays readable.
+    let mut input = b"\x01A\x02BC".as_slice();
+    let error = input.sync_read_record_unpin().unwrap_err();
+    assert_eq!(error.completed(), 1);
+    assert_eq!(input, b"\x02BC");
+    assert_eq!(input.sync_read_record_unpin().unwrap(), *b"BC");
+}
 ```
+
+The state has a concrete job: `ReadLimit.0` counts bytes still available to the child. Successful reads
+reduce it; `Pending` and errors leave it unchanged; zero returns EOF without
+polling the parent. It survives child suspension while each temporary view only
+borrows it. The example's tests check partial reads, Pending, and cancellation.
+Dropping a call preserves unread bytes but does not restore bytes already read.
+For a longer declared record, the caller must explicitly consume or skip any
+remaining payload before starting the next record.
+
+Only the adapter defines a new family/view; protocol code uses the existing
+`Read` capability. The same pattern can add checksums or byte accounting to
+existing parsers without changing their signatures. It is a scoped adaptation
+of the current receiver, not a second stream or a copy of its contents.
+
+`io.compose(state)` returns a `Composed<R, State>` description. On demand,
+`Compose::compose` borrows the current parent view and state to produce the
+child view. Intermediate views stay pinned until that drive returns. The
+child runs against the adapted family, while its parent keeps the original one.
 
 A description may own its state, borrow `&mut S` when `S: Unpin`, or retain
 `Pin<&mut S>` for pinned state. A child borrows the description through

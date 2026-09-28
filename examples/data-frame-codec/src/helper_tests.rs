@@ -1,10 +1,11 @@
-use crate::current_codec::{
-    CodecError, ReadDataFrameExt, ReadSource, ReadSourceExt as _, ReadVarintExt,
-};
-use bytes::Bytes;
+use crate::current_codec::{ReadDataFrameExt, ReadVarintExt};
+use bytes::{BufMut, Bytes};
 use nitori_call::call;
 use nitori_call::{CallOn, Stream};
 use nitori_call::{PollCallExt as _, TargetExt as _};
+use nitori_io::calls::{ReadBeError, WriteAllError, WriteReturn};
+use nitori_io::{PollReadExt as _, Read, ReadChunk, WriteExt};
+use std::convert::Infallible;
 use std::{
     cell::{Cell, RefCell},
     future::Future,
@@ -30,12 +31,26 @@ impl Memory {
         }
     }
 }
-impl ReadSource for Memory {
-    fn poll_read<'visit>(
+impl Read for Memory {
+    type Error = Infallible;
+    fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
-        maximum: NonZeroUsize,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>>
+        out: &mut B,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        nitori_io::helpers::poll_read_from_chunk(host, cx, out)
+    }
+}
+impl ReadChunk for Memory {
+    type Chunk = Bytes;
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<Bytes>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -69,17 +84,31 @@ struct PinnedMemory {
     inner: RefCell<Memory>,
     _pin: PhantomPinned,
 }
-impl ReadSource for PinnedMemory {
-    fn poll_read<'visit>(
+impl Read for PinnedMemory {
+    type Error = Infallible;
+    fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
-        maximum: NonZeroUsize,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>>
+        out: &mut B,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        nitori_io::helpers::poll_read_from_chunk(host, cx, out)
+    }
+}
+impl ReadChunk for PinnedMemory {
+    type Chunk = Bytes;
+    fn poll_read_chunk<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<Bytes>, Self::Error>>
     where
         Self: 'visit,
     {
         let this = host.get_mut().0.as_mut();
-        Pin::new(&mut *this.inner.borrow_mut()).poll_read(maximum, cx)
+        Pin::new(&mut *this.inner.borrow_mut()).poll_read_chunk(cx, maximum)
     }
 }
 #[test]
@@ -109,7 +138,7 @@ fn streaming_helper_delivers_completion_once_and_preserves_backpressure() {
         else {
             panic!("chunk")
         };
-        assert_eq!(chunk.bytes.as_ref(), b"ab");
+        assert_eq!(chunk.as_ref(), b"ab");
         assert_eq!(polls.get(), 3);
         {
             let mut next = pin!(stream.as_mut().next());
@@ -117,7 +146,7 @@ fn streaming_helper_delivers_completion_once_and_preserves_backpressure() {
             else {
                 panic!("chunk")
             };
-            assert_eq!(chunk.bytes.as_ref(), b"c");
+            assert_eq!(chunk.as_ref(), b"c");
         }
         assert_eq!(polls.get(), 4);
         assert!(matches!(
@@ -266,21 +295,6 @@ fn one_operation_type_has_a_signature_for_each_target() {
     );
 }
 
-impl crate::current_codec::WriteSink<Bytes> for nitori_call::Direct<Vec<u8>> {
-    fn poll_write<'visit>(
-        host: Pin<&mut Self::ReceiverView<'visit>>,
-        input: &mut Bytes,
-        _: &mut Context<'_>,
-    ) -> Poll<Result<usize, CodecError>>
-    where
-        Self: 'visit,
-    {
-        let mut this = host.get_mut().0.as_mut();
-        let chunk = input.split_to(input.len().min(1));
-        this.extend_from_slice(&chunk);
-        Poll::Ready(Ok(chunk.len()))
-    }
-}
 #[test]
 fn write_helper_infers_input_generic_and_preserves_owned_result() {
     let mut target = Vec::new();
@@ -299,9 +313,9 @@ fn write_helper_infers_input_generic_and_preserves_owned_result() {
     assert_eq!(target, b"abc");
 }
 
-async fn through_trait_only<F: ReadSource, T: ReadVarintExt<F> + ?Sized>(
+async fn through_trait_only<F: Read, T: ReadVarintExt<F> + ?Sized>(
     target: Pin<&mut T>,
-) -> Result<u64, CodecError> {
+) -> Result<u64, ReadBeError<F::Error>> {
     target.read_varint().await
 }
 #[test]
@@ -336,7 +350,7 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
         else {
             panic!("chunk")
         };
-        assert_eq!(chunk.bytes.as_ref(), b"a");
+        assert_eq!(chunk.as_ref(), b"a");
         assert!(matches!(call.as_mut().poll(&mut cx), Poll::Ready(Ok(3))));
         assert!(matches!(
             call.as_mut().poll_next(&mut cx),
@@ -347,12 +361,12 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
 }
 
 async fn write_through_trait_only<
-    F: crate::current_codec::WriteSink<Bytes>,
-    T: crate::current_codec::WriteAllExt<F, Bytes> + ?Sized + Unpin,
+    F: nitori_io::Write,
+    T: nitori_call::ResourceDriver<Family = F> + ?Sized + Unpin,
 >(
     target: &mut T,
     input: Bytes,
-) -> crate::current_codec::WriteReturn<Bytes> {
+) -> WriteReturn<Bytes, WriteAllError<F::Error>> {
     target.write_all_unpin(input).await
 }
 

@@ -3,8 +3,9 @@
 use bytes::{Buf, Bytes};
 use nitori_call::PollCallExt as _;
 use nitori_call::call;
-use nitori_data_frame_codec_example::current_codec::TargetWriteExt as _;
-use nitori_data_frame_codec_example::current_codec::{CodecError, WriteSink};
+use nitori_io::TargetWriteExt as _;
+use nitori_io::Write;
+use std::convert::Infallible;
 use std::{
     ops::CoroutineState,
     pin::{Pin, pin},
@@ -16,12 +17,13 @@ struct Output {
     waited: bool,
 }
 
-impl<Input: Buf + ?Sized> WriteSink<&mut Input> for Output {
-    fn poll_write<'visit>(
+impl Write for Output {
+    type Error = Infallible;
+    fn poll_write<'visit, Input: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
-        input: &mut &mut Input,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<usize, CodecError>>
+        input: &mut Input,
+    ) -> Poll<Result<usize, Infallible>>
     where
         Self: 'visit,
     {
@@ -42,7 +44,7 @@ impl<Input: Buf + ?Sized> WriteSink<&mut Input> for Output {
 #[call]
 async fn write_local_buffer(
     io: nitori_call::Target<Output>,
-) -> Result<(Bytes, usize, Bytes, usize), CodecError> {
+) -> Result<(Bytes, usize, Bytes, usize), Infallible> {
     let mut buf = Bytes::from_static(b"abc");
     let returned = io.write(&mut buf).await;
     let first_count = returned.result?;
