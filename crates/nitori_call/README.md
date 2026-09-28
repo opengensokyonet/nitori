@@ -197,7 +197,7 @@ synchronous iteration, and cancellation. Run it from the repository root with
 The runtime uses a stack-local dispatch slot per resume; it performs no per-poll
 allocation or TLS lookup and never casts one lifetime-indexed host type to
 another. Nominal coroutine output wrappers avoid a nightly inference limitation
-recorded in the [compiler reproduction](../../experiments/tait-associated-output/ISSUE.md).
+with nested opaque output types.
 
 ## Resource drivers
 
