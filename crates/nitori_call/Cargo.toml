@@ -18,4 +18,5 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+nitori_io.workspace = true
 tokio = { workspace = true, features = ["sync"] }

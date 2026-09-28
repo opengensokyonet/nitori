@@ -1,83 +1,30 @@
-//! Source counterpart of expanded/expansion_demo.rs; both operations do the same work.
+//! Named and anonymous calls performing the same IO; see expanded/expansion_demo.rs.
 #![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use bytes::Bytes;
-use nitori_call::CallOn;
-use nitori_call::{PollCallExt as _, TargetExt as _};
-use nitori_call::{call, call_closure};
-use nitori_data_frame_codec_example::{
-    current_codec::TargetReadVarintExt,
-    current_codec::{CodecError, ReadSource},
-};
-use std::{
-    future::ready,
-    num::NonZeroUsize,
-    ops::CoroutineState,
-    pin::{Pin, pin},
-    task::{Context, Poll, Waker},
-};
 
-#[call(yields = u64)]
-async fn read_pair<T: ReadSource>(io: nitori_call::Target<T>) -> Result<u64, CodecError> {
-    let first = io.read_varint().await?;
-    let first = io.with(|_| first).await;
-    let offset = ready(0u64).await;
-    yield first;
-    Ok(first + io.read_varint().await? + offset)
+use nitori_call::{Direct, Target, call, call_closure, run_sync};
+use nitori_io::{Read, TargetReadExt, calls::ReadBeError};
+use std::{convert::Infallible, pin::Pin};
+
+#[call(sync)]
+async fn read_pair<H: Read>(io: Target<H>) -> Result<u16, ReadBeError<H::Error>> {
+    let first = io.read_be::<u8>().await?;
+    let second = io.read_be::<u8>().await?;
+    Ok(u16::from(first) + u16::from(second))
 }
 
-struct Source(Bytes);
-impl ReadSource for Source {
-    fn poll_read<'visit>(
-        host: Pin<&mut Self::ReceiverView<'visit>>,
-        maximum: NonZeroUsize,
-        _: &mut Context<'_>,
-    ) -> Poll<Result<Option<Bytes>, CodecError>>
-    where
-        Self: 'visit,
-    {
-        let mut this = host.get_mut().0.as_mut();
-        let count = this.0.len().min(maximum.get());
-        Poll::Ready(Ok(if count == 0 {
-            None
-        } else {
-            Some(this.0.split_to(count))
-        }))
-    }
-}
-
-fn check<Operation>(operation: Operation)
-where
-    Operation: CallOn<Source, Yield = u64, Return = Result<u64, CodecError>>,
-{
-    let mut operation = pin!(operation);
-    let mut source = Source(Bytes::from_static(b"\x01\x02"));
-    let mut cx = Context::from_waker(Waker::noop());
-    assert!(matches!(
-        operation
-            .as_mut()
-            .poll_receiver(Pin::new(&mut source), &mut cx),
-        Poll::Ready(CoroutineState::Yielded(1))
-    ));
-    assert_eq!(source.0.as_ref(), b"\x02");
-    assert!(matches!(
-        operation
-            .as_mut()
-            .poll_receiver(Pin::new(&mut source), &mut cx),
-        Poll::Ready(CoroutineState::Complete(Ok(3)))
-    ));
-    assert!(source.0.is_empty());
-}
 fn main() {
-    check(read_pair());
-    check(call_closure!(
-        |io: nitori_call::Target<Source>| -> Result<u64, CodecError> {
-            let first = io.read_varint().await?;
-            let first = io.with(|_| first).await;
-            let offset = ready(0u64).await;
-            yield first;
-            Ok(first + io.read_varint().await? + offset)
-        }
-    ));
-}
+    let mut input = b"\x01\x02".as_slice();
+    assert_eq!(input.sync_read_pair_unpin().unwrap(), 3);
+    assert!(input.is_empty());
 
-nitori_call::family_receiver!(impl [] for Source);
+    let mut input = b"\x01\x02".as_slice();
+    let operation = call_closure!(
+        |io: Target<Direct<&[u8]>>| -> Result<u16, ReadBeError<Infallible>> {
+            let first = io.read_be::<u8>().await?;
+            let second = io.read_be::<u8>().await?;
+            Ok(u16::from(first) + u16::from(second))
+        }
+    );
+    assert_eq!(run_sync(Pin::new(&mut input), operation).unwrap(), 3);
+    assert!(input.is_empty());
+}

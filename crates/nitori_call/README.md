@@ -1,8 +1,79 @@
 # nitori_call
 
-Calls can suspend on ordinary futures, access receivers lazily, and yield intermediate
-values before returning. `CallOn<F>` receives a `ReceiverScope`, not an eagerly
-constructed view. Ordinary async waits do not acquire a receiver.
+`nitori_call` describes resumable operations that use a resource, await other
+operations or ordinary futures, and optionally yield values before returning.
+It is experimental and requires the repository's pinned Rust nightly. Start here
+for usage; the sections below cover the execution and borrowing contracts.
+
+## Why calls?
+
+An ordinary async method taking `&mut self` keeps that borrow for the lifetime of
+its future. Sometimes the operation should keep its parsing or protocol state
+while a driver supplies resource access only when execution needs it, for
+example by acquiring an asynchronous lock. `CallOn<F>` separates that operation
+state from access to a resource family `F`.
+
+Inside `#[call]`, a `Target<F>` describes where child calls run; it does not hold
+the resource. The driver provides a lazy receiver scope on each poll. Waiting
+on an unrelated future does not acquire a receiver. This also lets an operation
+yield progress or data and still return a distinct final result.
+
+The usual entry point binds a call to a resource and therefore **does** retain
+that resource borrow until the binding is dropped. Custom drivers control
+acquisition; the call abstraction does not automatically release every borrow
+or make blocking IO asynchronous.
+
+## A first call
+
+This example uses `nitori_io` for the actual reads, so no custom receiver or
+poll implementation is needed. In this repository, both crates are workspace
+dependencies; add them to the consuming package. They are not yet published to
+crates.io.
+
+```rust
+#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+use nitori_call::{call, Target};
+use nitori_io::{Read, TargetReadExt, calls::ReadBeError};
+
+#[call(sync)]
+async fn read_sum<H: Read>(io: Target<H>) -> Result<u32, ReadBeError<H::Error>> {
+    let first = io.read_be::<u16>().await?;
+    let second = io.read_be::<u16>().await?;
+    Ok(u32::from(first) + u32::from(second))
+}
+
+fn main() {
+    let mut input = b"\x00\x02\x00\x03".as_slice();
+    assert_eq!(input.sync_read_sum_unpin().unwrap(), 5);
+    assert!(input.is_empty());
+}
+```
+
+- `H: Read` asks for a capability; a byte slice already provides it.
+- Each `io.read_be().await` runs a child on the same receiver and propagates its
+  typed error with `?`.
+- `#[call(sync)]` adds a synchronous entry point alongside the asynchronous one.
+  Memory reads are immediately ready. A synchronous call panics if an operation
+  returns `Pending`; use `input.read_sum_unpin().await` inside an async function
+  when the receiver may need to wait.
+- `ReadSumExt` and `TargetReadSumExt` are generated extension traits. Import them
+  when calling these methods from another module, just as `TargetReadExt` is
+  imported above. `_unpin` accepts an ordinary mutable reference; the pinned
+  entry point is `input.as_mut().read_sum()` when `input` is pinned.
+
+To emit intermediate values, declare `#[call(sync, yields = u16)]` and write
+`yield first;` in the body. Pin the synchronous binding and iterate over
+`CoroutineState::Yielded(value)` and one `CoroutineState::Complete(result)`.
+The [read-pair example](examples/call_composition.rs) demonstrates this in full:
+
+```sh
+cargo run --locked -p nitori_call --example call_composition
+```
+
+For a protocol parser, the [DATA frame example](../../examples/data-frame-codec/examples/macro_demo/main.rs)
+uses the same syntax to read a header and yield bounded payload chunks. Its
+[parser](../../examples/data-frame-codec/examples/macro_demo/codec.rs) composes
+`nitori_io` operations and preserves their error sources.
 
 ## Receivers and families
 
@@ -45,7 +116,7 @@ use nitori_call::{call, Direct, Target, TargetExt};
 #[call(sync)]
 async fn add(io: Target<Direct<usize>>, amount: usize) -> usize {
     io.with(|access| {
-        let mut host = access.into_pin().get_mut().0.as_mut();
+        let host = &mut *access.into_pin().get_mut().0;
         *host += amount;
         *host
     }).await
@@ -188,11 +259,8 @@ Bindings retain their host borrow until dropped, even after completion. Calling
 a synchronous host method inside `with` is permitted, but a binding borrowing
 the temporary view must be consumed before the callback returns.
 
-The [sequential composition example](examples/call_composition.rs) consumes an
-iterator or Stream of operations without prefetching and either yields each
-completion or relays every child event. It demonstrates asynchronous waiting,
-synchronous iteration, and cancellation. Run it from the repository root with
-`cargo run --locked -p nitori_call --example call_composition`.
+The [stream composition tests](tests/call_composition.rs) cover asynchronous
+waiting, sequential results, child events, and cancellation without prefetching.
 
 The runtime uses a stack-local dispatch slot per resume; it performs no per-poll
 allocation or TLS lookup and never casts one lifetime-indexed host type to

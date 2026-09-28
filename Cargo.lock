@@ -32,6 +32,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "nitori_call",
+ "nitori_io",
  "snafu",
 ]
 
@@ -42,6 +43,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "nitori_call_macros",
+ "nitori_io",
  "pin-project-lite",
  "tokio",
 ]

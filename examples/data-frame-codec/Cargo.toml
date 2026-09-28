@@ -9,3 +9,6 @@ license = "Apache-2.0 OR MIT"
 bytes.workspace = true
 snafu.workspace = true
 nitori_call.workspace = true
+
+[dev-dependencies]
+nitori_io.workspace = true
