@@ -1,18 +1,21 @@
+#![feature(impl_trait_in_assoc_type)]
 use bytes::BufMut;
 use nitori_call_prototype::{
-    Call, Compose, Direct, Emitter, HasReceiverFamily, ReceiverAccess, ReceiverFamily,
-    ReceiverSlot, ViewLoan, call, capability, direct_receiver,
+    BorrowedScope, Call, Compose, Direct, HasReceiverFamily, ReceiverAccess, ReceiverFamily,
+    ReceiverSlot, Start, ViewLoan, call, capability, direct_receiver,
 };
 use std::{
     collections::VecDeque,
     convert::Infallible,
     marker::PhantomData,
+    ops::ControlFlow,
     pin::{Pin, pin},
     task::{Context, Poll, Waker, ready},
 };
 
-/// The same contract as `nitori_io::Read`; the macro adds its operations.
-#[capability]
+/// The same contract as `nitori_io::Read`; the macro adds its operations,
+/// here in the default module `read`.
+#[capability(sync)]
 pub trait Read: ReceiverFamily {
     type Error;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
@@ -75,7 +78,7 @@ pub struct Incomplete {
     completed: usize,
 }
 
-#[call]
+#[call(sync)]
 async fn read_array<const LENGTH: usize>(
     io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
 ) -> Result<[u8; LENGTH], Incomplete> {
@@ -92,7 +95,7 @@ async fn read_array<const LENGTH: usize>(
     Ok(array)
 }
 
-#[call]
+#[call(sync)]
 async fn read_exact<A>(io: &mut A, output: &mut Vec<u8>, length: usize) -> Result<(), Incomplete>
 where
     A: ReceiverAccess<Family: Read<Error = Infallible>>,
@@ -108,7 +111,7 @@ where
     Ok(())
 }
 
-#[call]
+#[call(sync)]
 async fn read_record(
     io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
     output: &mut Vec<u8>,
@@ -156,6 +159,30 @@ fn a_bound_operation_waits_and_resumes() {
     }
     assert_eq!(output, b"h");
     assert_eq!(rest, b"i");
+}
+
+/// A primitive operation is also a root operation, and its future is the
+/// operation struct with the access filled in.
+#[test]
+fn a_primitive_operation_is_a_root_and_names_its_future() {
+    fn started<'a, 'b, A: ReceiverAccess<Family: Read>>(
+        io: &'a mut A,
+        destination: &'a mut &'b mut [u8],
+    ) -> read::Read<'a, &'b mut [u8], &'a mut A> {
+        io.read(destination)
+    }
+    let _ = started::<ReceiverSlot<'_, Direct<&[u8]>>>;
+
+    let mut input = b"xyz".as_slice();
+    let mut output = [0; 2];
+    let mut destination = output.as_mut_slice();
+    let mut call = pin!(Call::new(read::Read::new(&mut destination)));
+    let result = call.as_mut().poll_with(
+        pin!(BorrowedScope::new(Pin::new(&mut input))),
+        &mut Context::from_waker(Waker::noop()),
+    );
+    assert!(matches!(result, Poll::Ready(ControlFlow::Break(Ok(2)))));
+    assert_eq!(output, *b"xy");
 }
 
 /// A byte budget owned by the operation.
@@ -213,7 +240,7 @@ impl<F: Read> Read for Limited<F> {
     }
 }
 
-#[call]
+#[call(sync)]
 async fn read_limited_word(
     io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
 ) -> Result<[u8; 2], Incomplete> {
@@ -232,21 +259,99 @@ fn generated_methods_apply_to_composed_accesses() {
     assert_eq!(input.sync_read_limited_word_unpin(), Ok(*b"BC"));
 }
 
-async fn record_root<F: Read<Error = Infallible>>(
-    mut io: ReceiverSlot<'_, F>,
-    _: Emitter<'_, Infallible>,
-    output: &mut Vec<u8>,
-) -> Result<usize, Incomplete> {
-    io.read_record(output).await
-}
-
 fn assert_send<T: Send>(_: &T) {}
 
 #[test]
-fn a_call_using_generated_methods_over_a_generic_family_is_send() {
-    fn build<F: Read<Error = Infallible> + 'static>(output: &mut Vec<u8>) {
-        let call = Call::new((record_root::<F>, output));
-        assert_send(&call);
+fn a_call_of_a_generated_operation_over_a_generic_family_is_send() {
+    fn build<F: Read<Error = Infallible>>(output: &mut Vec<u8>) {
+        assert_send(&Call::<F, _>::new(ReadRecord::new(output)));
+        assert_send(&Call::<F, _>::new(ReadLimitedWord::new()));
     }
-    build::<Direct<&'static [u8]>>(&mut Vec::new());
+    build::<Direct<&[u8]>>(&mut Vec::new());
+}
+
+/// The future of a derived operation is nameable through `Start`.
+type RecordFuture<'a, A> = <ReadRecord<'a> as Start<'static, &'a mut A>>::Fut;
+fn record_future<'a, A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+    io: &'a mut A,
+    output: &'a mut Vec<u8>,
+) -> RecordFuture<'a, A> {
+    io.read_record(output)
+}
+
+#[test]
+fn a_derived_future_is_nameable() {
+    let _ = record_future::<ReceiverSlot<'_, Direct<&[u8]>>>;
+}
+
+/// Operations in a module chosen by the attribute.
+#[capability(module = writing)]
+pub trait Write: ReceiverFamily {
+    fn poll_write<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<usize>
+    where
+        Self: 'visit;
+}
+impl Write for Direct<Vec<u8>> {
+    fn poll_write<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        _: &mut Context<'_>,
+        source: &[u8],
+    ) -> Poll<usize>
+    where
+        Self: 'visit,
+    {
+        host.get_mut()
+            .0
+            .as_mut()
+            .get_mut()
+            .extend_from_slice(source);
+        Poll::Ready(source.len())
+    }
+}
+
+/// Operations in the current module.
+#[capability(module = self)]
+pub trait Clear: ReceiverFamily {
+    fn poll_clear_all<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<()>
+    where
+        Self: 'visit;
+}
+impl Clear for Direct<Vec<u8>> {
+    fn poll_clear_all<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        _: &mut Context<'_>,
+    ) -> Poll<()>
+    where
+        Self: 'visit,
+    {
+        host.get_mut().0.as_mut().get_mut().clear();
+        Poll::Ready(())
+    }
+}
+
+#[call(module = rewriting)]
+async fn rewrite(io: &mut impl ReceiverAccess<Family: Write + Clear>, source: &[u8]) -> usize {
+    io.clear_all().await;
+    io.write(source).await
+}
+
+#[test]
+fn the_attribute_chooses_the_module() {
+    let mut sink = b"old".to_vec();
+    let mut call = pin!(Call::new(rewriting::Rewrite::new(b"new")));
+    let result = call.as_mut().poll_with(
+        pin!(BorrowedScope::new(Pin::new(&mut sink))),
+        &mut Context::from_waker(Waker::noop()),
+    );
+    assert!(matches!(result, Poll::Ready(ControlFlow::Break(3))));
+    assert_eq!(sink, b"new");
+    let _: writing::Write<'_> = writing::Write::new(b"");
+    let _: ClearAll = ClearAll::new();
 }

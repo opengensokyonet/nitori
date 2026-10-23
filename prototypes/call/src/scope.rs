@@ -2,6 +2,7 @@
 //! Lazy receiver access for one drive. Acquired views never survive this scope.
 use crate::{Receiver, ReceiverFamily};
 use std::{
+    ops::DerefMut,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -16,6 +17,21 @@ pub trait ReceiverScope<'view> {
     ) -> Poll<Pin<&mut <Self::Family as ReceiverFamily>::ReceiverView<'view>>>;
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         self.poll_view(cx).map(drop)
+    }
+}
+impl<'view, P: DerefMut + Unpin> ReceiverScope<'view> for Pin<P>
+where
+    P::Target: ReceiverScope<'view>,
+{
+    type Family = <P::Target as ReceiverScope<'view>>::Family;
+    fn poll_view(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Pin<&mut <Self::Family as ReceiverFamily>::ReceiverView<'view>>> {
+        self.get_mut().as_mut().poll_view(cx)
+    }
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.get_mut().as_mut().poll_ready(cx)
     }
 }
 pin_project_lite::pin_project! {

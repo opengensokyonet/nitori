@@ -1,11 +1,11 @@
 //! A call: an operation together with the scope its caller lends on each poll.
 use crate::{
-    __private::{ScopeRequest, ThreadAnchor},
-    ReceiverFamily, ReceiverScope, ReceiverSlot,
-    access::Dispatch,
+    ReceiverAccess, ReceiverFamily, ReceiverScope, ReceiverSlot,
+    access::{Dispatch, ScopeRequest, mode::Probe},
 };
 use std::{
     cell::Cell,
+    convert::Infallible,
     future::{Future, poll_fn},
     marker::{PhantomData, PhantomPinned},
     mem,
@@ -15,47 +15,38 @@ use std::{
     task::{Context, Poll, ready},
 };
 
-/// The work of a call apart from its receiver: given the call's slot and
-/// emitter, start the future that performs it.
+/// What an operation produces over family `F`, independent of the access it
+/// runs with: neither type can carry the access or its brand.
+pub trait Operation<F: ReceiverFamily> {
+    type Output;
+    /// The type of emitted items; `Infallible` for operations that emit none.
+    type Yield;
+}
+
+/// Starting an operation with an access.
 ///
-/// Requiring `for<'s> Operation<'s, F, Y, R>` fixes `R` outside the brand, so
-/// the result cannot carry the slot. Implemented for functions taking the slot
-/// and emitter, and for a function paired with the arguments it takes last.
-pub trait Operation<'s, F: ReceiverFamily, Y, R> {
-    type Fut: Future<Output = R>;
-    fn start(self, slot: ReceiverSlot<'s, F>, emitter: Emitter<'s, Y>) -> Self::Fut;
-}
-impl<'s, F: ReceiverFamily, Y, R, Op, Fut> Operation<'s, F, Y, R> for Op
-where
-    Op: FnOnce(ReceiverSlot<'s, F>, Emitter<'s, Y>) -> Fut,
-    Fut: Future<Output = R>,
-{
-    type Fut = Fut;
-    fn start(self, slot: ReceiverSlot<'s, F>, emitter: Emitter<'s, Y>) -> Fut {
-        self(slot, emitter)
-    }
-}
-impl<'s, F: ReceiverFamily, Y, R, Function, Arguments, Fut> Operation<'s, F, Y, R>
-    for (Function, Arguments)
-where
-    Function: FnOnce(ReceiverSlot<'s, F>, Emitter<'s, Y>, Arguments) -> Fut,
-    Fut: Future<Output = R>,
-{
-    type Fut = Fut;
-    fn start(self, slot: ReceiverSlot<'s, F>, emitter: Emitter<'s, Y>) -> Fut {
-        (self.0)(slot, emitter, self.1)
-    }
+/// A [`Call`] requires `for<'s> Start<'s, ReceiverSlot<'s, F>>`, so the
+/// operation must accept every brand. A call is `Send` when the operation's
+/// future would be `Send` with a `Send` stand-in for the slot, which requires
+/// `Start` to be implemented generically over the access.
+pub trait Start<'s, A: ReceiverAccess>: Operation<A::Family> {
+    type Fut: Future<Output = <Self as Operation<A::Family>>::Output>;
+    fn start(
+        self,
+        access: A,
+        emitter: Emitter<'s, <Self as Operation<A::Family>>::Yield>,
+    ) -> Self::Fut;
 }
 
 /// Emits intermediate items from an operation as events of its call.
 pub struct Emitter<'s, Y> {
     cell: *const Cell<Option<Y>>,
-    anchor: *const ThreadAnchor,
     brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
-// SAFETY: the item cell is touched only after checking that the current thread
-// is polling the call; other threads only read the atomic anchor.
-unsafe impl<Y> Send for Emitter<'_, Y> {}
+// SAFETY: the item cell is read by the call only after the operation's poll
+// returns, so an emitter moved to another thread during that poll never races
+// with it. Items cross threads, hence `Y: Send`.
+unsafe impl<Y: Send> Send for Emitter<'_, Y> {}
 // SAFETY: shared references expose nothing.
 unsafe impl<Y> Sync for Emitter<'_, Y> {}
 impl<Y> Emitter<'_, Y> {
@@ -67,13 +58,7 @@ impl<Y> Emitter<'_, Y> {
             let Some(pending) = item.take() else {
                 return Poll::Ready(());
             };
-            // SAFETY: the anchor lives in the call, which outlives its operation.
-            let anchor = unsafe { &*self.anchor };
-            assert!(
-                anchor.is_current(),
-                "emitter used outside the poll of its call"
-            );
-            // SAFETY: the current thread is polling the call, which owns the cell.
+            // SAFETY: the call owns the cell and outlives its operation.
             let cell = unsafe { &*self.cell };
             match cell.take() {
                 // An earlier emission in this poll is not yet delivered.
@@ -87,6 +72,15 @@ impl<Y> Emitter<'_, Y> {
             cx.waker().wake_by_ref();
             Poll::Pending
         })
+    }
+}
+impl Emitter<'_, Infallible> {
+    /// An emitter for operations started outside a call; it can emit nothing.
+    pub(crate) fn detached() -> Self {
+        Self {
+            cell: ptr::null(),
+            brand: PhantomData,
+        }
     }
 }
 
@@ -118,10 +112,12 @@ unsafe fn dispatch_root<F: ReceiverFamily>(
     cx: &mut Context<'_>,
     request: &mut dyn ScopeRequest<F>,
 ) {
-    // SAFETY: the slot checked its anchor, so the call is inside poll_with on
-    // this thread and its lend cell is alive.
+    // SAFETY: the slot points at the lend cell of its pinned call, which
+    // outlives the operation; slots stay on the thread polling the call.
     let cell = unsafe { &*target.cast::<Cell<Option<Lend<F>>>>() };
-    let lend = cell.take().expect("receiver slot reentered its own scope");
+    let lend = cell
+        .take()
+        .expect("receiver slot used outside its call's poll, or reentered");
     // SAFETY: poll_with installed a matching pair for this poll.
     unsafe { (lend.dispatch)(lend.target, cx, request) };
     cell.set(Some(lend));
@@ -134,56 +130,69 @@ enum State<Op, Fut, R> {
     Finished,
 }
 
+type Running<F, Op> = <Op as Start<'static, ReceiverSlot<'static, F>>>::Fut;
+type Output<F, Op> = <Op as Operation<F>>::Output;
+type Yield<F, Op> = <Op as Operation<F>>::Yield;
+
 /// An operation and its receiver cells, polled with a scope supplied by the
 /// caller on each poll.
 ///
 /// The scope may differ between polls, so a call can be stored apart from the
 /// resource it uses. Each poll's view is acquired lazily by the scope and
-/// released when the caller drops it. `Y` is the type of emitted items.
-pub struct Call<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> {
+/// released when the caller drops it.
+pub struct Call<F, Op>
+where
+    F: ReceiverFamily,
+    Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
+{
     // Dropped before the cells it points into.
-    state: State<Op, <Op as Operation<'static, F, Y, R>>::Fut, R>,
+    state: State<Op, Running<F, Op>, Output<F, Op>>,
     lend: Cell<Option<Lend<F>>>,
-    emitted: Cell<Option<Y>>,
-    anchor: ThreadAnchor,
+    emitted: Cell<Option<Yield<F, Op>>>,
     poisoned: Cell<bool>,
     _pinned: PhantomPinned,
 }
-// SAFETY: between polls the lend cell is empty and the anchor is zero. During a
-// poll the call is borrowed exclusively by the polling thread.
-unsafe impl<F, Y, R, Op> Send for Call<F, Y, R, Op>
+// SAFETY: the running future is the operation's future for the call's slot.
+// The probe access is unnameable outside this crate, so an operation that
+// starts with it is generic over the access, and its probe future differs only
+// where the slot or accesses derived from it appear. Those never leave the
+// polling thread: slots are not Send, and between polls they hold only
+// pointers into this call, whose lend cell is then empty.
+unsafe impl<F, Op> Send for Call<F, Op>
 where
     F: ReceiverFamily,
-    Y: Send,
-    R: Send,
-    Op: Send + for<'s> Operation<'s, F, Y, R>,
-    <Op as Operation<'static, F, Y, R>>::Fut: Send,
+    Op: Operation<F> + Send,
+    Op: for<'s> Start<'s, ReceiverSlot<'s, F>> + for<'s> Start<'s, ReceiverSlot<'s, F, Probe>>,
+    for<'s> <Op as Start<'s, ReceiverSlot<'s, F, Probe>>>::Fut: Send,
+    Output<F, Op>: Send,
+    Yield<F, Op>: Send,
 {
 }
 
 struct PollGuard<'a, F> {
     lend: &'a Cell<Option<Lend<F>>>,
-    anchor: &'a ThreadAnchor,
     poisoned: &'a Cell<bool>,
 }
 impl<F> Drop for PollGuard<'_, F> {
     fn drop(&mut self) {
         self.lend.set(None);
-        self.anchor.leave();
         if std::thread::panicking() {
             self.poisoned.set(true);
         }
     }
 }
 
-impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> Call<F, Y, R, Op> {
+impl<F, Op> Call<F, Op>
+where
+    F: ReceiverFamily,
+    Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
+{
     /// Prepare a call. The operation starts on the first poll.
     pub fn new(operation: Op) -> Self {
         Self {
             state: State::Start(operation),
             lend: Cell::new(None),
             emitted: Cell::new(None),
-            anchor: ThreadAnchor::new(),
             poisoned: Cell::new(false),
             _pinned: PhantomPinned,
         }
@@ -195,7 +204,7 @@ impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> Call<F, Y, R, 
         self: Pin<&mut Self>,
         scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
         cx: &mut Context<'_>,
-    ) -> Poll<ControlFlow<R, Y>>
+    ) -> Poll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
     where
         F: 'view,
     {
@@ -205,11 +214,10 @@ impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> Call<F, Y, R, 
         // The running future keeps pointers into these cells, so they are
         // only ever accessed through shared references.
         // SAFETY: `this` is valid; the fields are disjoint.
-        let (lend, emitted, anchor, poisoned, state) = unsafe {
+        let (lend, emitted, poisoned, state) = unsafe {
             (
                 &(*this).lend,
                 &(*this).emitted,
-                &(*this).anchor,
                 &(*this).poisoned,
                 &mut (*this).state,
             )
@@ -231,30 +239,23 @@ impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> Call<F, Y, R, 
             target: ptr::from_mut(&mut lent).cast(),
             dispatch: Lent::<'_, 'view, F>::dispatch,
         }));
-        anchor.enter();
-        let guard = PollGuard {
-            lend,
-            anchor,
-            poisoned,
-        };
+        let guard = PollGuard { lend, poisoned };
         if let State::Start(_) = state {
             let State::Start(operation) = mem::replace(state, State::Finished) else {
                 unreachable!()
             };
             // SAFETY: the call is pinned, so the cells keep their address, and
             // the future that holds these handles is dropped before them.
-            // `Op: for<'s> Operation` makes the operation unable to rely on the
+            // `Op: for<'s> Start` makes the operation unable to rely on the
             // 'static brand chosen for storage.
             let slot = unsafe {
                 ReceiverSlot::<'static, F>::from_raw(
                     ptr::from_ref(lend).cast_mut().cast(),
                     dispatch_root::<F>,
-                    anchor,
                 )
             };
             let emitter = Emitter {
                 cell: emitted,
-                anchor,
                 brand: PhantomData,
             };
             *state = State::Running(operation.start(slot, emitter));
@@ -289,7 +290,7 @@ impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> Call<F, Y, R, 
         mut self: Pin<&mut Self>,
         mut scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
         cx: &mut Context<'_>,
-    ) -> Poll<R>
+    ) -> Poll<Output<F, Op>>
     where
         F: 'view,
     {
@@ -319,14 +320,16 @@ pub trait DynCall<F: ReceiverFamily, Y, R> {
     where
         F: 'view;
 }
-impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> DynCall<F, Y, R>
-    for Call<F, Y, R, Op>
+impl<F, Op> DynCall<F, Yield<F, Op>, Output<F, Op>> for Call<F, Op>
+where
+    F: ReceiverFamily,
+    Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
 {
     fn poll_with<'view>(
         self: Pin<&mut Self>,
         scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
         cx: &mut Context<'_>,
-    ) -> Poll<ControlFlow<R, Y>>
+    ) -> Poll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
     where
         F: 'view,
     {
@@ -336,7 +339,7 @@ impl<F: ReceiverFamily, Y, R, Op: for<'s> Operation<'s, F, Y, R>> DynCall<F, Y, 
         self: Pin<&mut Self>,
         scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
         cx: &mut Context<'_>,
-    ) -> Poll<R>
+    ) -> Poll<Output<F, Op>>
     where
         F: 'view,
     {

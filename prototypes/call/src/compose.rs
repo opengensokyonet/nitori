@@ -1,10 +1,9 @@
 #![allow(clippy::multiple_bound_locations)] // pin-project-lite projection bounds
 //! Scoped adaptation of the current view into another family.
-use crate::{
-    __private::{ScopeRequest, ThreadAnchor},
-    ReceiverAccess, ReceiverFamily, ReceiverScope,
-};
+use crate::{ReceiverAccess, ReceiverFamily, ReceiverScope, access::ScopeVisitor};
 use std::{
+    marker::PhantomData,
+    ops::DerefMut,
     pin::{Pin, pin},
     task::{Context, Poll, ready},
 };
@@ -35,6 +34,23 @@ impl<F: ReceiverFamily, S: Compose<F> + Unpin + ?Sized> Compose<F> for &mut S {
         Pin::new(&mut **self.get_mut()).compose(parent)
     }
 }
+impl<F: ReceiverFamily, P: DerefMut + Unpin> Compose<F> for Pin<P>
+where
+    P::Target: Compose<F>,
+{
+    type Family = <P::Target as Compose<F>>::Family;
+    fn compose<'s, 'p>(
+        self: Pin<&'s mut Self>,
+        parent: Pin<&'s mut F::ReceiverView<'p>>,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'s>
+    where
+        F: 'p,
+        Self::Family: 's,
+        'p: 's,
+    {
+        self.get_mut().as_mut().compose(parent)
+    }
+}
 
 /// An access adapted by composition state. It borrows its parent mutably,
 /// so the parent is unavailable while the adapted access exists.
@@ -51,51 +67,76 @@ impl<'p, A: ?Sized, S> Composed<'p, A, S> {
         self.state
     }
 }
-impl<A: ReceiverAccess, S: Compose<A::Family> + Unpin> ReceiverAccess for Composed<'_, A, S> {
+impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
+    for Composed<'_, A, S>
+{
     type Family = S::Family;
-    fn poll_scope(&mut self, cx: &mut Context<'_>, request: &mut dyn ScopeRequest<S::Family>) {
-        let mut adapt = Adapt {
-            state: Pin::new(&mut self.state),
-            inner: request,
-        };
-        self.parent.poll_scope(cx, &mut adapt);
-    }
-    fn thread_anchor(&self) -> &ThreadAnchor {
-        self.parent.thread_anchor()
+    type Mode = A::Mode;
+    fn visit_scope<V: ScopeVisitor<S::Family>>(
+        &mut self,
+        cx: &mut Context<'_>,
+        visitor: V,
+    ) -> V::Output {
+        self.parent.visit_scope(
+            cx,
+            ComposeVisitor {
+                state: Pin::new(&mut self.state),
+                inner: visitor,
+                family: PhantomData,
+            },
+        )
     }
 }
 
-struct Adapt<'q, S, G> {
+/// Wraps the parent's scope statically before handing it to the inner visitor.
+struct ComposeVisitor<'q, F, S, V> {
     state: Pin<&'q mut S>,
-    inner: &'q mut dyn ScopeRequest<G>,
+    inner: V,
+    family: PhantomData<fn(F) -> F>,
 }
-impl<F: ReceiverFamily, S: Compose<F>> ScopeRequest<F> for Adapt<'_, S, S::Family> {
-    fn run<'view>(
-        &mut self,
-        parent: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+impl<F: ReceiverFamily, S: Compose<F>, V: ScopeVisitor<S::Family>> ScopeVisitor<F>
+    for ComposeVisitor<'_, F, S, V>
+{
+    type Output = V::Output;
+    fn visit<'view, P: ReceiverScope<'view, Family = F>>(
+        self,
+        parent: Pin<&mut P>,
         cx: &mut Context<'_>,
-    ) where
+    ) -> V::Output
+    where
         F: 'view,
     {
         let scope = pin!(ComposeScope {
             parent: Some(parent),
-            state: Some(self.state.as_mut()),
-            view: None
+            state: Some(self.state),
+            view: None,
+            family: PhantomData,
         });
-        self.inner.run(scope, cx);
+        self.inner.visit(scope, cx)
     }
 }
 
 pin_project_lite::pin_project! {
-    struct ComposeScope<'s, 'p: 's, F: ReceiverFamily, S> where F: 'p, S: Compose<F>, S::Family: 's {
-        parent: Option<Pin<&'s mut dyn ReceiverScope<'p, Family = F>>>,
+    struct ComposeScope<'s, 'p: 's, F, P, S>
+    where
+        F: ReceiverFamily,
+        F: 'p,
+        P: ReceiverScope<'p, Family = F>,
+        S: Compose<F>,
+        S::Family: 's,
+    {
+        parent: Option<Pin<&'s mut P>>,
         state: Option<Pin<&'s mut S>>,
         #[pin]
         view: Option<<S::Family as ReceiverFamily>::ReceiverView<'s>>,
+        family: PhantomData<&'p F>,
     }
 }
-impl<'s, 'p, F: ReceiverFamily + 'p, S: Compose<F>> ReceiverScope<'s> for ComposeScope<'s, 'p, F, S>
+impl<'s, 'p, F, P, S> ReceiverScope<'s> for ComposeScope<'s, 'p, F, P, S>
 where
+    F: ReceiverFamily + 'p,
+    P: ReceiverScope<'p, Family = F>,
+    S: Compose<F>,
     S::Family: 's,
     'p: 's,
 {
