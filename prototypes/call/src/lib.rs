@@ -75,8 +75,44 @@ pub use compose::{Compose, Composed};
 mod call;
 pub use call::{Call, DynCall, Emitter, Operation};
 
-/// Support for implementing [`ReceiverAccess`]; not a stable interface.
+/// Generate conveniences for an async function taking a receiver access first.
+pub use nitori_call_prototype_macros::call;
+/// Generate operations and conveniences from a capability trait's poll methods.
+pub use nitori_call_prototype_macros::capability;
+
+/// Support for implementing [`ReceiverAccess`] and for generated code; not a
+/// stable interface.
 #[doc(hidden)]
 pub mod __private {
     pub use crate::access::{ScopeRequest, ThreadAnchor};
+    use crate::{BorrowedScope, Call, Operation, Receiver};
+    use std::{
+        convert::Infallible,
+        future::{Future, poll_fn},
+        pin::{Pin, pin},
+        task::{Context, Poll, Waker},
+    };
+
+    /// Run an operation on a host, lending a fresh lazy scope on each poll.
+    pub async fn bind<H, R, Op>(host: Pin<&mut H>, operation: Op) -> R
+    where
+        H: Receiver + ?Sized,
+        Op: for<'s> Operation<'s, H::Family, Infallible, R>,
+    {
+        let mut host = host;
+        let mut call = pin!(Call::new(operation));
+        poll_fn(|cx| {
+            call.as_mut()
+                .poll_return_with(pin!(BorrowedScope::new(host.as_mut())), cx)
+        })
+        .await
+    }
+
+    /// Complete a future that must not wait.
+    pub fn run_sync<T>(future: impl Future<Output = T>) -> T {
+        match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("synchronous operation returned Pending"),
+        }
+    }
 }
