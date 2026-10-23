@@ -158,7 +158,13 @@ pub use call::{Call, DynCall, Emitter, Operation, Start};
 ///
 /// The operation is a struct named after the function in CamelCase, with the
 /// remaining arguments as fields. Users of the macro enable
-/// `impl_trait_in_assoc_type`. Arguments:
+/// `impl_trait_in_assoc_type`.
+///
+/// An operation that emits takes `&mut Emitter<'_, Item>` second. Its access
+/// method takes the caller's emitter, and it has no host methods, since those
+/// return only the result.
+///
+/// Arguments:
 ///
 /// - `module = name` generates the operation in a new module `name`;
 ///   `module = self`, the default, in the current module.
@@ -178,7 +184,8 @@ pub use nitori_call_prototype_macros::call;
 /// Generate operations and conveniences from a capability trait's poll methods.
 ///
 /// Each `poll_name` method becomes an operation struct `Name`, which is also
-/// the future it starts. Arguments:
+/// the future it starts. Type and const parameters of the trait become
+/// parameters of the structs and of the convenience traits. Arguments:
 ///
 /// - `module = name` generates the operations in module `name`; by default
 ///   the module is the trait's name in snake case. `module = self` generates

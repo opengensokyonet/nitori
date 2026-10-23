@@ -1,8 +1,8 @@
 #![feature(impl_trait_in_assoc_type)]
 use bytes::BufMut;
 use nitori_call_prototype::{
-    BorrowedScope, Call, Compose, Direct, HasReceiverFamily, ReceiverAccess, ReceiverFamily,
-    ReceiverSlot, Start, ViewLoan, call, capability, direct_receiver,
+    BorrowedScope, Call, Compose, Direct, Emitter, HasReceiverFamily, ReceiverAccess,
+    ReceiverFamily, ReceiverSlot, Start, ViewLoan, call, capability, direct_receiver,
 };
 use std::{
     collections::VecDeque,
@@ -354,4 +354,201 @@ fn the_attribute_chooses_the_module() {
     assert_eq!(sink, b"new");
     let _: writing::Write<'_> = writing::Write::new(b"");
     let _: ClearAll = ClearAll::new();
+}
+
+/// An operation that emits: the emitter comes second.
+#[call]
+async fn read_chunks(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    emitter: &mut Emitter<'_, Vec<u8>>,
+    size: usize,
+) -> Result<usize, Incomplete> {
+    let mut total = 0;
+    loop {
+        let mut chunk = Vec::new();
+        match io.read(&mut (&mut chunk).limit(size)).await {
+            Ok(0) => return Ok(total),
+            Ok(count) => total += count,
+            Err(never) => match never {},
+        }
+        emitter.emit(chunk).await;
+    }
+}
+
+/// A parent emitting the same items passes its emitter to the child.
+#[call]
+async fn read_framed_chunks<A>(
+    io: &mut A,
+    emitter: &mut Emitter<'_, Vec<u8>>,
+) -> Result<usize, Incomplete>
+where
+    A: ReceiverAccess<Family: Read<Error = Infallible>>,
+{
+    let [size] = io.read_array::<1>().await?;
+    emitter.emit(vec![size]).await;
+    io.read_chunks(emitter, size.into()).await
+}
+
+fn events<Y, R>(
+    call: Pin<&mut impl nitori_call_prototype::DynCall<Direct<&'static [u8]>, Y, R>>,
+    input: &mut &'static [u8],
+) -> (Vec<Y>, R) {
+    let mut call = call;
+    let mut items = Vec::new();
+    loop {
+        match call.as_mut().poll_with(
+            pin!(BorrowedScope::new(Pin::new(&mut *input))),
+            &mut Context::from_waker(Waker::noop()),
+        ) {
+            Poll::Ready(ControlFlow::Continue(item)) => items.push(item),
+            Poll::Ready(ControlFlow::Break(result)) => return (items, result),
+            Poll::Pending => panic!("memory input does not wait"),
+        }
+    }
+}
+
+#[test]
+fn a_generated_operation_emits_items() {
+    let mut input: &'static [u8] = b"\x02abcde";
+    let mut call = pin!(Call::new(ReadFramedChunks::new()));
+    let (items, result) = events(call.as_mut(), &mut input);
+    assert_eq!(
+        items,
+        [vec![2], b"ab".to_vec(), b"cd".to_vec(), b"e".to_vec()]
+    );
+    assert_eq!(result, Ok(5));
+}
+
+#[test]
+fn a_call_of_an_emitting_operation_is_send() {
+    fn build<F: Read<Error = Infallible>>() {
+        assert_send(&Call::<F, _>::new(ReadChunks::new(1)));
+        assert_send(&Call::<F, _>::new(ReadFramedChunks::new()));
+    }
+    build::<Direct<&[u8]>>();
+}
+
+/// A capability trait with a type parameter.
+#[capability]
+pub trait Fill<T: Copy>: ReceiverFamily {
+    fn poll_fill<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        destination: &mut [T],
+    ) -> Poll<usize>
+    where
+        Self: 'visit;
+}
+/// Fills with its value, as bytes or as words.
+struct Pattern(u8);
+direct_receiver!(impl [] for Pattern);
+impl Fill<u8> for Direct<Pattern> {
+    fn poll_fill<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        _: &mut Context<'_>,
+        destination: &mut [u8],
+    ) -> Poll<usize>
+    where
+        Self: 'visit,
+    {
+        destination.fill(host.0.0);
+        Poll::Ready(destination.len())
+    }
+}
+impl Fill<u16> for Direct<Pattern> {
+    fn poll_fill<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        _: &mut Context<'_>,
+        destination: &mut [u16],
+    ) -> Poll<usize>
+    where
+        Self: 'visit,
+    {
+        destination.fill(u16::from_le_bytes([host.0.0; 2]));
+        Poll::Ready(destination.len())
+    }
+}
+
+#[call(sync)]
+async fn fill_both(
+    io: &mut impl ReceiverAccess<Family: Fill<u8> + Fill<u16>>,
+) -> ([u8; 2], [u16; 1]) {
+    let (mut bytes, mut words) = ([0; 2], [0; 1]);
+    // The argument selects the trait's parameter.
+    io.fill(&mut bytes).await;
+    io.fill(&mut words).await;
+    (bytes, words)
+}
+
+#[test]
+fn a_generic_capability_generates_generic_operations() {
+    let mut pattern = Pattern(1);
+    assert_eq!(pattern.sync_fill_both_unpin(), ([1, 1], [0x0101]));
+    let mut words = [0_u16; 3];
+    let _: fill::Fill<'_, u16> = fill::Fill::new(&mut words);
+    assert_eq!(Pattern(2).fill_unpin(&mut words[..]).poll_ready_now(), 3);
+    assert_eq!(words, [0x0202; 3]);
+}
+
+trait PollReadyNow: std::future::Future + Sized {
+    fn poll_ready_now(self) -> Self::Output {
+        match pin!(self).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("future was not ready"),
+        }
+    }
+}
+impl<T: std::future::Future> PollReadyNow for T {}
+
+/// A family predicate naming only the traits' parameters.
+#[call]
+async fn fill_pair<T: Copy + Default, A>(io: &mut A) -> [T; 2]
+where
+    A: ReceiverAccess<Family: Fill<T>>,
+    A::Family: Fill<T>,
+{
+    let mut pair = [T::default(); 2];
+    io.fill(&mut pair).await;
+    pair
+}
+
+#[test]
+fn family_predicates_apply_to_the_family_in_conveniences() {
+    let pair: [u8; 2] = Pattern(3).fill_pair_unpin().poll_ready_now();
+    assert_eq!(pair, [3; 2]);
+}
+
+/// A family predicate naming no parameters at all.
+#[call]
+async fn clear_then_write<A>(io: &mut A, source: &[u8]) -> usize
+where
+    A: ReceiverAccess<Family: Write>,
+    A::Family: Clear,
+{
+    io.clear_all().await;
+    io.write(source).await
+}
+
+#[test]
+fn family_predicates_without_parameters_apply_to_the_family() {
+    let mut sink = b"old".to_vec();
+    assert_eq!(sink.clear_then_write_unpin(b"x").poll_ready_now(), 1);
+    assert_eq!(sink, b"x");
+}
+
+#[test]
+fn a_one_off_operation_is_a_local_function() {
+    // Generated items stay local to the block, as a closure would.
+    #[call]
+    async fn first_byte(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> u8 {
+        let [byte] = io.read_array::<1>().await.unwrap();
+        byte
+    }
+    let mut input = b"q".as_slice();
+    let mut call = pin!(Call::new(FirstByte::new()));
+    let result = call.as_mut().poll_with(
+        pin!(BorrowedScope::new(Pin::new(&mut input))),
+        &mut Context::from_waker(Waker::noop()),
+    );
+    assert!(matches!(result, Poll::Ready(ControlFlow::Break(b'q'))));
 }

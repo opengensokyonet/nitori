@@ -240,7 +240,7 @@ fn an_executor_lends_one_view_to_several_calls_in_one_poll() {
     assert_eq!(views.get(), 1);
 }
 
-/// An operation written by hand: it emits items, which `#[call]` does not support.
+/// An operation that emits, written by hand.
 struct ReadChunks {
     total: usize,
 }

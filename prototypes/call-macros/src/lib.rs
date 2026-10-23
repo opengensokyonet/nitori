@@ -109,6 +109,8 @@ struct Operation {
     capability: Option<Path>,
     arguments: Vec<Argument>,
     output: Type,
+    /// The item type of an emitter parameter, for operations that emit.
+    yield_type: Option<Type>,
     sync: bool,
 }
 
@@ -285,6 +287,10 @@ impl Operation {
         let family_bounds = self.family_bound_tokens(Place::Inside);
         let family_predicates = self.family_predicates(&family, Place::Inside);
         let output = self.substitute(self.output.clone(), &family, Place::Inside);
+        let yield_type = match &self.yield_type {
+            Some(ty) => self.substitute(ty.clone(), &family, Place::Inside),
+            None => parse_quote!(::core::convert::Infallible),
+        };
         let operation = self.name.to_string();
         let doc = format!("The `{operation}` operation.");
         quote! {
@@ -310,9 +316,22 @@ impl Operation {
             where #(#family_predicates,)*
             {
                 type Output = #output;
-                type Yield = ::core::convert::Infallible;
+                type Yield = #yield_type;
             }
         }
+    }
+
+    /// Parameters of a convenience trait over `receiver`, whose predicates
+    /// name the receiver's family where the operation says `Self`.
+    fn convenience_generics(&self, receiver: &Tokens) -> Generics {
+        let family: Type = parse_quote!(<Self as #receiver>::Family);
+        let mut generics = self.trait_generics.clone();
+        if let Some(clause) = &mut generics.where_clause {
+            for predicate in clause.predicates.iter_mut() {
+                *predicate = self.substitute(predicate.clone(), &family, Place::Outside);
+            }
+        }
+        generics
     }
 
     /// Wrap definitions in the struct's module, if it has one.
@@ -436,10 +455,10 @@ fn snake_case(name: &str) -> String {
 
 fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
     let runtime = runtime();
-    if !item.generics.params.is_empty() {
+    if let Some(lifetime) = item.generics.lifetimes().next() {
         return Err(Error::new(
-            item.generics.span(),
-            "#[capability] does not yet support generic capability traits",
+            lifetime.span(),
+            "#[capability] does not yet support lifetime parameters of capability traits",
         ));
     }
     let module = match options.module {
@@ -447,7 +466,24 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
         Module::Current => None,
         Module::Named(module) => Some(module),
     };
-    let capability: Path = item.ident.clone().into();
+    let ident = &item.ident;
+    let (_, type_generics, _) = item.generics.split_for_impl();
+    let capability: Path = parse_quote!(#ident #type_generics);
+    // Generated items declare the trait's parameters without defaults.
+    let mut trait_generics = item.generics.clone();
+    for parameter in trait_generics.params.iter_mut() {
+        match parameter {
+            GenericParam::Type(parameter) => {
+                parameter.eq_token = None;
+                parameter.default = None;
+            }
+            GenericParam::Const(parameter) => {
+                parameter.eq_token = None;
+                parameter.default = None;
+            }
+            GenericParam::Lifetime(_) => {}
+        }
+    }
     let mut operations = Vec::new();
     for member in &item.items {
         let TraitItem::Fn(method) = member else {
@@ -466,6 +502,7 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
         operations.push(primitive(
             &item,
             &capability,
+            &trait_generics,
             &module,
             options.sync,
             method,
@@ -490,21 +527,22 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
     let first = &operations[0].0;
     let mut generated = first.in_module(definitions);
     let vis = &item.vis;
-    let empty = Generics::default();
     let bounds = first.family_bound_tokens(Place::Outside);
+    let access = quote!(#runtime::ReceiverAccess);
+    let host = quote!(#runtime::Receiver);
     generated.extend(convenience_trait(
         vis,
         &format_ident!("{}Ext", item.ident),
-        &empty,
-        quote!(#runtime::ReceiverAccess),
+        &first.convenience_generics(&access),
+        access,
         bounds.clone(),
         access_methods,
     ));
     generated.extend(convenience_trait(
         vis,
         &format_ident!("{}HostExt", item.ident),
-        &empty,
-        quote!(#runtime::Receiver),
+        &first.convenience_generics(&host),
+        host,
         bounds,
         host_methods,
     ));
@@ -521,6 +559,7 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
 fn primitive(
     item: &ItemTrait,
     capability: &Path,
+    trait_generics: &Generics,
     module: &Option<Ident>,
     sync: bool,
     method: &TraitItemFn,
@@ -579,12 +618,13 @@ fn primitive(
         name,
         module: module.clone(),
         lifetimes,
-        trait_generics: Generics::default(),
+        trait_generics: trait_generics.clone(),
         method_generics,
         family_bounds: Punctuated::new(),
         capability: Some(capability.clone()),
         arguments,
         output,
+        yield_type: None,
         sync,
     };
 
@@ -684,13 +724,21 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
             "#[call] applies to async functions",
         ));
     }
-    let mut inputs = signature.inputs.iter();
+    let mut inputs = signature.inputs.iter().peekable();
     let Some(FnArg::Typed(access)) = inputs.next() else {
         return Err(Error::new(
             signature.span(),
             "the first parameter must be a mutable receiver access",
         ));
     };
+    // An operation that emits takes `&mut Emitter<'_, Item>` second.
+    let mut yield_type = match inputs.peek() {
+        Some(FnArg::Typed(typed)) => emitter_item(&typed.ty)?,
+        _ => None,
+    };
+    if yield_type.is_some() {
+        inputs.next();
+    }
     let mut arguments = Vec::new();
     for input in inputs {
         arguments.push(argument(input)?);
@@ -728,6 +776,15 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
             access: access_name,
         };
         replace.visit_type_mut(&mut output);
+        if let Some(item) = &mut yield_type {
+            replace.visit_type_mut(item);
+            if mentions(quote!(#item), &access_name.to_string()) {
+                return Err(Error::new(
+                    access_name.span(),
+                    format!("the item type may mention the access only as `{access_name}::Family`"),
+                ));
+            }
+        }
         if let Some(clause) = &mut generics.where_clause {
             for predicate in clause.predicates.iter_mut() {
                 replace.visit_where_predicate_mut(predicate);
@@ -775,6 +832,12 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         Module::Default | Module::Current => None,
         Module::Named(module) => Some(module),
     };
+    if options.sync && yield_type.is_some() {
+        return Err(Error::new(
+            signature.span(),
+            "`sync` host methods need an operation that does not emit",
+        ));
+    }
     let operation = Operation {
         vis: item.vis.clone(),
         name: signature.ident.clone(),
@@ -791,6 +854,7 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         capability: None,
         arguments,
         output,
+        yield_type,
         sync: options.sync,
     };
 
@@ -799,6 +863,16 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         Some(_) => quote!(super::#function),
         None => quote!(#function),
     };
+    // From the access methods, the access is `Self`.
+    let method_turbofish: Vec<Tokens> = turbofish
+        .iter()
+        .map(|argument| match argument.to_string().as_str() {
+            "__A" => quote!(Self),
+            _ => argument.clone(),
+        })
+        .collect();
+    let method_turbofish =
+        (!method_turbofish.is_empty()).then(|| quote!(::<#(#method_turbofish),*>));
     let turbofish = (!turbofish.is_empty()).then(|| quote!(::<#(#turbofish),*>));
     let struct_name = &operation.struct_name;
     let parameters = operation.parameters();
@@ -807,6 +881,13 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
     let access_family: Type = parse_quote!(<__A as #runtime::ReceiverAccess>::Family);
     let bounds = operation.family_bound_tokens(Place::Inside);
     let predicates = operation.family_predicates(&access_family, Place::Inside);
+    let (emitter_type, emitter_argument) = match &operation.yield_type {
+        Some(item) => {
+            let item = operation.substitute(item.clone(), &access_family, Place::Inside);
+            (item, quote!(&mut __emitter,))
+        }
+        None => (parse_quote!(::core::convert::Infallible), Tokens::new()),
+    };
     let mut definition = operation.struct_definition(false);
     definition.extend(quote! {
         impl<'__s, #parameters __A> #runtime::Start<'__s, __A> for #struct_name<#arguments>
@@ -818,15 +899,17 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
             type Fut = impl ::core::future::Future<
                 Output = <Self as #runtime::Operation<<__A as #runtime::ReceiverAccess>::Family>>::Output,
             >;
+            #[allow(unused_mut, unused_variables)]
             fn start(
                 self,
                 __io: __A,
-                _: #runtime::Emitter<'__s, ::core::convert::Infallible>,
+                __emitter: #runtime::Emitter<'__s, #emitter_type>,
             ) -> Self::Fut {
                 let Self { #(#names,)* .. } = self;
                 async move {
                     let mut __io = __io;
-                    #function_path #turbofish(&mut __io, #(#names),*).await
+                    let mut __emitter = __emitter;
+                    #function_path #turbofish(&mut __io, #emitter_argument #(#names),*).await
                 }
             }
         }
@@ -840,38 +923,64 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
     let method_predicates =
         operation.predicates(&operation.method_generics, &self_family, Place::Outside);
     let path = operation.struct_path();
-    let access_methods = quote! {
-        fn #function<#(#lifetimes,)* '__a, #method_parameters>(
-            &'__a mut self,
-            #(#names: #types),*
-        ) -> <#path<#arguments> as #runtime::Start<'static, &'__a mut Self>>::Fut
-        where Self: ::core::marker::Sized, #(#method_predicates,)*
-        {
-            #runtime::Start::start(
-                #path::new(#(#names),*),
-                self,
-                #runtime::__private::detached(),
-            )
+    let access_methods = match &operation.yield_type {
+        // The operation emits through the caller's emitter, which a started
+        // operation cannot borrow, so the method calls the function directly.
+        Some(item) => {
+            let item = operation.substitute(item.clone(), &self_family, Place::Outside);
+            let output =
+                operation.substitute(operation.output.clone(), &self_family, Place::Outside);
+            quote! {
+                fn #function<#(#lifetimes,)* '__a, #method_parameters>(
+                    &'__a mut self,
+                    __emitter: &'__a mut #runtime::Emitter<'_, #item>,
+                    #(#names: #types),*
+                ) -> impl ::core::future::Future<Output = #output>
+                where Self: ::core::marker::Sized, #(#method_predicates,)*
+                {
+                    #function #method_turbofish(self, __emitter, #(#names),*)
+                }
+            }
         }
+        None => quote! {
+            fn #function<#(#lifetimes,)* '__a, #method_parameters>(
+                &'__a mut self,
+                #(#names: #types),*
+            ) -> <#path<#arguments> as #runtime::Start<'static, &'__a mut Self>>::Fut
+            where Self: ::core::marker::Sized, #(#method_predicates,)*
+            {
+                #runtime::Start::start(
+                    #path::new(#(#names),*),
+                    self,
+                    #runtime::__private::detached(),
+                )
+            }
+        },
     };
     let camel = &operation.struct_name;
     let bounds = operation.family_bound_tokens(Place::Outside);
+    let access = quote!(#runtime::ReceiverAccess);
+    let host = quote!(#runtime::Receiver);
     let access_trait = convenience_trait(
         &operation.vis,
         &format_ident!("{}Ext", camel),
-        &operation.trait_generics,
-        quote!(#runtime::ReceiverAccess),
+        &operation.convenience_generics(&access),
+        access,
         bounds.clone(),
         access_methods,
     );
-    let host_trait = convenience_trait(
-        &operation.vis,
-        &format_ident!("{}HostExt", camel),
-        &operation.trait_generics,
-        quote!(#runtime::Receiver),
-        bounds,
-        operation.host_methods(),
-    );
+    // Host methods return the result; an operation that emits has none.
+    let host_trait = match operation.yield_type {
+        Some(_) => Tokens::new(),
+        None => convenience_trait(
+            &operation.vis,
+            &format_ident!("{}HostExt", camel),
+            &operation.convenience_generics(&host),
+            host,
+            bounds,
+            operation.host_methods(),
+        ),
+    };
     Ok(quote! {
         #item
         #definition
@@ -1054,6 +1163,40 @@ fn family_bounds(
     Err(Error::new(
         span.span(),
         "the access must be bounded by `ReceiverAccess<Family: ..>`",
+    ))
+}
+
+/// The item type, if `ty` is `&mut Emitter<'_, Item>`.
+fn emitter_item(ty: &Type) -> Result<Option<Type>> {
+    let Type::Reference(reference) = ty else {
+        return Ok(None);
+    };
+    let Type::Path(path) = &*reference.elem else {
+        return Ok(None);
+    };
+    let Some(last) = path.path.segments.last() else {
+        return Ok(None);
+    };
+    if last.ident != "Emitter" {
+        return Ok(None);
+    }
+    if reference.mutability.is_none() {
+        return Err(Error::new(
+            ty.span(),
+            "the emitter must be a mutable reference",
+        ));
+    }
+    if let PathArguments::AngleBracketed(arguments) = &last.arguments
+        && let Some(GenericArgument::Type(item)) = arguments
+            .args
+            .iter()
+            .find(|argument| matches!(argument, GenericArgument::Type(_)))
+    {
+        return Ok(Some(item.clone()));
+    }
+    Err(Error::new(
+        ty.span(),
+        "the emitter must be `&mut Emitter<'_, Item>`",
     ))
 }
 
