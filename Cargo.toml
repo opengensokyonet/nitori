@@ -4,6 +4,7 @@ members = [
     "crates/nitori_call_macros",
     "crates/nitori_io",
     "examples/data-frame-codec",
+    "prototypes/call",
 ]
 resolver = "3"
 
