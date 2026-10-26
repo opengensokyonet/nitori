@@ -1,8 +1,9 @@
 #![feature(impl_trait_in_assoc_type)]
 mod support;
 
+use futures_core::Stream;
 use nitori_call_prototype::{
-    BorrowedScope, Call, Compose, Direct, DirectView, DynCall, Emitter, Operation, Receiver,
+    Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Operation, Receiver,
     ReceiverAccess, ReceiverFamily, Start, call, direct_receiver,
 };
 use std::{
@@ -33,14 +34,19 @@ async fn read_record(
     Ok(length.into())
 }
 
+/// Poll for the final value, discarding items.
 fn poll<F: ReceiverFamily, Y, R>(
     call: Pin<&mut (impl DynCall<F, Y, R> + ?Sized)>,
     host: Pin<&mut impl Receiver<Family = F>>,
-) -> Poll<ControlFlow<R, Y>> {
-    call.poll_with(
-        pin!(BorrowedScope::new(host)),
+) -> Poll<R> {
+    match call.poll_return_with(
+        Some(pin!(host.view())),
         &mut Context::from_waker(Waker::noop()),
-    )
+    ) {
+        CallPoll::Ready(event) => Poll::Ready(event),
+        CallPoll::Pending => Poll::Pending,
+        CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
+    }
 }
 
 #[test]
@@ -51,7 +57,7 @@ fn read_record_from_memory() {
         let mut call = pin!(Call::new(ReadRecord::new(&mut output)));
         assert!(matches!(
             poll(call.as_mut(), Pin::new(&mut input)),
-            Poll::Ready(ControlFlow::Break(Ok(3)))
+            Poll::Ready(Ok(3))
         ));
     }
     assert_eq!(input, b"\x03dog");
@@ -71,15 +77,13 @@ fn composition_keeps_a_child_inside_its_record() {
     let mut first = pin!(Call::new(ReadLimitedWord::new()));
     assert!(matches!(
         poll(first.as_mut(), Pin::new(&mut input)),
-        Poll::Ready(ControlFlow::Break(Err(ReadError::Incomplete {
-            completed: 1
-        })))
+        Poll::Ready(Err(ReadError::Incomplete { completed: 1 }))
     ));
     assert_eq!(input, b"\x02BC");
     let mut second = pin!(Call::new(ReadLimitedWord::new()));
     assert!(matches!(
         poll(second.as_mut(), Pin::new(&mut input)),
-        Poll::Ready(ControlFlow::Break(Ok(word))) if word == *b"BC"
+        Poll::Ready(Ok(word)) if word == *b"BC"
     ));
 }
 
@@ -120,28 +124,9 @@ fn pinned_state_composes_through_a_pin() {
     let mut call = pin!(Call::new(ReadPinnedWord::new()));
     assert!(matches!(
         poll(call.as_mut(), Pin::new(&mut input)),
-        Poll::Ready(ControlFlow::Break(Err(ReadError::Incomplete {
-            completed: 1
-        })))
+        Poll::Ready(Err(ReadError::Incomplete { completed: 1 }))
     ));
     assert_eq!(input, b"B");
-}
-
-#[call]
-async fn read_erased_word(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
-    let mut limited = io.compose(ReadLimit(2));
-    read_array::<2, _>(&mut limited.erase()).await
-}
-
-#[test]
-fn an_erased_composition_is_a_slot() {
-    let mut input = b"XYZ".as_slice();
-    let mut call = pin!(Call::new(ReadErasedWord::new()));
-    assert!(matches!(
-        poll(call.as_mut(), Pin::new(&mut input)),
-        Poll::Ready(ControlFlow::Break(Ok(word))) if word == *b"XY"
-    ));
-    assert_eq!(input, b"Z");
 }
 
 #[test]
@@ -156,7 +141,7 @@ fn a_call_may_use_a_different_host_on_each_poll() {
         assert!(first.waker.is_some());
         assert!(matches!(
             poll(call.as_mut(), Pin::new(&mut second)),
-            Poll::Ready(ControlFlow::Break(Ok(3)))
+            Poll::Ready(Ok(3))
         ));
     }
     assert_eq!(second.data, b"!");
@@ -185,10 +170,7 @@ fn a_call_is_stored_beside_the_resource_it_uses() {
         result
     };
     assert!(poll_connection().is_pending());
-    assert!(matches!(
-        poll_connection(),
-        Poll::Ready(ControlFlow::Break(Ok(2)))
-    ));
+    assert!(matches!(poll_connection(), Poll::Ready(Ok(2))));
     drop(connection);
     assert_eq!(output, b"hi");
 }
@@ -228,19 +210,20 @@ fn an_executor_lends_one_view_to_several_calls_in_one_poll() {
         Box::pin(Call::new(ReadPair::new())),
         Box::pin(Call::new(ReadPair::new())),
     ];
-    // One scope for the whole poll: the view is constructed on first use.
-    let mut scope = pin!(BorrowedScope::new(Pin::new(&mut resource)));
+    // One view for the whole pass, constructed once.
+    let mut view = pin!(Pin::new(&mut resource).view());
     let mut cx = Context::from_waker(Waker::noop());
     let results: Vec<_> = calls
         .iter_mut()
-        .map(|call| call.as_mut().poll_with(scope.as_mut(), &mut cx))
+        .map(|call| call.as_mut().poll_return_with(Some(view.as_mut()), &mut cx))
         .collect();
-    assert!(matches!(results[0], Poll::Ready(ControlFlow::Break(Ok(pair))) if pair == *b"ab"));
-    assert!(matches!(results[1], Poll::Ready(ControlFlow::Break(Ok(pair))) if pair == *b"cd"));
+    assert!(matches!(results[0], CallPoll::Ready(Ok(pair)) if pair == *b"ab"));
+    assert!(matches!(results[1], CallPoll::Ready(Ok(pair)) if pair == *b"cd"));
     assert_eq!(views.get(), 1);
 }
 
-/// An operation that emits, written by hand.
+/// An operation that emits, written by hand: two-byte chunks of `total`
+/// bytes, then the number of bytes read.
 struct ReadChunks {
     total: usize,
 }
@@ -265,63 +248,142 @@ impl<'s, A: ReceiverAccess<Family: Read<Error = Infallible>>> Start<'s, A> for R
 }
 
 #[test]
-fn emitted_items_precede_the_result() {
+fn emitted_items_precede_the_final_value() {
     let mut input = b"abcde".as_slice();
-    let mut call = pin!(Call::new(ReadChunks { total: 5 }));
+    let mut call = pin!(Call::<Memory, _>::new(ReadChunks { total: 5 }));
     let mut events = Vec::new();
+    let mut cx = Context::from_waker(Waker::noop());
     loop {
-        match poll(call.as_mut(), Pin::new(&mut input)) {
-            Poll::Ready(ControlFlow::Continue(chunk)) => events.push(chunk),
-            Poll::Ready(ControlFlow::Break(result)) => {
+        let view = pin!(Pin::new(&mut input).view());
+        match call.as_mut().poll_with(Some(view), &mut cx) {
+            CallPoll::Ready(ControlFlow::Continue(chunk)) => events.push(chunk),
+            CallPoll::Ready(ControlFlow::Break(result)) => {
                 assert_eq!(result, Ok(5));
                 break;
             }
-            Poll::Pending => panic!("memory input does not wait"),
+            CallPoll::Pending | CallPoll::NeedsView => panic!("memory input does not wait"),
         }
     }
     assert_eq!(events, [b"ab".to_vec(), b"cd".to_vec(), b"e".to_vec()]);
 }
 
 #[test]
-fn return_mode_discards_items_within_one_scope() {
+fn the_return_form_drops_items_without_suspending() {
     let views = Cell::new(0);
     let mut resource = Counted {
         input: b"abcde",
         views: &views,
     };
-    let mut call = pin!(Call::new(ReadChunks { total: 5 }));
+    let (wakes, waker) = WakeCount::new();
+    let mut call = pin!(Call::<Memory, _>::new(ReadChunks { total: 5 }));
     let result = call.as_mut().poll_return_with(
-        pin!(BorrowedScope::new(Pin::new(&mut resource))),
-        &mut Context::from_waker(Waker::noop()),
+        Some(pin!(Pin::new(&mut resource).view())),
+        &mut Context::from_waker(&waker),
     );
-    assert!(matches!(result, Poll::Ready(Ok(5))));
+    assert_eq!(result, CallPoll::Ready(Ok(5)));
     assert_eq!(views.get(), 1);
+    assert_eq!(wakes.get(), 0);
+}
+
+#[test]
+fn a_call_switches_from_its_items_to_its_final_value() {
+    let mut input = b"abcde".as_slice();
+    let (wakes, waker) = WakeCount::new();
+    let mut cx = Context::from_waker(&waker);
+    let mut call = pin!(Call::<Memory, _>::new(ReadChunks { total: 5 }));
+    let first = call
+        .as_mut()
+        .poll_with(Some(pin!(Pin::new(&mut input).view())), &mut cx);
+    assert_eq!(
+        first,
+        CallPoll::Ready(ControlFlow::Continue(b"ab".to_vec()))
+    );
+    let result = call
+        .as_mut()
+        .poll_return_with(Some(pin!(Pin::new(&mut input).view())), &mut cx);
+    assert_eq!(result, CallPoll::Ready(Ok(5)));
+    // The item made the first poll ready; nothing needed a wake.
+    assert_eq!(wakes.get(), 0);
 }
 
 #[call]
 async fn sum_child_chunks(
     io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
 ) -> (usize, Record) {
-    // A nested call with its own item type, driven through the parent's access.
-    let mut child = pin!(Call::new(ReadChunks { total: 4 }));
+    // A child with its own item type, started on the parent's access and
+    // observed as a stream.
+    let mut child = pin!(Child::new(ReadChunks { total: 4 }, &mut *io));
     let mut chunks = 0;
     let result = loop {
-        match poll_fn(|cx| io.poll_call(child.as_mut(), cx)).await {
-            ControlFlow::Continue(_) => chunks += 1,
-            ControlFlow::Break(result) => break result,
+        match poll_fn(|cx| child.as_mut().poll_next(cx)).await {
+            Some(ControlFlow::Continue(_)) => chunks += 1,
+            Some(ControlFlow::Break(result)) => break result,
+            None => unreachable!("the final value ends the stream"),
         }
     };
+    assert!(poll_fn(|cx| child.as_mut().poll_next(cx)).await.is_none());
     (chunks, result)
 }
 
 #[test]
-fn a_parent_observes_the_events_of_a_nested_call() {
+fn a_parent_observes_the_events_of_a_child() {
     let mut input = b"wxyz".as_slice();
     let mut call = pin!(Call::new(SumChildChunks::new()));
     assert!(matches!(
         poll(call.as_mut(), Pin::new(&mut input)),
-        Poll::Ready(ControlFlow::Break((2, Ok(4))))
+        Poll::Ready((2, Ok(4)))
     ));
+}
+
+#[call]
+async fn await_child(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Record {
+    // Awaited, a child discards its items.
+    Child::new(ReadChunks { total: 3 }, io).await
+}
+
+#[test]
+fn an_awaited_child_completes_with_its_final_value() {
+    let mut input = b"pqr".as_slice();
+    let (wakes, waker) = WakeCount::new();
+    let mut call = pin!(Call::<Memory, _>::new(AwaitChild::new()));
+    let result = call.as_mut().poll_return_with(
+        Some(pin!(Pin::new(&mut input).view())),
+        &mut Context::from_waker(&waker),
+    );
+    assert_eq!(result, CallPoll::Ready(Ok(3)));
+    assert_eq!(wakes.get(), 0);
+}
+
+/// Uses its access while being dropped.
+struct AccessOnDrop<'a, A: ReceiverAccess> {
+    io: &'a mut A,
+    pending: &'a Cell<bool>,
+}
+impl<A: ReceiverAccess> Drop for AccessOnDrop<'_, A> {
+    fn drop(&mut self) {
+        let mut cx = Context::from_waker(Waker::noop());
+        let poll = self.io.poll_access(&mut cx, |_, _| Poll::Ready(()));
+        self.pending.set(poll.is_pending());
+    }
+}
+
+#[call]
+async fn access_when_dropped(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    pending: &Cell<bool>,
+) {
+    let _guard = AccessOnDrop { io, pending };
+    std::future::pending::<()>().await;
+}
+
+#[test]
+fn an_access_outside_a_poll_has_no_view() {
+    let pending = Cell::new(false);
+    let mut input = b"".as_slice();
+    let mut call = Box::pin(Call::new(AccessWhenDropped::new(&pending)));
+    assert!(poll(call.as_mut(), Pin::new(&mut input)).is_pending());
+    drop(call);
+    assert!(pending.get());
 }
 
 #[call]
@@ -355,9 +417,10 @@ fn a_call_over_a_generic_family_is_send() {
     fn build<F: Read<Error = Infallible>>() {
         let mut output = Vec::new();
         assert_send(&Call::<F, _>::new(ReadRecord::new(&mut output)));
-        // Erasing and composing derive from the slot, so they do not count.
-        assert_send(&Call::<F, _>::new(ReadErasedWord::new()));
+        // Compositions and child streams derive from the slot, so they do not count.
+        assert_send(&Call::<F, _>::new(ReadLimitedWord::new()));
         assert_send(&Call::<F, _>::new(SumChildChunks::new()));
+        assert_send(&Call::<F, _>::new(ReadChunks { total: 1 }));
     }
     build::<Memory<'_>>();
 }
@@ -402,9 +465,122 @@ fn a_call_over_a_resource_that_is_not_send_moves_between_threads() {
             second.0.borrow_mut().extend(*b"i");
             assert!(matches!(
                 poll(call.as_mut(), Pin::new(&mut { second })),
-                Poll::Ready(ControlFlow::Break(Ok(2)))
+                Poll::Ready(Ok(2))
             ));
         });
     });
     assert_eq!(output, b"hi");
+}
+
+/// Polls without a view; if the call asks for one, polls again with a view.
+fn lazily<F: ReceiverFamily, Y, R>(
+    mut call: Pin<&mut (impl DynCall<F, Y, R> + ?Sized)>,
+    mut host: Pin<&mut impl Receiver<Family = F>>,
+) -> (bool, Poll<R>) {
+    let mut cx = Context::from_waker(Waker::noop());
+    let poll = match call.as_mut().poll_return_with(None, &mut cx) {
+        CallPoll::NeedsView => call
+            .as_mut()
+            .poll_return_with(Some(pin!(host.as_mut().view())), &mut cx),
+        poll => return (false, into_poll(poll)),
+    };
+    (true, into_poll(poll))
+}
+fn into_poll<T>(poll: CallPoll<T>) -> Poll<T> {
+    match poll {
+        CallPoll::Ready(event) => Poll::Ready(event),
+        CallPoll::Pending => Poll::Pending,
+        CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
+    }
+}
+
+#[test]
+fn compositions_and_child_streams_ask_for_a_view_through_their_parent() {
+    let mut input = b"\x01A\x02BC".as_slice();
+    let mut call = pin!(Call::new(ReadLimitedWord::new()));
+    let (requests, result) = lazily(call.as_mut(), Pin::new(&mut input));
+    assert!(requests);
+    assert!(matches!(result, Poll::Ready(Err(_))));
+
+    let mut input = b"wxyz".as_slice();
+    let mut call = pin!(Call::new(SumChildChunks::new()));
+    let (requests, result) = lazily(call.as_mut(), Pin::new(&mut input));
+    assert!(requests);
+    assert!(matches!(result, Poll::Ready((2, Ok(4)))));
+}
+
+/// Polls its branch with a waker of its own, and only after that waker
+/// fired, as executors such as `FuturesUnordered` do.
+async fn only_when_woken<T>(branch: impl Future<Output = T>) -> T {
+    let (wakes, waker) = WakeCount::new();
+    let mut branch = pin!(branch);
+    let mut seen = None;
+    poll_fn(|_| {
+        if seen == Some(wakes.get()) {
+            return Poll::Pending;
+        }
+        seen = Some(wakes.get());
+        branch.as_mut().poll(&mut Context::from_waker(&waker))
+    })
+    .await
+}
+
+#[call]
+async fn read_record_in_branch(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    output: &mut Vec<u8>,
+) -> Record {
+    only_when_woken(read_record(io, output)).await
+}
+
+#[test]
+fn a_request_from_a_branch_wakes_the_branch() {
+    let mut input = b"\x02ok".as_slice();
+    let mut output = Vec::new();
+    let mut call = pin!(Call::<Memory, _>::new(ReadRecordInBranch::new(&mut output)));
+    let (requests, result) = lazily(call.as_mut(), Pin::new(&mut input));
+    assert!(requests);
+    assert_eq!(result, Poll::Ready(Ok(2)));
+}
+
+/// Emits two items from inside a branch.
+struct EmitInBranch;
+impl<F: ReceiverFamily> Operation<F> for EmitInBranch {
+    type Output = usize;
+    type Yield = u8;
+}
+impl<'s, A: ReceiverAccess> Start<'s, A> for EmitInBranch {
+    type Fut = impl Future<Output = usize>;
+    fn start(self, _: A, mut emitter: Emitter<'s, u8>) -> Self::Fut {
+        only_when_woken(async move {
+            emitter.emit(1).await;
+            emitter.emit(2).await;
+            2
+        })
+    }
+}
+
+#[test]
+fn an_item_from_a_branch_wakes_the_branch() {
+    let mut input = b"".as_slice();
+    let mut call = pin!(Call::<Memory, _>::new(EmitInBranch));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        match call
+            .as_mut()
+            .poll_with(Some(pin!(Pin::new(&mut input).view())), &mut cx)
+        {
+            CallPoll::Ready(event) => events.push(event),
+            poll => panic!("the branch was not repolled: {poll:?}"),
+        }
+    }
+    assert_eq!(
+        events,
+        [
+            ControlFlow::Continue(1),
+            ControlFlow::Continue(2),
+            ControlFlow::Break(2)
+        ]
+    );
 }

@@ -1,13 +1,8 @@
+//! Pinned views whose inner lifetime is hidden behind a visit.
 use crate::{Access, ReceiverFamily};
 use std::{marker::PhantomData, pin::Pin};
-// The callback quantifies only a lifetime. F remains an exact, fixed type.
-trait Visitor<F: ReceiverFamily> {
-    fn visit<'parent>(&mut self, view: Pin<&mut F::ReceiverView<'parent>>)
-    where
-        F: 'parent;
-}
 
-/// A synchronous operation whose result cannot borrow the temporary view access.
+/// A synchronous operation on a view. Its result cannot borrow the view.
 pub trait ViewOperation<F: ReceiverFamily> {
     type Output;
     fn run<'parent>(self, view: Pin<&mut F::ReceiverView<'parent>>) -> Self::Output
@@ -27,17 +22,78 @@ where
         (self.0)(Access::new(view))
     }
 }
-struct Request<F: ReceiverFamily, A: ViewOperation<F>> {
+
+/// The dyn form of a view operation. It quantifies only a lifetime, so the
+/// family stays an exact type.
+trait DynOperation<F: ReceiverFamily> {
+    fn run<'parent>(&mut self, view: Pin<&mut F::ReceiverView<'parent>>)
+    where
+        F: 'parent;
+}
+/// Runs a view operation once through its dyn form.
+struct Once<F: ReceiverFamily, A: ViewOperation<F>> {
     operation: Option<A>,
     output: Option<A::Output>,
     family: PhantomData<fn(F) -> F>,
 }
-impl<F: ReceiverFamily, A: ViewOperation<F>> Visitor<F> for Request<F, A> {
-    fn visit<'parent>(&mut self, view: Pin<&mut F::ReceiverView<'parent>>)
+impl<F: ReceiverFamily, A: ViewOperation<F>> DynOperation<F> for Once<F, A> {
+    fn run<'parent>(&mut self, view: Pin<&mut F::ReceiverView<'parent>>)
     where
         F: 'parent,
     {
-        self.output = Some(self.operation.take().unwrap().run(view));
+        let operation = self.operation.take().expect("view operation ran twice");
+        self.output = Some(operation.run(view));
+    }
+}
+
+/// A pinned view and the function that restores its exact type. Copying it
+/// does not copy the borrow: its users keep the view live and exclusive.
+pub(crate) struct RawViewLoan<F: ReceiverFamily> {
+    view: *mut (),
+    restore: unsafe fn(*mut (), &mut dyn DynOperation<F>),
+}
+impl<F: ReceiverFamily> Clone for RawViewLoan<F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<F: ReceiverFamily> Copy for RawViewLoan<F> {}
+/// Carries the view's inner lifetime to the restoring function.
+struct Restore<'parent, F: ReceiverFamily + 'parent>(PhantomData<&'parent F>);
+impl<'parent, F: ReceiverFamily + 'parent> Restore<'parent, F> {
+    unsafe fn run(view: *mut (), operation: &mut dyn DynOperation<F>) {
+        // SAFETY: RawViewLoan::new pairs this function with a pointer to
+        // exactly F::ReceiverView<'parent>, and RawViewLoan::apply's caller
+        // keeps that borrow live and exclusive. The pointee stays pinned.
+        let view = unsafe { Pin::new_unchecked(&mut *view.cast::<F::ReceiverView<'parent>>()) };
+        operation.run(view);
+    }
+}
+impl<F: ReceiverFamily> RawViewLoan<F> {
+    pub(crate) fn new<'parent>(view: Pin<&mut F::ReceiverView<'parent>>) -> Self
+    where
+        F: 'parent,
+    {
+        // SAFETY: taking a raw pointer does not move the pinned pointee; only
+        // the paired function uses it, and it recreates a pinned borrow.
+        let view = unsafe { view.get_unchecked_mut() as *mut F::ReceiverView<'parent> }.cast();
+        Self {
+            view,
+            restore: Restore::<'parent, F>::run,
+        }
+    }
+    /// # Safety
+    /// The view borrow given to `new` must be live, and no other use of it
+    /// may be in progress.
+    pub(crate) unsafe fn apply<A: ViewOperation<F>>(self, operation: A) -> A::Output {
+        let mut once = Once::<F, A> {
+            operation: Some(operation),
+            output: None,
+            family: PhantomData,
+        };
+        // SAFETY: the caller's contract; the function and pointer are paired.
+        unsafe { (self.restore)(self.view, &mut once) };
+        once.output.unwrap()
     }
 }
 
@@ -47,47 +103,23 @@ impl<F: ReceiverFamily, A: ViewOperation<F>> Visitor<F> for Request<F, A> {
 /// reconstruction is needed. Access is scoped to `with` or `apply`; references
 /// into that temporary access cannot escape. This type is neither Send nor Sync.
 pub struct ViewLoan<'scope, F: ReceiverFamily> {
-    pointer: *mut (),
-    dispatch: unsafe fn(*mut (), &mut dyn Visitor<F>),
+    raw: RawViewLoan<F>,
     borrow: PhantomData<&'scope mut ()>,
-    family: PhantomData<fn(F) -> F>,
-}
-struct Dispatch<'parent, F: ReceiverFamily + 'parent>(PhantomData<&'parent F>);
-impl<'parent, F: ReceiverFamily + 'parent> Dispatch<'parent, F> {
-    unsafe fn visit(pointer: *mut (), visitor: &mut dyn Visitor<F>) {
-        // SAFETY: new pairs this function with the exact F::ReceiverView<'parent>
-        // pointer. ViewLoan's exclusive borrow is live for the whole visit.
-        // The pointee remains pinned and its inner lifetime is not substituted.
-        let view = unsafe { Pin::new_unchecked(&mut *pointer.cast::<F::ReceiverView<'parent>>()) };
-        visitor.visit(view);
-    }
 }
 impl<'scope, F: ReceiverFamily + 'scope> ViewLoan<'scope, F> {
     pub fn new<'parent: 'scope>(view: Pin<&'scope mut F::ReceiverView<'parent>>) -> Self
     where
         F: 'parent,
     {
-        // SAFETY: obtaining a raw pointer does not move the pinned pointee.
-        // Only the matched dispatcher can use it and recreates a pinned borrow.
-        let pointer = unsafe { view.get_unchecked_mut() as *mut F::ReceiverView<'parent> }.cast();
         Self {
-            pointer,
-            dispatch: Dispatch::<'parent, F>::visit,
+            raw: RawViewLoan::new(view),
             borrow: PhantomData,
-            family: PhantomData,
         }
     }
     pub fn apply<A: ViewOperation<F>>(&mut self, operation: A) -> A::Output {
-        let mut request = Request::<F, A> {
-            operation: Some(operation),
-            output: None,
-            family: PhantomData,
-        };
-        // SAFETY: the lifetime marker keeps the original pinned loan alive.
-        // &mut self excludes every other call through this wrapper. Private
-        // fields guarantee that the function and pointer remain correctly paired.
-        unsafe { (self.dispatch)(self.pointer, &mut request) };
-        request.output.unwrap()
+        // SAFETY: the lifetime marker keeps the original pinned loan alive,
+        // and &mut self excludes every other use through this wrapper.
+        unsafe { self.raw.apply(operation) }
     }
     pub fn with<B, R>(&mut self, body: B) -> R
     where

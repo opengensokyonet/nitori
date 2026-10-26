@@ -1,11 +1,12 @@
-#![allow(clippy::multiple_bound_locations)] // pin-project-lite projection bounds
 //! Scoped adaptation of the current view into another family.
-use crate::{ReceiverAccess, ReceiverFamily, ReceiverScope, access::ScopeVisitor};
+use crate::{
+    ReceiverAccess, ReceiverFamily, ViewOperation,
+    access::{Sealed, ViewRequest, ViewVisitor},
+};
 use std::{
     marker::PhantomData,
     ops::DerefMut,
     pin::{Pin, pin},
-    task::{Context, Poll, ready},
 };
 
 /// One projection; the parent view keeps its original inner lifetime.
@@ -67,99 +68,44 @@ impl<'p, A: ?Sized, S> Composed<'p, A, S> {
         self.state
     }
 }
+impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> Sealed for Composed<'_, A, S> {}
+#[allow(private_bounds)]
 impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
     for Composed<'_, A, S>
 {
     type Family = S::Family;
     type Mode = A::Mode;
-    fn visit_scope<V: ScopeVisitor<S::Family>>(
-        &mut self,
-        cx: &mut Context<'_>,
-        visitor: V,
-    ) -> V::Output {
-        self.parent.visit_scope(
-            cx,
-            ComposeVisitor {
-                state: Pin::new(&mut self.state),
-                inner: visitor,
-                family: PhantomData,
-            },
-        )
+    fn visit_view<V: ViewVisitor<S::Family>>(&mut self, visitor: V) -> V::Output {
+        self.parent.visit_view(ComposeChild {
+            state: Pin::new(&mut self.state),
+            inner: visitor,
+            family: PhantomData,
+        })
     }
 }
 
-/// Wraps the parent's scope statically before handing it to the inner visitor.
-struct ComposeVisitor<'q, F, S, V> {
+/// Builds the child view from the parent view before visiting it.
+struct ComposeChild<'q, F, S, V> {
     state: Pin<&'q mut S>,
     inner: V,
     family: PhantomData<fn(F) -> F>,
 }
-impl<F: ReceiverFamily, S: Compose<F>, V: ScopeVisitor<S::Family>> ScopeVisitor<F>
-    for ComposeVisitor<'_, F, S, V>
+impl<F: ReceiverFamily, S: Compose<F>, V: ViewVisitor<S::Family>> ViewOperation<F>
+    for ComposeChild<'_, F, S, V>
 {
     type Output = V::Output;
-    fn visit<'view, P: ReceiverScope<'view, Family = F>>(
-        self,
-        parent: Pin<&mut P>,
-        cx: &mut Context<'_>,
-    ) -> V::Output
+    fn run<'h>(self, parent: Pin<&mut F::ReceiverView<'h>>) -> V::Output
     where
-        F: 'view,
+        F: 'h,
     {
-        let scope = pin!(ComposeScope {
-            parent: Some(parent),
-            state: Some(self.state),
-            view: None,
-            family: PhantomData,
-        });
-        self.inner.visit(scope, cx)
+        let child = pin!(self.state.compose(parent));
+        self.inner.run(child)
     }
 }
-
-pin_project_lite::pin_project! {
-    struct ComposeScope<'s, 'p: 's, F, P, S>
-    where
-        F: ReceiverFamily,
-        F: 'p,
-        P: ReceiverScope<'p, Family = F>,
-        S: Compose<F>,
-        S::Family: 's,
-    {
-        parent: Option<Pin<&'s mut P>>,
-        state: Option<Pin<&'s mut S>>,
-        #[pin]
-        view: Option<<S::Family as ReceiverFamily>::ReceiverView<'s>>,
-        family: PhantomData<&'p F>,
-    }
-}
-impl<'s, 'p, F, P, S> ReceiverScope<'s> for ComposeScope<'s, 'p, F, P, S>
-where
-    F: ReceiverFamily + 'p,
-    P: ReceiverScope<'p, Family = F>,
-    S: Compose<F>,
-    S::Family: 's,
-    'p: 's,
+impl<F: ReceiverFamily, S: Compose<F>, V: ViewVisitor<S::Family>> ViewVisitor<F>
+    for ComposeChild<'_, F, S, V>
 {
-    type Family = S::Family;
-    fn poll_view(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Pin<&mut <S::Family as ReceiverFamily>::ReceiverView<'s>>> {
-        let mut this = self.project();
-        if this.view.is_none() {
-            ready!(
-                this.parent
-                    .as_mut()
-                    .expect("composition initialization panicked")
-                    .as_mut()
-                    .poll_ready(cx)
-            );
-            let Poll::Ready(parent) = this.parent.take().unwrap().poll_view(cx) else {
-                panic!("scope violated sticky readiness")
-            };
-            this.view
-                .set(Some(this.state.take().unwrap().compose(parent)));
-        }
-        Poll::Ready(this.view.as_pin_mut().unwrap())
+    fn absent(self, request: ViewRequest<'_>) -> V::Output {
+        self.inner.absent(request)
     }
 }

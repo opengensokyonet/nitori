@@ -1,21 +1,22 @@
-//! An outer executor that acquires an async lock first, then lends the locked
-//! resource to every ready call in one pass.
+//! An outer executor that acquires an async lock only for calls that ask for
+//! a view, then lends one view to all of them.
 #![feature(impl_trait_in_assoc_type)]
 mod support;
 
 use bytes::BufMut;
 use nitori_call_prototype::{
-    BorrowedScope, Call, Direct, DynCall, ReceiverAccess, call, direct_receiver,
+    Call, CallPoll, Direct, DynCall, Receiver, ReceiverAccess, call, direct_receiver,
 };
 use std::{
     cell::{Cell, RefCell, RefMut},
     collections::VecDeque,
     convert::Infallible,
     future::Future,
+    future::poll_fn,
     pin::{Pin, pin},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
 };
@@ -94,7 +95,8 @@ impl<T> Lock<T> {
     }
 }
 
-/// Queues its call when woken, then wakes the executor.
+/// Queues its call when woken, then wakes the executor unless it is polling,
+/// in which case it sees the queue before returning.
 struct CallWaker {
     index: usize,
     shared: Arc<Shared>,
@@ -103,6 +105,7 @@ struct CallWaker {
 struct Shared {
     ready: Mutex<VecDeque<usize>>,
     executor: Mutex<Option<Waker>>,
+    polling: AtomicBool,
 }
 impl Shared {
     fn schedule(&self, index: usize) {
@@ -111,6 +114,9 @@ impl Shared {
             ready.push_back(index);
         }
         drop(ready);
+        if self.polling.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(waker) = self.executor.lock().unwrap().as_ref() {
             waker.wake_by_ref();
         }
@@ -125,16 +131,19 @@ impl Wake for CallWaker {
 type Record = Result<usize, ReadError<Infallible>>;
 type Entry<'a> = Pin<Box<dyn DynCall<Direct<Pipe>, Infallible, Record> + 'a>>;
 
-/// Calls sharing one locked pipe. Each pass takes the lock once, lends it to
-/// at most `budget` ready calls, and releases it before returning.
+/// Calls sharing one locked pipe. Each pass polls at most `budget` ready
+/// calls without a view. Only if some ask for one does it take the lock, once,
+/// and lend one view to all of them before releasing it.
 struct Executor<'a> {
     lock: &'a Lock<Pipe>,
     calls: Vec<(Entry<'a>, Waker)>,
     results: Vec<Option<Record>>,
     shared: Arc<Shared>,
     budget: usize,
-    /// Calls polled so far, in order.
-    polled: Vec<usize>,
+    /// Calls that asked for a view, kept while the lock is unavailable.
+    asking: Vec<usize>,
+    /// Calls polled so far, in order, and whether they had a view.
+    polled: Vec<(usize, bool)>,
 }
 impl<'a> Executor<'a> {
     fn new(lock: &'a Lock<Pipe>, calls: Vec<Entry<'a>>, budget: usize) -> Self {
@@ -158,6 +167,7 @@ impl<'a> Executor<'a> {
             results: (0..count).map(|_| None).collect(),
             shared,
             budget,
+            asking: Vec::new(),
             polled: Vec::new(),
         }
     }
@@ -167,32 +177,51 @@ impl Future for Executor<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let this = self.get_mut();
         *this.shared.executor.lock().unwrap() = Some(cx.waker().clone());
-        if this.shared.ready.lock().unwrap().is_empty() {
-            return match this.results.iter().all(Option::is_some) {
-                true => Poll::Ready(()),
-                false => Poll::Pending,
-            };
-        }
-        // The acquisition registers the executor's waker, not a call's.
-        let Poll::Ready(mut guard) = pin!(this.lock.lock()).poll(cx) else {
-            return Poll::Pending;
-        };
-        let pipe = guard.value.as_mut().unwrap();
-        let mut scope = pin!(BorrowedScope::new(Pin::new(&mut **pipe)));
+        this.shared.polling.store(true, Ordering::SeqCst);
         for _ in 0..this.budget {
             let Some(index) = this.shared.ready.lock().unwrap().pop_front() else {
                 break;
             };
             let (call, waker) = &mut this.calls[index];
-            this.polled.push(index);
-            let mut call_cx = Context::from_waker(waker);
-            if let Poll::Ready(result) =
-                call.as_mut().poll_return_with(scope.as_mut(), &mut call_cx)
+            this.polled.push((index, false));
+            match call
+                .as_mut()
+                .poll_return_with(None, &mut Context::from_waker(waker))
             {
-                this.results[index] = Some(result);
+                CallPoll::Ready(result) => this.results[index] = Some(result),
+                CallPoll::Pending => {}
+                CallPoll::NeedsView => {
+                    // The executor serves the request itself: drop any wake
+                    // that an executor inside the operation passed on.
+                    this.shared
+                        .ready
+                        .lock()
+                        .unwrap()
+                        .retain(|&queued| queued != index);
+                    this.asking.push(index);
+                }
             }
         }
-        drop(guard);
+        if !this.asking.is_empty() {
+            // The acquisition registers the executor's waker, not a call's.
+            if let Poll::Ready(mut guard) = pin!(this.lock.lock()).poll(cx) {
+                let pipe = guard.value.as_mut().unwrap();
+                let mut view = pin!(Pin::new(&mut **pipe).view());
+                for index in this.asking.drain(..) {
+                    let (call, waker) = &mut this.calls[index];
+                    this.polled.push((index, true));
+                    let poll = call
+                        .as_mut()
+                        .poll_return_with(Some(view.as_mut()), &mut Context::from_waker(waker));
+                    match poll {
+                        CallPoll::Ready(result) => this.results[index] = Some(result),
+                        CallPoll::Pending => {}
+                        CallPoll::NeedsView => unreachable!(),
+                    }
+                }
+            }
+        }
+        this.shared.polling.store(false, Ordering::SeqCst);
         if !this.shared.ready.lock().unwrap().is_empty() {
             cx.waker().wake_by_ref();
         }
@@ -223,7 +252,7 @@ impl Wake for Count {
 }
 
 #[test]
-fn ready_calls_share_one_acquisition_after_the_lock_is_released() {
+fn calls_asking_for_a_view_share_one_acquisition_after_the_lock_is_released() {
     let lock = Lock::<Pipe>::default();
     let (mut first, mut second) = (Vec::new(), Vec::new());
     {
@@ -236,10 +265,14 @@ fn ready_calls_share_one_acquisition_after_the_lock_is_released() {
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
 
-        // Another holder has the lock: no call is polled.
+        // Another holder has the lock: both calls ask, and wait for the lock.
         let mut holder = lock.try_lock().unwrap();
         assert!(executor.as_mut().poll(&mut cx).is_pending());
-        assert!(executor.polled.is_empty());
+        assert_eq!(executor.polled, [(0, false), (1, false)]);
+        assert!(executor.shared.ready.lock().unwrap().is_empty());
+
+        // The calls' own wakes for their requests did not reach the executor.
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
 
         // Releasing wakes the executor, which lends one acquisition to both.
         holder.value.as_mut().unwrap().push(b"\x01a\x01b");
@@ -248,7 +281,7 @@ fn ready_calls_share_one_acquisition_after_the_lock_is_released() {
         let before = lock.acquisitions.get();
         assert!(executor.as_mut().poll(&mut cx).is_ready());
         assert_eq!(lock.acquisitions.get(), before + 1);
-        assert_eq!(executor.polled, [0, 1]);
+        assert_eq!(executor.polled[2..], [(0, true), (1, true)]);
     }
     assert_eq!(
         (first.as_slice(), second.as_slice()),
@@ -273,7 +306,10 @@ fn waiting_calls_do_not_hold_the_lock_and_the_budget_bounds_a_pass() {
         // Each pass polls one call; the second pass is requested by the first.
         assert!(executor.as_mut().poll(&mut cx).is_pending());
         assert!(executor.as_mut().poll(&mut cx).is_pending());
-        assert_eq!(executor.polled, [0, 1]);
+        assert_eq!(
+            executor.polled,
+            [(0, false), (0, true), (1, false), (1, true)]
+        );
         assert_eq!(lock.acquisitions.get(), 2);
 
         // Both wait on the pipe, not on the lock: another holder gets it at once.
@@ -285,11 +321,76 @@ fn waiting_calls_do_not_hold_the_lock_and_the_budget_bounds_a_pass() {
         // The budget splits the ready calls over two acquisitions.
         assert!(executor.as_mut().poll(&mut cx).is_pending());
         assert!(executor.as_mut().poll(&mut cx).is_ready());
-        assert_eq!(executor.polled, [0, 1, 0, 1]);
         assert_eq!(lock.acquisitions.get(), 5);
     }
     assert_eq!(
         (first.as_slice(), second.as_slice()),
         (&b"x"[..], &b"y"[..])
     );
+}
+
+/// A permission that opens later; waiting for it needs no resource.
+#[derive(Default)]
+struct Gate {
+    open: Cell<bool>,
+    waiter: RefCell<Option<Waker>>,
+}
+impl Gate {
+    fn open(&self) {
+        self.open.set(true);
+        if let Some(waker) = self.waiter.take() {
+            waker.wake();
+        }
+    }
+    async fn wait(&self) {
+        poll_fn(|cx| match self.open.get() {
+            true => Poll::Ready(()),
+            false => {
+                *self.waiter.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
+#[call]
+async fn read_record_after(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    gate: &Gate,
+    output: &mut Vec<u8>,
+) -> Record {
+    gate.wait().await;
+    read_record(io, output).await
+}
+
+#[test]
+fn waiting_for_something_else_acquires_nothing() {
+    let lock = Lock::<Pipe>::default();
+    lock.try_lock()
+        .unwrap()
+        .value
+        .as_mut()
+        .unwrap()
+        .push(b"\x01z");
+    let before = lock.acquisitions.get();
+    let gate = Gate::default();
+    let mut output = Vec::new();
+    {
+        let calls: Vec<Entry> = vec![Box::pin(Call::new(ReadRecordAfter::new(
+            &gate,
+            &mut output,
+        )))];
+        let mut executor = pin!(Executor::new(&lock, calls, usize::MAX));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        assert!(executor.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(lock.acquisitions.get(), before);
+
+        gate.open();
+        assert!(executor.as_mut().poll(&mut cx).is_ready());
+        assert_eq!(lock.acquisitions.get(), before + 1);
+        assert_eq!(executor.polled, [(0, false), (0, false), (0, true)]);
+    }
+    assert_eq!(output, b"z");
 }

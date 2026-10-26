@@ -5,6 +5,7 @@ members = [
     "crates/nitori_io",
     "examples/data-frame-codec",
     "prototypes/call",
+    "prototypes/call-bench",
     "prototypes/call-macros",
 ]
 resolver = "3"
@@ -16,6 +17,7 @@ futures-io = "0.3.32"
 nitori_call = { path = "crates/nitori_call" }
 nitori_call_macros = { path = "crates/nitori_call_macros" }
 nitori_io = { path = "crates/nitori_io" }
+nitori-call-prototype = { path = "prototypes/call" }
 nitori-call-prototype-macros = { path = "prototypes/call-macros" }
 pin-project-lite = "0.2.17"
 proc-macro2 = "1.0.107"

@@ -1,12 +1,14 @@
-#![feature(impl_trait_in_assoc_type)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 use bytes::BufMut;
+use futures_core::Stream;
 use nitori_call_prototype::{
-    BorrowedScope, Call, Compose, Direct, Emitter, HasReceiverFamily, ReceiverAccess,
-    ReceiverFamily, ReceiverSlot, Start, ViewLoan, call, capability, direct_receiver,
+    Call, CallPoll, Compose, Direct, Receiver, ReceiverAccess, ReceiverFamily, ReceiverSlot, Start,
+    ViewLoan, call, capability, direct_receiver,
 };
 use std::{
     collections::VecDeque,
     convert::Infallible,
+    future::poll_fn,
     marker::PhantomData,
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -176,12 +178,14 @@ fn a_primitive_operation_is_a_root_and_names_its_future() {
     let mut input = b"xyz".as_slice();
     let mut output = [0; 2];
     let mut destination = output.as_mut_slice();
-    let mut call = pin!(Call::new(read::Read::new(&mut destination)));
+    let mut call = pin!(Call::<Direct<&[u8]>, _>::new(read::Read::new(
+        &mut destination
+    )));
     let result = call.as_mut().poll_with(
-        pin!(BorrowedScope::new(Pin::new(&mut input))),
+        Some(pin!(Pin::new(&mut input).view())),
         &mut Context::from_waker(Waker::noop()),
     );
-    assert!(matches!(result, Poll::Ready(ControlFlow::Break(Ok(2)))));
+    assert!(matches!(result, CallPoll::Ready(ControlFlow::Break(Ok(2)))));
     assert_eq!(output, *b"xy");
 }
 
@@ -197,9 +201,6 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
         = LimitedView<'v, F>
     where
         Self: 'v;
-}
-impl<F: ReceiverFamily> HasReceiverFamily for LimitedView<'_, F> {
-    type Family = Limited<F>;
 }
 impl<F: ReceiverFamily> Compose<F> for ReadLimit {
     type Family = Limited<F>;
@@ -345,70 +346,87 @@ async fn rewrite(io: &mut impl ReceiverAccess<Family: Write + Clear>, source: &[
 #[test]
 fn the_attribute_chooses_the_module() {
     let mut sink = b"old".to_vec();
-    let mut call = pin!(Call::new(rewriting::Rewrite::new(b"new")));
+    let mut call = pin!(Call::<Direct<Vec<u8>>, _>::new(rewriting::Rewrite::new(
+        b"new"
+    )));
     let result = call.as_mut().poll_with(
-        pin!(BorrowedScope::new(Pin::new(&mut sink))),
+        Some(pin!(Pin::new(&mut sink).view())),
         &mut Context::from_waker(Waker::noop()),
     );
-    assert!(matches!(result, Poll::Ready(ControlFlow::Break(3))));
+    assert!(matches!(result, CallPoll::Ready(ControlFlow::Break(3))));
     assert_eq!(sink, b"new");
     let _: writing::Write<'_> = writing::Write::new(b"");
     let _: ClearAll = ClearAll::new();
 }
 
-/// An operation that emits: the emitter comes second.
-#[call]
+/// An operation that emits: each `yield` is an item, the return value is the
+/// final value.
+#[call(sync, yields = Vec<u8>)]
 async fn read_chunks(
     io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
-    emitter: &mut Emitter<'_, Vec<u8>>,
     size: usize,
-) -> Result<usize, Incomplete> {
+) -> usize {
     let mut total = 0;
     loop {
         let mut chunk = Vec::new();
         match io.read(&mut (&mut chunk).limit(size)).await {
-            Ok(0) => return Ok(total),
+            Ok(0) => return total,
             Ok(count) => total += count,
             Err(never) => match never {},
         }
-        emitter.emit(chunk).await;
+        yield chunk;
     }
 }
 
-/// A parent emitting the same items passes its emitter to the child.
-#[call]
-async fn read_framed_chunks<A>(
-    io: &mut A,
-    emitter: &mut Emitter<'_, Vec<u8>>,
-) -> Result<usize, Incomplete>
+/// A parent with the same item type forwards the child's items.
+#[call(yields = Vec<u8>)]
+async fn read_framed_chunks<A>(io: &mut A) -> Result<usize, Incomplete>
 where
     A: ReceiverAccess<Family: Read<Error = Infallible>>,
 {
     let [size] = io.read_array::<1>().await?;
-    emitter.emit(vec![size]).await;
-    io.read_chunks(emitter, size.into()).await
+    yield vec![size];
+    let mut chunks = pin!(io.read_chunks(size.into()));
+    loop {
+        match poll_fn(|cx| chunks.as_mut().poll_next(cx)).await {
+            Some(ControlFlow::Continue(chunk)) => yield chunk,
+            Some(ControlFlow::Break(total)) => return Ok(total),
+            None => unreachable!("the final value ends the stream"),
+        }
+    }
 }
 
-fn events<Y, R>(
-    call: Pin<&mut impl nitori_call_prototype::DynCall<Direct<&'static [u8]>, Y, R>>,
+type Memory = Direct<&'static [u8]>;
+type Events<Op> = (
+    Vec<<Op as nitori_call_prototype::Operation<Memory>>::Yield>,
+    <Op as nitori_call_prototype::Operation<Memory>>::Output,
+);
+
+fn events<Op>(
+    call: Pin<&mut Call<Direct<&'static [u8]>, Op>>,
     input: &mut &'static [u8],
-) -> (Vec<Y>, R) {
+) -> Events<Op>
+where
+    Op: nitori_call_prototype::Operation<Direct<&'static [u8]>>
+        + for<'s> Start<'s, ReceiverSlot<'s, Direct<&'static [u8]>>>,
+{
     let mut call = call;
     let mut items = Vec::new();
     loop {
         match call.as_mut().poll_with(
-            pin!(BorrowedScope::new(Pin::new(&mut *input))),
+            Some(pin!(Pin::new(&mut *input).view())),
             &mut Context::from_waker(Waker::noop()),
         ) {
-            Poll::Ready(ControlFlow::Continue(item)) => items.push(item),
-            Poll::Ready(ControlFlow::Break(result)) => return (items, result),
-            Poll::Pending => panic!("memory input does not wait"),
+            CallPoll::Ready(ControlFlow::Continue(item)) => items.push(item),
+            CallPoll::Ready(ControlFlow::Break(result)) => return (items, result),
+            CallPoll::Pending => panic!("memory input does not wait"),
+            CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
         }
     }
 }
 
 #[test]
-fn a_generated_operation_emits_items() {
+fn a_generated_operation_yields_items_then_its_final_value() {
     let mut input: &'static [u8] = b"\x02abcde";
     let mut call = pin!(Call::new(ReadFramedChunks::new()));
     let (items, result) = events(call.as_mut(), &mut input);
@@ -420,12 +438,67 @@ fn a_generated_operation_emits_items() {
 }
 
 #[test]
-fn a_call_of_an_emitting_operation_is_send() {
+fn a_host_runs_an_emitting_operation_as_a_stream_or_a_future() {
+    let mut input = b"abcde".as_slice();
+    let mut execution = pin!(input.read_chunks_unpin(2));
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut items = Vec::new();
+    let total = loop {
+        match execution.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(ControlFlow::Continue(chunk))) => items.push(chunk),
+            Poll::Ready(Some(ControlFlow::Break(total))) => break total,
+            _ => panic!("memory input does not wait"),
+        }
+    };
+    assert_eq!((items.len(), total), (3, 5));
+    assert_eq!(execution.as_mut().poll_next(&mut cx), Poll::Ready(None));
+
+    // As a future, the same operation discards its items.
+    let mut input = b"abcde".as_slice();
+    assert_eq!(input.sync_read_chunks_unpin(2), 5);
+}
+
+#[test]
+fn a_host_runs_an_operation_without_items_as_a_stream() {
+    let mut input = b"\x01z".as_slice();
+    let mut output = Vec::new();
+    let mut execution = pin!(input.read_record_unpin(&mut output));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(
+        execution.as_mut().poll_next(&mut cx),
+        Poll::Ready(Some(ControlFlow::Break(Ok(1))))
+    );
+    assert_eq!(execution.as_mut().poll_next(&mut cx), Poll::Ready(None));
+}
+
+#[test]
+fn calls_of_emitting_operations_are_send() {
     fn build<F: Read<Error = Infallible>>() {
         assert_send(&Call::<F, _>::new(ReadChunks::new(1)));
         assert_send(&Call::<F, _>::new(ReadFramedChunks::new()));
     }
     build::<Direct<&[u8]>>();
+}
+
+/// `yield` in closures and nested items keeps its own meaning.
+#[call(yields = u8)]
+async fn yield_outside_closures(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+) -> u8 {
+    fn helper() -> u8 {
+        7
+    }
+    let [byte] = io.read_array::<1>().await.unwrap();
+    let shift = |value: u8| value + helper();
+    yield shift(byte);
+    byte
+}
+
+#[test]
+fn only_yields_of_the_function_body_are_items() {
+    let mut input: &'static [u8] = b"\x01";
+    let mut call = pin!(Call::new(YieldOutsideClosures::new()));
+    assert_eq!(events(call.as_mut(), &mut input), (vec![8], 1));
 }
 
 /// A capability trait with a type parameter.
@@ -545,10 +618,10 @@ fn a_one_off_operation_is_a_local_function() {
         byte
     }
     let mut input = b"q".as_slice();
-    let mut call = pin!(Call::new(FirstByte::new()));
+    let mut call = pin!(Call::<Direct<&[u8]>, _>::new(FirstByte::new()));
     let result = call.as_mut().poll_with(
-        pin!(BorrowedScope::new(Pin::new(&mut input))),
+        Some(pin!(Pin::new(&mut input).view())),
         &mut Context::from_waker(Waker::noop()),
     );
-    assert!(matches!(result, Poll::Ready(ControlFlow::Break(b'q'))));
+    assert!(matches!(result, CallPoll::Ready(ControlFlow::Break(b'q'))));
 }

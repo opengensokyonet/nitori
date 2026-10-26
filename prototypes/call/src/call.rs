@@ -1,7 +1,8 @@
-//! A call: an operation together with the scope its caller lends on each poll.
+//! A call: an operation together with the view its caller lends on each poll.
 use crate::{
-    ReceiverAccess, ReceiverFamily, ReceiverScope, ReceiverSlot,
-    access::{Dispatch, ScopeRequest, mode::Probe},
+    ReceiverAccess, ReceiverFamily, ReceiverSlot,
+    access::{RootWaker, ViewCell, mode::Probe, polled_directly},
+    loan::RawViewLoan,
 };
 use std::{
     cell::Cell,
@@ -12,14 +13,15 @@ use std::{
     ops::ControlFlow,
     pin::Pin,
     ptr,
-    task::{Context, Poll, ready},
+    task::{Context, Poll, Waker},
 };
 
 /// What an operation produces over family `F`, independent of the access it
 /// runs with: neither type can carry the access or its brand.
 pub trait Operation<F: ReceiverFamily> {
+    /// The final value.
     type Output;
-    /// The type of emitted items; `Infallible` for operations that emit none.
+    /// Intermediate items; `Infallible` for operations that emit none.
     type Yield;
 }
 
@@ -38,44 +40,80 @@ pub trait Start<'s, A: ReceiverAccess>: Operation<A::Family> {
     ) -> Self::Fut;
 }
 
-/// Emits intermediate items from an operation as events of its call.
+/// Where an operation's emitted item waits for its caller, and whether the
+/// current poll discards items instead.
+pub(crate) struct ItemCell<Y> {
+    item: Cell<Option<Y>>,
+    discard: Cell<bool>,
+    /// The waker of the current poll; null outside one.
+    root: RootWaker,
+}
+impl<Y> ItemCell<Y> {
+    pub(crate) fn new() -> Self {
+        Self {
+            item: Cell::new(None),
+            discard: Cell::new(false),
+            root: RootWaker::new(),
+        }
+    }
+    pub(crate) fn set_discard(&self, discard: bool) {
+        self.discard.set(discard);
+    }
+}
+
+/// Emits intermediate items from an operation. `#[call(yields = T)]` turns
+/// each `yield` of the function into an emission.
 pub struct Emitter<'s, Y> {
-    cell: *const Cell<Option<Y>>,
+    cell: *const ItemCell<Y>,
     brand: PhantomData<fn(&'s ()) -> &'s ()>,
 }
-// SAFETY: the item cell is read by the call only after the operation's poll
-// returns, so an emitter moved to another thread during that poll never races
-// with it. Items cross threads, hence `Y: Send`.
+// SAFETY: the item cell is read only after the operation's poll returns, so
+// an emitter moved to another thread during that poll never races with it.
+// Items cross threads, hence `Y: Send`.
 unsafe impl<Y: Send> Send for Emitter<'_, Y> {}
 // SAFETY: shared references expose nothing.
 unsafe impl<Y> Sync for Emitter<'_, Y> {}
 impl<Y> Emitter<'_, Y> {
-    /// Hand `item` to the call's poller. Completes on the poll after the item
-    /// has been delivered; dropping it after the first poll still delivers it.
+    pub(crate) fn new(cell: &ItemCell<Y>) -> Self {
+        Self {
+            cell,
+            brand: PhantomData,
+        }
+    }
+    /// Hand `item` to whoever polls the operation. Completes on the poll after
+    /// the item has been delivered; dropping it after the first poll still
+    /// delivers it. When the caller discards items, drops `item` and
+    /// completes at once.
     pub fn emit(&mut self, item: Y) -> impl Future<Output = ()> + '_ {
         let mut item = Some(item);
         poll_fn(move |cx| {
             let Some(pending) = item.take() else {
                 return Poll::Ready(());
             };
-            // SAFETY: the call owns the cell and outlives its operation.
+            // SAFETY: the owner of the cell outlives its operation.
             let cell = unsafe { &*self.cell };
-            match cell.take() {
+            if cell.discard.get() {
+                return Poll::Ready(());
+            }
+            match cell.item.take() {
                 // An earlier emission in this poll is not yet delivered.
                 Some(earlier) => {
-                    cell.set(Some(earlier));
+                    cell.item.set(Some(earlier));
                     item = Some(pending);
                 }
-                None => cell.set(Some(pending)),
+                None => cell.item.set(Some(pending)),
             }
             // Intermediate executors only repoll branches whose waker fired.
-            cx.waker().wake_by_ref();
+            // With none, the item itself makes the poll ready.
+            if !polled_directly(cell.root.get(), cx) {
+                cx.waker().wake_by_ref();
+            }
             Poll::Pending
         })
     }
 }
 impl Emitter<'_, Infallible> {
-    /// An emitter for operations started outside a call; it can emit nothing.
+    /// An emitter for operations that emit nothing; it has no cell.
     pub(crate) fn detached() -> Self {
         Self {
             cell: ptr::null(),
@@ -84,71 +122,156 @@ impl Emitter<'_, Infallible> {
     }
 }
 
-struct Lend<F> {
-    target: *mut (),
-    dispatch: Dispatch<F>,
+/// The result of polling a call.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallPoll<T> {
+    Ready(T),
+    Pending,
+    /// The call was polled without a view and its operation asked for one.
+    /// Nothing else wakes the call for this: poll it again with a view, or
+    /// arrange a wakeup for when one is available.
+    NeedsView,
 }
-impl<F> Clone for Lend<F> {
-    fn clone(&self) -> Self {
-        *self
+impl<T> CallPoll<T> {
+    /// Treat a request for a view as a bug: for callers that always lend one.
+    pub(crate) fn lent(self) -> Poll<T> {
+        match self {
+            CallPoll::Ready(value) => Poll::Ready(value),
+            CallPoll::Pending => Poll::Pending,
+            CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
+        }
     }
 }
-impl<F> Copy for Lend<F> {}
 
-/// The scope argument of one poll, addressed by its lend.
-struct Lent<'a, 'view, F: ReceiverFamily + 'view> {
-    scope: Pin<&'a mut dyn ReceiverScope<'view, Family = F>>,
+/// Clears the lent view at the end of a poll, and poisons the call when the
+/// poll panics.
+struct LendGuard<'a, F: ReceiverFamily> {
+    cell: &'a ViewCell<F>,
+    poisoned: &'a Cell<bool>,
 }
-impl<'view, F: ReceiverFamily + 'view> Lent<'_, 'view, F> {
-    unsafe fn dispatch(target: *mut (), cx: &mut Context<'_>, request: &mut dyn ScopeRequest<F>) {
-        // SAFETY: poll_with pairs this function with a live Lent of exactly
-        // these lifetimes and removes the pair before the Lent is dropped.
-        let lent = unsafe { &mut *target.cast::<Self>() };
-        request.run(lent.scope.as_mut(), cx);
+impl<F: ReceiverFamily> Drop for LendGuard<'_, F> {
+    fn drop(&mut self) {
+        self.cell.view.set(None);
+        self.cell.root.clear();
+        if std::thread::panicking() {
+            self.poisoned.set(true);
+        }
     }
 }
-unsafe fn dispatch_root<F: ReceiverFamily>(
-    target: *mut (),
-    cx: &mut Context<'_>,
-    request: &mut dyn ScopeRequest<F>,
-) {
-    // SAFETY: the slot points at the lend cell of its pinned call, which
-    // outlives the operation; slots stay on the thread polling the call.
-    let cell = unsafe { &*target.cast::<Cell<Option<Lend<F>>>>() };
-    let lend = cell
-        .take()
-        .expect("receiver slot used outside its call's poll, or reentered");
-    // SAFETY: poll_with installed a matching pair for this poll.
-    unsafe { (lend.dispatch)(lend.target, cx, request) };
-    cell.set(Some(lend));
+
+/// Lend `view` to the root slots reading `cell` while `poll` runs.
+fn lend<'view, F: ReceiverFamily + 'view, T>(
+    cell: &ViewCell<F>,
+    poisoned: &Cell<bool>,
+    view: Option<Pin<&mut F::ReceiverView<'view>>>,
+    waker: &Waker,
+    poll: impl FnOnce() -> Poll<T>,
+) -> CallPoll<T> {
+    assert!(!poisoned.get(), "call polled after a panic");
+    // The view and the waker outlive this function, whose guard removes them.
+    cell.view.set(view.map(RawViewLoan::new));
+    cell.root.set(waker);
+    cell.requested.set(false);
+    let guard = LendGuard { cell, poisoned };
+    let poll = poll();
+    drop(guard);
+    match poll {
+        Poll::Ready(value) => CallPoll::Ready(value),
+        Poll::Pending if cell.requested.get() => CallPoll::NeedsView,
+        Poll::Pending => CallPoll::Pending,
+    }
 }
 
-enum State<Op, Fut, R> {
+pub(crate) enum State<Op, Fut, R> {
     Start(Op),
     Running(Fut),
+    /// Finished while an emitted item was still undelivered.
     Returned(R),
     Finished,
+}
+
+/// Advance an operation's state by one event: an emitted item comes before
+/// the result.
+///
+/// # Safety
+/// `state` must be pinned: a running future is never moved.
+pub(crate) unsafe fn poll_events<Op, Fut: Future, Y>(
+    state: &mut State<Op, Fut, Fut::Output>,
+    emitted: &ItemCell<Y>,
+    start: impl FnOnce(Op) -> Fut,
+    cx: &mut Context<'_>,
+) -> Poll<ControlFlow<Fut::Output, Y>> {
+    match state {
+        State::Start(_) => {
+            let State::Start(operation) = mem::replace(state, State::Finished) else {
+                unreachable!()
+            };
+            *state = State::Running(start(operation));
+        }
+        State::Running(_) => {}
+        State::Returned(_) => {
+            let State::Returned(result) = mem::replace(state, State::Finished) else {
+                unreachable!()
+            };
+            return Poll::Ready(ControlFlow::Break(result));
+        }
+        State::Finished => panic!("operation polled after completion"),
+    }
+    let State::Running(future) = state else {
+        unreachable!()
+    };
+    /// Clears the root waker when the poll ends.
+    struct Root<'a>(&'a RootWaker);
+    impl Drop for Root<'_> {
+        fn drop(&mut self) {
+            self.0.clear();
+        }
+    }
+    emitted.root.set(cx.waker());
+    let root = Root(&emitted.root);
+    // SAFETY: the caller keeps the state pinned.
+    let poll = unsafe { Pin::new_unchecked(future) }.poll(cx);
+    drop(root);
+    match poll {
+        Poll::Ready(result) => {
+            *state = State::Finished;
+            match emitted.item.take() {
+                Some(item) => {
+                    *state = State::Returned(result);
+                    Poll::Ready(ControlFlow::Continue(item))
+                }
+                None => Poll::Ready(ControlFlow::Break(result)),
+            }
+        }
+        Poll::Pending => match emitted.item.take() {
+            Some(item) => Poll::Ready(ControlFlow::Continue(item)),
+            None => Poll::Pending,
+        },
+    }
 }
 
 type Running<F, Op> = <Op as Start<'static, ReceiverSlot<'static, F>>>::Fut;
 type Output<F, Op> = <Op as Operation<F>>::Output;
 type Yield<F, Op> = <Op as Operation<F>>::Yield;
 
-/// An operation and its receiver cells, polled with a scope supplied by the
-/// caller on each poll.
+/// An operation and its cells, polled with a view supplied by the caller on
+/// each poll.
 ///
-/// The scope may differ between polls, so a call can be stored apart from the
-/// resource it uses. Each poll's view is acquired lazily by the scope and
-/// released when the caller drops it.
+/// The view may differ between polls, so a call can be stored apart from the
+/// resource it uses. A caller that acquires lazily polls without a view; the
+/// call asks for one when its operation first uses it. A call has two forms:
+/// [`poll_with`](Self::poll_with) delivers each emitted item and then the
+/// final value, and [`poll_return_with`](Self::poll_return_with) discards the
+/// items.
 pub struct Call<F, Op>
 where
     F: ReceiverFamily,
     Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
 {
-    // Dropped before the cells it points into.
+    // Dropped before the cells its future points into.
     state: State<Op, Running<F, Op>, Output<F, Op>>,
-    lend: Cell<Option<Lend<F>>>,
-    emitted: Cell<Option<Yield<F, Op>>>,
+    cell: ViewCell<F>,
+    emitted: ItemCell<Yield<F, Op>>,
     poisoned: Cell<bool>,
     _pinned: PhantomPinned,
 }
@@ -156,8 +279,8 @@ where
 // The probe access is unnameable outside this crate, so an operation that
 // starts with it is generic over the access, and its probe future differs only
 // where the slot or accesses derived from it appear. Those never leave the
-// polling thread: slots are not Send, and between polls they hold only
-// pointers into this call, whose lend cell is then empty.
+// polling thread: slots are not Send, and between polls they hold only a
+// pointer into this call, whose cell then lends nothing.
 unsafe impl<F, Op> Send for Call<F, Op>
 where
     F: ReceiverFamily,
@@ -169,19 +292,6 @@ where
 {
 }
 
-struct PollGuard<'a, F> {
-    lend: &'a Cell<Option<Lend<F>>>,
-    poisoned: &'a Cell<bool>,
-}
-impl<F> Drop for PollGuard<'_, F> {
-    fn drop(&mut self) {
-        self.lend.set(None);
-        if std::thread::panicking() {
-            self.poisoned.set(true);
-        }
-    }
-}
-
 impl<F, Op> Call<F, Op>
 where
     F: ReceiverFamily,
@@ -191,114 +301,78 @@ where
     pub fn new(operation: Op) -> Self {
         Self {
             state: State::Start(operation),
-            lend: Cell::new(None),
-            emitted: Cell::new(None),
+            cell: ViewCell::new(),
+            emitted: ItemCell::new(),
             poisoned: Cell::new(false),
             _pinned: PhantomPinned,
         }
     }
 
-    /// Advance the operation with this poll's scope. Returns `Continue` for an
-    /// emitted item and `Break` for the result, after which the call is done.
+    /// Advance the operation with this poll's view, if the caller has one.
+    /// `Continue` holds an emitted item and `Break` the final value, after
+    /// which the call is done.
     pub fn poll_with<'view>(
         self: Pin<&mut Self>,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
         cx: &mut Context<'_>,
-    ) -> Poll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
+    ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
+    where
+        F: 'view,
+    {
+        self.poll_event(view, false, cx)
+    }
+
+    fn poll_event<'view>(
+        self: Pin<&mut Self>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        discard: bool,
+        cx: &mut Context<'_>,
+    ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
     where
         F: 'view,
     {
         // SAFETY: nothing is moved out of the pinned call; the running future
-        // is pinned in place until it is dropped in place.
-        let this: *mut Self = unsafe { self.get_unchecked_mut() };
-        // The running future keeps pointers into these cells, so they are
-        // only ever accessed through shared references.
-        // SAFETY: `this` is valid; the fields are disjoint.
-        let (lend, emitted, poisoned, state) = unsafe {
-            (
-                &(*this).lend,
-                &(*this).emitted,
-                &(*this).poisoned,
-                &mut (*this).state,
-            )
-        };
-        assert!(!poisoned.get(), "call polled after a panic");
-        match state {
-            State::Returned(_) => {
-                let State::Returned(result) = mem::replace(state, State::Finished) else {
-                    unreachable!()
-                };
-                return Poll::Ready(ControlFlow::Break(result));
-            }
-            State::Finished => panic!("call polled after completion"),
-            State::Start(_) | State::Running(_) => {}
+        // is pinned in place until it is dropped in place. The future keeps
+        // pointers into the cells, so they are only accessed through shared
+        // references.
+        let this = unsafe { self.get_unchecked_mut() };
+        let (cell, emitted, poisoned, state) =
+            (&this.cell, &this.emitted, &this.poisoned, &mut this.state);
+        if let State::Finished = state {
+            panic!("call polled after completion");
         }
-
-        let mut lent = Lent { scope };
-        lend.set(Some(Lend {
-            target: ptr::from_mut(&mut lent).cast(),
-            dispatch: Lent::<'_, 'view, F>::dispatch,
-        }));
-        let guard = PollGuard { lend, poisoned };
-        if let State::Start(_) = state {
-            let State::Start(operation) = mem::replace(state, State::Finished) else {
-                unreachable!()
+        emitted.set_discard(discard);
+        lend(cell, poisoned, view, cx.waker(), || {
+            let start = |operation: Op| {
+                // SAFETY: the call is pinned, so the cells keep their address,
+                // and the future holding the slot and the emitter is dropped
+                // before them. `Op: for<'s> Start` keeps the operation from
+                // relying on the 'static brand chosen for storage.
+                let slot = unsafe { ReceiverSlot::<'static, F>::new(cell) };
+                operation.start(slot, Emitter::new(emitted))
             };
-            // SAFETY: the call is pinned, so the cells keep their address, and
-            // the future that holds these handles is dropped before them.
-            // `Op: for<'s> Start` makes the operation unable to rely on the
-            // 'static brand chosen for storage.
-            let slot = unsafe {
-                ReceiverSlot::<'static, F>::from_raw(
-                    ptr::from_ref(lend).cast_mut().cast(),
-                    dispatch_root::<F>,
-                )
-            };
-            let emitter = Emitter {
-                cell: emitted,
-                brand: PhantomData,
-            };
-            *state = State::Running(operation.start(slot, emitter));
-        }
-        let State::Running(future) = state else {
-            unreachable!()
-        };
-        // SAFETY: the future stays in place until it is dropped in place.
-        let poll = unsafe { Pin::new_unchecked(future) }.poll(cx);
-        drop(guard);
-
-        match poll {
-            Poll::Ready(result) => {
-                *state = State::Finished;
-                match emitted.take() {
-                    Some(item) => {
-                        *state = State::Returned(result);
-                        Poll::Ready(ControlFlow::Continue(item))
-                    }
-                    None => Poll::Ready(ControlFlow::Break(result)),
-                }
-            }
-            Poll::Pending => match emitted.take() {
-                Some(item) => Poll::Ready(ControlFlow::Continue(item)),
-                None => Poll::Pending,
-            },
-        }
+            // SAFETY: the state is a field of the pinned call.
+            unsafe { poll_events(state, emitted, start, cx) }
+        })
     }
 
-    /// Advance to the result within this poll's scope, discarding emitted items.
+    /// Advance to the final value with this poll's view. Emitted items are
+    /// dropped where they are emitted, without suspending the operation.
     pub fn poll_return_with<'view>(
-        mut self: Pin<&mut Self>,
-        mut scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        self: Pin<&mut Self>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Output<F, Op>>
+    ) -> CallPoll<Output<F, Op>>
     where
         F: 'view,
     {
-        loop {
-            match ready!(self.as_mut().poll_with(scope.as_mut(), cx)) {
-                ControlFlow::Continue(_) => {}
-                ControlFlow::Break(result) => return Poll::Ready(result),
+        match self.poll_event(view, true, cx) {
+            CallPoll::Ready(ControlFlow::Break(result)) => CallPoll::Ready(result),
+            CallPoll::Ready(ControlFlow::Continue(_)) => {
+                unreachable!("discarded items are not stored")
             }
+            CallPoll::Pending => CallPoll::Pending,
+            CallPoll::NeedsView => CallPoll::NeedsView,
         }
     }
 }
@@ -307,16 +381,16 @@ where
 pub trait DynCall<F: ReceiverFamily, Y, R> {
     fn poll_with<'view>(
         self: Pin<&mut Self>,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
         cx: &mut Context<'_>,
-    ) -> Poll<ControlFlow<R, Y>>
+    ) -> CallPoll<ControlFlow<R, Y>>
     where
         F: 'view;
     fn poll_return_with<'view>(
         self: Pin<&mut Self>,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
         cx: &mut Context<'_>,
-    ) -> Poll<R>
+    ) -> CallPoll<R>
     where
         F: 'view;
 }
@@ -327,22 +401,22 @@ where
 {
     fn poll_with<'view>(
         self: Pin<&mut Self>,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
         cx: &mut Context<'_>,
-    ) -> Poll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
+    ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
     where
         F: 'view,
     {
-        Call::poll_with(self, scope, cx)
+        Call::poll_with(self, view, cx)
     }
     fn poll_return_with<'view>(
         self: Pin<&mut Self>,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
+        view: Option<Pin<&mut F::ReceiverView<'view>>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Output<F, Op>>
+    ) -> CallPoll<Output<F, Op>>
     where
         F: 'view,
     {
-        Call::poll_return_with(self, scope, cx)
+        Call::poll_return_with(self, view, cx)
     }
 }

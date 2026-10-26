@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use bytes::BufMut;
 use nitori_call_prototype::{
-    Compose, Direct, HasReceiverFamily, ReceiverAccess, ReceiverFamily, ViewLoan, direct_receiver,
+    Compose, Direct, ReceiverAccess, ReceiverFamily, ViewLoan, direct_receiver,
 };
 use std::{
     collections::VecDeque,
@@ -159,9 +159,6 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
     where
         Self: 'v;
 }
-impl<F: ReceiverFamily> HasReceiverFamily for LimitedView<'_, F> {
-    type Family = Limited<F>;
-}
 impl<F: ReceiverFamily> Compose<F> for ReadLimit {
     type Family = Limited<F>;
     fn compose<'v, 'p>(
@@ -211,5 +208,27 @@ pub fn run_ready<T>(future: impl Future<Output = T>) -> T {
     match poll_once(pin!(future)) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("future was not ready"),
+    }
+}
+
+/// Counts the wakes it receives.
+#[derive(Default)]
+pub struct WakeCount(pub std::sync::atomic::AtomicUsize);
+impl std::task::Wake for WakeCount {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+impl WakeCount {
+    pub fn new() -> (std::sync::Arc<Self>, Waker) {
+        let count = std::sync::Arc::new(Self::default());
+        let waker = Waker::from(count.clone());
+        (count, waker)
+    }
+    pub fn get(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

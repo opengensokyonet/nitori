@@ -16,7 +16,7 @@ pub trait Receiver {
 /// The lifetime-indexed views used by an operation.
 pub trait ReceiverFamily: Sized {
     /// A view of the resource for one access lifetime, not necessarily the resource itself.
-    type ReceiverView<'visit>: HasReceiverFamily<Family = Self>
+    type ReceiverView<'visit>
     where
         Self: 'visit;
 }
@@ -125,11 +125,3 @@ macro_rules! family_receiver {
 }
 direct_receiver!(impl [T: ?Sized] for std::rc::Rc<T>);
 direct_receiver!(impl [] for bool);
-
-/// Capability identity independent of view construction.
-pub trait HasReceiverFamily {
-    type Family: ReceiverFamily;
-}
-impl<T: Receiver + ?Sized> HasReceiverFamily for T {
-    type Family = T::Family;
-}

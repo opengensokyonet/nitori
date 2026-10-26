@@ -12,6 +12,8 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
+- `prototypes/call` and `prototypes/call-macros`: a prototype of calls written as ordinary async functions. A call is polled with an optional view on each poll and asks for one when its operation needs it; executions are both futures of the final value and streams of yielded items.
+- `prototypes/call-bench`: framed reads from a Tokio duplex pipe with ordinary async, `nitori_call`, and the prototype, on an exclusive and a `tokio::sync::Mutex`-shared connection. Run `cargo run --release -p nitori-call-bench`; add `trickle` to make the reader wait for nearly every frame, or `sizes` to print the size of each per-frame future.
 
 ## Development
 

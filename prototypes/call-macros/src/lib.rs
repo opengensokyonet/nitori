@@ -10,12 +10,13 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
 use syn::{
-    Error, FnArg, GenericArgument, GenericParam, Generics, Ident, ItemFn, ItemTrait, Lifetime,
-    LifetimeParam, Pat, Path, PathArguments, Result, ReturnType, Token, TraitItem, TraitItemFn,
-    Type, TypeParam, TypeParamBound, TypeReference, Visibility, WherePredicate, parse_macro_input,
-    parse_quote,
+    Error, Expr, FnArg, GenericArgument, GenericParam, Generics, Ident, ItemFn, ItemTrait,
+    Lifetime, LifetimeParam, Pat, Path, PathArguments, Result, ReturnType, Token, TraitItem,
+    TraitItemFn, Type, TypeParam, TypeParamBound, TypeReference, Visibility, WherePredicate,
+    parse_macro_input, parse_quote, parse_quote_spanned,
     punctuated::Punctuated,
     spanned::Spanned,
+    visit::{self, Visit},
     visit_mut::{self, VisitMut},
 };
 
@@ -54,12 +55,15 @@ enum Module {
 struct Options {
     module: Module,
     sync: bool,
+    /// `yields = Type`: the item type of the function's `yield` expressions.
+    yields: Option<Type>,
 }
 impl Options {
     fn parse(attribute: TokenStream) -> Result<Self> {
         let mut options = Options {
             module: Module::Default,
             sync: false,
+            yields: None,
         };
         let parser = syn::meta::parser(|meta| {
             if meta.path.is_ident("module") {
@@ -74,8 +78,12 @@ impl Options {
             } else if meta.path.is_ident("sync") {
                 options.sync = true;
                 Ok(())
+            } else if meta.path.is_ident("yields") {
+                options.yields = Some(meta.value()?.parse()?);
+                Ok(())
             } else {
-                Err(meta.error("expected `module = name`, `module = self` or `sync`"))
+                Err(meta
+                    .error("expected `module = name`, `module = self`, `sync` or `yields = Type`"))
             }
         });
         syn::parse::Parser::parse(parser, attribute)?;
@@ -288,7 +296,7 @@ impl Operation {
         let family_predicates = self.family_predicates(&family, Place::Inside);
         let output = self.substitute(self.output.clone(), &family, Place::Inside);
         let yield_type = match &self.yield_type {
-            Some(ty) => self.substitute(ty.clone(), &family, Place::Inside),
+            Some(item) => self.substitute(item.clone(), &family, Place::Inside),
             None => parse_quote!(::core::convert::Infallible),
         };
         let operation = self.name.to_string();
@@ -354,7 +362,7 @@ impl Operation {
     /// Methods that bind a host, run the operation as a call and return its result.
     fn host_methods(&self) -> Tokens {
         let runtime = runtime();
-        let family: Type = parse_quote!(<Self as #runtime::Receiver>::Family);
+        let family: Type = parse_quote!(<Self as #runtime::CallExecutor>::Family);
         let path = self.struct_path();
         let names = self.names();
         let types = self.types();
@@ -364,17 +372,21 @@ impl Operation {
         let lifetimes = &self.lifetimes;
         let parameters = &self.method_generics.params;
         let predicates = self.predicates(&self.method_generics, &family, Place::Outside);
+        let arguments = self.arguments();
         let mut methods = quote! {
-            fn #name<#(#lifetimes,)* #parameters>(
-                self: ::core::pin::Pin<&mut Self>,
+            fn #name<'__d, #(#lifetimes,)* #parameters>(
+                self: ::core::pin::Pin<&'__d mut Self>,
                 #(#names: #types),*
-            ) -> impl ::core::future::Future<Output = #output>
-            where #(#predicates,)*
+            ) -> <Self as #runtime::CallExecutor>::Execution<'__d, #path<#arguments>>
+            where #path<#arguments>: '__d, #(#predicates,)*
             {
-                #runtime::__private::bind(self, #path::new(#(#names),*))
+                #runtime::CallExecutor::execute(self, #path::new(#(#names),*))
             }
-            fn #unpin<#(#lifetimes,)* #parameters>(&mut self, #(#names: #types),*) -> impl ::core::future::Future<Output = #output>
-            where Self: ::core::marker::Unpin, #(#predicates,)*
+            fn #unpin<'__d, #(#lifetimes,)* #parameters>(
+                &'__d mut self,
+                #(#names: #types),*
+            ) -> <Self as #runtime::CallExecutor>::Execution<'__d, #path<#arguments>>
+            where Self: ::core::marker::Unpin, #path<#arguments>: '__d, #(#predicates,)*
             {
                 Self::#name(::core::pin::Pin::new(self), #(#names),*)
             }
@@ -383,13 +395,13 @@ impl Operation {
             let sync = format_ident!("sync_{}", name);
             let sync_unpin = format_ident!("sync_{}_unpin", name);
             methods.extend(quote! {
-                fn #sync<#(#lifetimes,)* #parameters>(self: ::core::pin::Pin<&mut Self>, #(#names: #types),*) -> #output
-                where #(#predicates,)*
+                fn #sync<'__d, #(#lifetimes,)* #parameters>(self: ::core::pin::Pin<&'__d mut Self>, #(#names: #types),*) -> #output
+                where #path<#arguments>: '__d, #(#predicates,)*
                 {
                     #runtime::__private::run_sync(Self::#name(self, #(#names),*))
                 }
-                fn #sync_unpin<#(#lifetimes,)* #parameters>(&mut self, #(#names: #types),*) -> #output
-                where Self: ::core::marker::Unpin, #(#predicates,)*
+                fn #sync_unpin<'__d, #(#lifetimes,)* #parameters>(&'__d mut self, #(#names: #types),*) -> #output
+                where Self: ::core::marker::Unpin, #path<#arguments>: '__d, #(#predicates,)*
                 {
                     #runtime::__private::run_sync(Self::#name(::core::pin::Pin::new(self), #(#names),*))
                 }
@@ -529,7 +541,7 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
     let vis = &item.vis;
     let bounds = first.family_bound_tokens(Place::Outside);
     let access = quote!(#runtime::ReceiverAccess);
-    let host = quote!(#runtime::Receiver);
+    let host = quote!(#runtime::CallExecutor);
     generated.extend(convenience_trait(
         vis,
         &format_ident!("{}Ext", item.ident),
@@ -715,30 +727,38 @@ fn primitive(
     Ok((operation, definition, method))
 }
 
-fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
+fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let runtime = runtime();
-    let signature = &item.sig;
+    // The emitter parameter added for `yield`, named hygienically.
+    let emitter = Ident::new("__emitter", Span::mixed_site());
+    match &options.yields {
+        Some(_) => RewriteYield { emitter: &emitter }.visit_block_mut(&mut item.block),
+        None => {
+            let mut find = FindYield(None);
+            find.visit_block(&item.block);
+            if let Some(span) = find.0 {
+                return Err(Error::new(
+                    span,
+                    "declare the item type of `yield` with `#[call(yields = Type)]`",
+                ));
+            }
+        }
+    }
+    let signature = &item.sig.clone();
     if signature.asyncness.is_none() {
         return Err(Error::new(
             signature.span(),
             "#[call] applies to async functions",
         ));
     }
-    let mut inputs = signature.inputs.iter().peekable();
+    let mut inputs = signature.inputs.iter();
     let Some(FnArg::Typed(access)) = inputs.next() else {
         return Err(Error::new(
             signature.span(),
             "the first parameter must be a mutable receiver access",
         ));
     };
-    // An operation that emits takes `&mut Emitter<'_, Item>` second.
-    let mut yield_type = match inputs.peek() {
-        Some(FnArg::Typed(typed)) => emitter_item(&typed.ty)?,
-        _ => None,
-    };
-    if yield_type.is_some() {
-        inputs.next();
-    }
+    let mut yield_type = options.yields.clone();
     let mut arguments = Vec::new();
     for input in inputs {
         arguments.push(argument(input)?);
@@ -832,12 +852,6 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         Module::Default | Module::Current => None,
         Module::Named(module) => Some(module),
     };
-    if options.sync && yield_type.is_some() {
-        return Err(Error::new(
-            signature.span(),
-            "`sync` host methods need an operation that does not emit",
-        ));
-    }
     let operation = Operation {
         vis: item.vis.clone(),
         name: signature.ident.clone(),
@@ -863,16 +877,6 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         Some(_) => quote!(super::#function),
         None => quote!(#function),
     };
-    // From the access methods, the access is `Self`.
-    let method_turbofish: Vec<Tokens> = turbofish
-        .iter()
-        .map(|argument| match argument.to_string().as_str() {
-            "__A" => quote!(Self),
-            _ => argument.clone(),
-        })
-        .collect();
-    let method_turbofish =
-        (!method_turbofish.is_empty()).then(|| quote!(::<#(#method_turbofish),*>));
     let turbofish = (!turbofish.is_empty()).then(|| quote!(::<#(#turbofish),*>));
     let struct_name = &operation.struct_name;
     let parameters = operation.parameters();
@@ -881,14 +885,14 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
     let access_family: Type = parse_quote!(<__A as #runtime::ReceiverAccess>::Family);
     let bounds = operation.family_bound_tokens(Place::Inside);
     let predicates = operation.family_predicates(&access_family, Place::Inside);
+    let mut definition = operation.struct_definition(false);
     let (emitter_type, emitter_argument) = match &operation.yield_type {
-        Some(item) => {
-            let item = operation.substitute(item.clone(), &access_family, Place::Inside);
-            (item, quote!(&mut __emitter,))
-        }
+        Some(item) => (
+            operation.substitute(item.clone(), &access_family, Place::Inside),
+            quote!(&mut __emitter),
+        ),
         None => (parse_quote!(::core::convert::Infallible), Tokens::new()),
     };
-    let mut definition = operation.struct_definition(false);
     definition.extend(quote! {
         impl<'__s, #parameters __A> #runtime::Start<'__s, __A> for #struct_name<#arguments>
         where
@@ -909,7 +913,7 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
                 async move {
                     let mut __io = __io;
                     let mut __emitter = __emitter;
-                    #function_path #turbofish(&mut __io, #emitter_argument #(#names),*).await
+                    #function_path #turbofish(&mut __io, #(#names,)* #emitter_argument).await
                 }
             }
         }
@@ -924,24 +928,17 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         operation.predicates(&operation.method_generics, &self_family, Place::Outside);
     let path = operation.struct_path();
     let access_methods = match &operation.yield_type {
-        // The operation emits through the caller's emitter, which a started
-        // operation cannot borrow, so the method calls the function directly.
-        Some(item) => {
-            let item = operation.substitute(item.clone(), &self_family, Place::Outside);
-            let output =
-                operation.substitute(operation.output.clone(), &self_family, Place::Outside);
-            quote! {
-                fn #function<#(#lifetimes,)* '__a, #method_parameters>(
-                    &'__a mut self,
-                    __emitter: &'__a mut #runtime::Emitter<'_, #item>,
-                    #(#names: #types),*
-                ) -> impl ::core::future::Future<Output = #output>
-                where Self: ::core::marker::Sized, #(#method_predicates,)*
-                {
-                    #function #method_turbofish(self, __emitter, #(#names),*)
-                }
+        // An emitting child has a cell of its own for its items.
+        Some(_) => quote! {
+            fn #function<#(#lifetimes,)* '__a, #method_parameters>(
+                &'__a mut self,
+                #(#names: #types),*
+            ) -> #runtime::Child<&'__a mut Self, #path<#arguments>>
+            where Self: ::core::marker::Sized, #(#method_predicates,)*
+            {
+                #runtime::Child::new(#path::new(#(#names),*), self)
             }
-        }
+        },
         None => quote! {
             fn #function<#(#lifetimes,)* '__a, #method_parameters>(
                 &'__a mut self,
@@ -949,18 +946,14 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
             ) -> <#path<#arguments> as #runtime::Start<'static, &'__a mut Self>>::Fut
             where Self: ::core::marker::Sized, #(#method_predicates,)*
             {
-                #runtime::Start::start(
-                    #path::new(#(#names),*),
-                    self,
-                    #runtime::__private::detached(),
-                )
+                #runtime::Start::start(#path::new(#(#names),*), self, #runtime::__private::detached())
             }
         },
     };
     let camel = &operation.struct_name;
     let bounds = operation.family_bound_tokens(Place::Outside);
     let access = quote!(#runtime::ReceiverAccess);
-    let host = quote!(#runtime::Receiver);
+    let host = quote!(#runtime::CallExecutor);
     let access_trait = convenience_trait(
         &operation.vis,
         &format_ident!("{}Ext", camel),
@@ -969,18 +962,20 @@ fn expand_call(item: ItemFn, options: Options) -> Result<Tokens> {
         bounds.clone(),
         access_methods,
     );
-    // Host methods return the result; an operation that emits has none.
-    let host_trait = match operation.yield_type {
-        Some(_) => Tokens::new(),
-        None => convenience_trait(
-            &operation.vis,
-            &format_ident!("{}HostExt", camel),
-            &operation.convenience_generics(&host),
-            host,
-            bounds,
-            operation.host_methods(),
-        ),
-    };
+    let host_trait = convenience_trait(
+        &operation.vis,
+        &format_ident!("{}HostExt", camel),
+        &operation.convenience_generics(&host),
+        host,
+        bounds,
+        operation.host_methods(),
+    );
+    // The function itself takes the emitter last.
+    if let Some(yields) = &options.yields {
+        item.sig
+            .inputs
+            .push(parse_quote!(#emitter: &mut #runtime::Emitter<'_, #yields>));
+    }
     Ok(quote! {
         #item
         #definition
@@ -1166,38 +1161,48 @@ fn family_bounds(
     ))
 }
 
-/// The item type, if `ty` is `&mut Emitter<'_, Item>`.
-fn emitter_item(ty: &Type) -> Result<Option<Type>> {
-    let Type::Reference(reference) = ty else {
-        return Ok(None);
-    };
-    let Type::Path(path) = &*reference.elem else {
-        return Ok(None);
-    };
-    let Some(last) = path.path.segments.last() else {
-        return Ok(None);
-    };
-    if last.ident != "Emitter" {
-        return Ok(None);
+/// Turns each `yield e` of the function body into an emission. `yield` in
+/// closures (including coroutines), async blocks, nested items and macro
+/// arguments keeps its own meaning.
+struct RewriteYield<'a> {
+    emitter: &'a Ident,
+}
+impl VisitMut for RewriteYield<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::Closure(_) | Expr::Async(_) | Expr::Macro(_) => {}
+            Expr::Yield(expression) => {
+                let span = expression.yield_token.span;
+                let value: Expr = match expression.expr.take() {
+                    Some(value) => {
+                        let mut value = *value;
+                        self.visit_expr_mut(&mut value);
+                        value
+                    }
+                    None => parse_quote!(()),
+                };
+                let emitter = self.emitter;
+                *expr = parse_quote_spanned!(span=> #emitter.emit(#value).await);
+            }
+            _ => visit_mut::visit_expr_mut(self, expr),
+        }
     }
-    if reference.mutability.is_none() {
-        return Err(Error::new(
-            ty.span(),
-            "the emitter must be a mutable reference",
-        ));
+    fn visit_item_mut(&mut self, _: &mut syn::Item) {}
+}
+
+/// Finds a `yield` that `RewriteYield` would rewrite.
+struct FindYield(Option<Span>);
+impl<'ast> Visit<'ast> for FindYield {
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        match expr {
+            Expr::Closure(_) | Expr::Async(_) | Expr::Macro(_) => {}
+            Expr::Yield(expression) => {
+                self.0.get_or_insert(expression.yield_token.span);
+            }
+            _ => visit::visit_expr(self, expr),
+        }
     }
-    if let PathArguments::AngleBracketed(arguments) = &last.arguments
-        && let Some(GenericArgument::Type(item)) = arguments
-            .args
-            .iter()
-            .find(|argument| matches!(argument, GenericArgument::Type(_)))
-    {
-        return Ok(Some(item.clone()));
-    }
-    Err(Error::new(
-        ty.span(),
-        "the emitter must be `&mut Emitter<'_, Item>`",
-    ))
+    fn visit_item(&mut self, _: &'ast syn::Item) {}
 }
 
 fn is_ident(ty: &Type, ident: &Ident) -> bool {

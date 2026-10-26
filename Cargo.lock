@@ -27,12 +27,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "nitori-call-bench"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "nitori-call-prototype",
+ "nitori_call",
+ "nitori_io",
+ "tokio",
+]
+
+[[package]]
 name = "nitori-call-prototype"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "nitori-call-prototype-macros",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -147,6 +161,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "pin-project-lite",
 ]
 

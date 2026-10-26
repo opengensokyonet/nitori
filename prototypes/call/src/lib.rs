@@ -1,6 +1,8 @@
 //! Operations that use a resource lent by their caller for one poll at a time.
 //!
-//! A [`Call`] owns an operation and receives a [`ReceiverScope`] on every poll.
+//! A [`Call`] owns an operation and receives a view, or none, on every poll.
+//! An operation emits intermediate items and then a final value; a call
+//! delivers both, or only the final value.
 //! The operation's future reaches the current view through its
 //! [`ReceiverSlot`]; the caller decides how long each view stays acquired.
 //!
@@ -53,7 +55,7 @@
 //! that stores its slot in outside state:
 //!
 //! ```compile_fail
-//! # use nitori_call_prototype::{Call, Direct, Emitter, Operation, ReceiverFamily, ReceiverSlot, Start};
+//! # use nitori_call_prototype::{Call, Direct, Emitter, Operation, ReceiverSlot, Start};
 //! # use std::{convert::Infallible, future::{Ready, ready}};
 //! type F = Direct<Vec<u8>>;
 //! struct Keep<'x>(&'x mut Option<ReceiverSlot<'x, F>>);
@@ -88,7 +90,7 @@
 //! ```
 //!
 //! A call is `Send` when everything its operation keeps apart from the slot is
-//! `Send`. The resource, its views and scopes need not be: they are used only
+//! `Send`. The resource and its views need not be: they are used only
 //! during a poll, on the polling thread.
 //!
 //! ```
@@ -135,23 +137,25 @@
 //! fn assert_send<T: Send>(_: T) {}
 //! assert_send(Call::<Direct<Vec<u8>>, _>::new(Hold));
 //! ```
-#![feature(associated_type_defaults)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod receiver;
-pub use receiver::{
-    BorrowedReceiver, Direct, DirectView, HasReceiverFamily, Receiver, ReceiverFamily,
-};
-mod scope;
-pub use scope::{BorrowedScope, ReceiverScope, ViewScope};
+pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamily};
 mod loan;
 pub use loan::{ViewLoan, ViewOperation};
 mod access;
-pub use access::{Access, ReceiverAccess, ReceiverSlot, ScopeVisitor};
+pub use access::{Access, ReceiverAccess, ReceiverSlot};
 mod compose;
 pub use compose::{Compose, Composed};
 mod call;
-pub use call::{Call, DynCall, Emitter, Operation, Start};
+pub use call::{Call, CallPoll, DynCall, Emitter, Operation, Start};
+mod child;
+pub use child::Child;
+mod driver;
+pub use driver::{
+    AcquiredScope, AcquisitionState, BoundCall, CallExecutor, Drive, ReceiverScope,
+    ViewAcquisition, drive,
+};
 
 /// Generate an operation and its conveniences from an async function taking a
 /// receiver access first.
@@ -160,15 +164,53 @@ pub use call::{Call, DynCall, Emitter, Operation, Start};
 /// remaining arguments as fields. Users of the macro enable
 /// `impl_trait_in_assoc_type`.
 ///
-/// An operation that emits takes `&mut Emitter<'_, Item>` second. Its access
-/// method takes the caller's emitter, and it has no host methods, since those
-/// return only the result.
+/// With `yields = Item`, each `yield value` written directly in the function
+/// body emits an item, and the return value is the final value. The crate
+/// enables `yield_expr` as well. `yield` in closures (including coroutines),
+/// async blocks, nested items and macro arguments is left as written. The
+/// function gains a last parameter `&mut Emitter<'_, Item>`, and its access
+/// method returns a [`Child`].
 ///
 /// Arguments:
 ///
 /// - `module = name` generates the operation in a new module `name`;
 ///   `module = self`, the default, in the current module.
-/// - `sync` also generates `sync_*` host methods.
+/// - `sync` also generates `sync_*` host methods, which return the final value.
+/// - `yields = Item` declares the type of the items.
+///
+/// A `yield` needs the item type declared:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type, yield_expr)]
+/// # use nitori_call_prototype::{ReceiverAccess, call};
+/// #[call]
+/// async fn undeclared(io: &mut impl ReceiverAccess<Family: Sized>) {
+///     yield 1;
+/// }
+/// ```
+///
+/// The crate must enable `yield_expr`, since the compiler checks the syntax
+/// before the macro runs:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call_prototype::{ReceiverAccess, call};
+/// #[call(yields = u8)]
+/// async fn ungated(io: &mut impl ReceiverAccess<Family: Sized>) {
+///     yield 1;
+/// }
+/// ```
+///
+/// and a `yield` inside a closure is not an item:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type, yield_expr)]
+/// # use nitori_call_prototype::{ReceiverAccess, call};
+/// #[call(yields = u8)]
+/// async fn nested(io: &mut impl ReceiverAccess<Family: Sized>) {
+///     let emit = || yield 1;
+/// }
+/// ```
 ///
 /// Without `sync`, there are no synchronous host methods:
 ///
@@ -196,36 +238,15 @@ pub use nitori_call_prototype_macros::capability;
 /// Support for generated code; not a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    use crate::{BorrowedScope, Call, Emitter, Operation, Receiver, ReceiverSlot, Start};
     use std::{
-        convert::Infallible,
-        future::{Future, poll_fn},
-        pin::{Pin, pin},
+        future::Future,
+        pin::pin,
         task::{Context, Poll, Waker},
     };
 
-    /// Run an operation on a host, lending a fresh lazy scope on each poll.
-    pub async fn bind<H, Op>(
-        host: Pin<&mut H>,
-        operation: Op,
-    ) -> <Op as Operation<H::Family>>::Output
-    where
-        H: Receiver + ?Sized,
-        Op: Operation<H::Family, Yield = Infallible>
-            + for<'s> Start<'s, ReceiverSlot<'s, H::Family>>,
-    {
-        let mut host = host;
-        let mut call = pin!(Call::new(operation));
-        poll_fn(|cx| {
-            call.as_mut()
-                .poll_return_with(pin!(BorrowedScope::new(host.as_mut())), cx)
-        })
-        .await
-    }
-
-    /// An emitter for operations started outside a call; it can emit nothing.
-    pub fn detached() -> Emitter<'static, Infallible> {
-        Emitter::detached()
+    /// An emitter for operations that emit nothing.
+    pub fn detached() -> crate::Emitter<'static, std::convert::Infallible> {
+        crate::Emitter::detached()
     }
 
     /// Complete a future that must not wait.

@@ -1,10 +1,11 @@
 //! Access to the view lent for the current poll.
-use crate::{Compose, Composed, DynCall, ReceiverFamily, ReceiverScope};
+use crate::{Compose, Composed, ReceiverFamily, ViewOperation, loan::RawViewLoan};
 use std::{
+    cell::Cell,
     marker::PhantomData,
-    ops::ControlFlow,
     pin::Pin,
-    task::{Context, Poll},
+    ptr,
+    task::{Context, Poll, Waker},
 };
 
 /// A nominal lifetime boundary for one synchronous use of the current view.
@@ -23,63 +24,75 @@ impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
     }
 }
 
-/// Receives the scope lent for the current poll, once.
-///
-/// The scope type stays static through compositions; only the root of a call
-/// lends an erased scope.
-pub trait ScopeVisitor<F: ReceiverFamily> {
-    type Output;
-    fn visit<'view, S: ReceiverScope<'view, Family = F>>(
-        self,
-        scope: Pin<&mut S>,
-        cx: &mut Context<'_>,
-    ) -> Self::Output
-    where
-        F: 'view;
+/// The view lent to a call for its current poll, if any, whether its
+/// operation asked for one, and the waker the call was polled with.
+pub(crate) struct ViewCell<F: ReceiverFamily> {
+    pub(crate) view: Cell<Option<RawViewLoan<F>>>,
+    pub(crate) requested: Cell<bool>,
+    pub(crate) root: RootWaker,
 }
-
-/// The dyn-compatible form of a visitor, for erased slots.
-pub(crate) trait ScopeRequest<F: ReceiverFamily> {
-    fn run<'view>(
-        &mut self,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
-        cx: &mut Context<'_>,
-    ) where
-        F: 'view;
-}
-
-/// Runs a visitor from an erased request.
-struct Visit<F: ReceiverFamily, V: ScopeVisitor<F>> {
-    visitor: Option<V>,
-    output: Option<V::Output>,
-}
-impl<F: ReceiverFamily, V: ScopeVisitor<F>> ScopeRequest<F> for Visit<F, V> {
-    fn run<'view>(
-        &mut self,
-        scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
-        cx: &mut Context<'_>,
-    ) where
-        F: 'view,
-    {
-        let mut scope = scope;
-        let visitor = self.visitor.take().expect("scope request ran twice");
-        self.output = Some(visitor.visit(Pin::new(&mut scope), cx));
+impl<F: ReceiverFamily> ViewCell<F> {
+    pub(crate) fn new() -> Self {
+        Self {
+            view: Cell::new(None),
+            requested: Cell::new(false),
+            root: RootWaker::new(),
+        }
     }
 }
 
-/// Forwards a visit to an erased request.
-struct Forward<'r, F: ReceiverFamily>(&'r mut dyn ScopeRequest<F>);
-impl<F: ReceiverFamily> ScopeVisitor<F> for Forward<'_, F> {
-    type Output = ();
-    fn visit<'view, S: ReceiverScope<'view, Family = F>>(
-        self,
-        scope: Pin<&mut S>,
-        cx: &mut Context<'_>,
-    ) where
-        F: 'view,
-    {
-        self.0.run(scope, cx);
+/// The waker a call or child is being polled with; null outside a poll.
+pub(crate) struct RootWaker(Cell<*const Waker>);
+// SAFETY: the pointer is non-null only during a poll, while its owner is
+// borrowed mutably on the polling thread, and is not used outside one.
+unsafe impl Send for RootWaker {}
+impl RootWaker {
+    pub(crate) fn new() -> Self {
+        Self(Cell::new(ptr::null()))
     }
+    /// Record `waker` for a poll; it must outlive the poll, which ends with
+    /// `clear`.
+    pub(crate) fn set(&self, waker: &Waker) {
+        self.0.set(waker);
+    }
+    pub(crate) fn clear(&self) {
+        self.0.set(ptr::null());
+    }
+    pub(crate) fn get(&self) -> *const Waker {
+        self.0.get()
+    }
+}
+
+/// Whether `cx` carries the waker its call was polled with: no executor
+/// between the call and this point has substituted a branch waker. `root` is
+/// null outside a poll, and otherwise points to that waker.
+pub(crate) fn polled_directly(root: *const Waker, cx: &Context<'_>) -> bool {
+    // SAFETY: a non-null root outlives the poll that set it.
+    !root.is_null() && cx.waker().will_wake(unsafe { &*root })
+}
+
+/// The right to ask the caller of the current call for a view.
+pub struct ViewRequest<'a> {
+    requested: &'a Cell<bool>,
+    root: *const Waker,
+}
+impl ViewRequest<'_> {
+    /// Ask for a view. An executor between the call and this point repolls
+    /// only branches whose waker fired, so wake this branch for it; with
+    /// none, the caller, told the call needs a view, polls again.
+    fn ask<T>(self, cx: &mut Context<'_>) -> Poll<T> {
+        self.requested.set(true);
+        if !polled_directly(self.root, cx) {
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    }
+}
+
+/// Receives the view of the current poll, or a request for one, once.
+/// Not exported: every access is in this crate.
+pub trait ViewVisitor<F: ReceiverFamily>: ViewOperation<F> {
+    fn absent(self, request: ViewRequest<'_>) -> Self::Output;
 }
 
 pub(crate) mod mode {
@@ -98,40 +111,42 @@ pub(crate) mod mode {
 }
 use mode::{Local, Mode, Probe};
 
+mod sealed {
+    /// Implemented only by this crate's accesses.
+    pub trait Sealed {}
+}
+pub(crate) use sealed::Sealed;
+
 /// A value that can lend a view of its family during the current poll.
 ///
 /// Borrow it mutably for each use: at most one operation uses an access at a
-/// time, as with any `&mut` resource.
-pub trait ReceiverAccess {
+/// time, as with any `&mut` resource. This crate's slots, compositions and
+/// `&mut` borrows of them are the only accesses.
+#[allow(private_bounds)]
+pub trait ReceiverAccess: sealed::Sealed {
     type Family: ReceiverFamily;
 
     /// Distinguishes accesses derived from the probe of [`Call`](crate::Call)'s
     /// `Send` check. Accesses wrapping another access forward its mode.
     #[doc(hidden)]
-    #[allow(private_bounds)]
-    type Mode: Mode = Local;
+    type Mode: Mode;
 
-    /// Lend the current scope to `visitor` exactly once.
-    fn visit_scope<V: ScopeVisitor<Self::Family>>(
-        &mut self,
-        cx: &mut Context<'_>,
-        visitor: V,
-    ) -> V::Output;
+    /// Lend this poll's view to `visitor`, or give it a request for one.
+    #[doc(hidden)]
+    fn visit_view<V: ViewVisitor<Self::Family>>(&mut self, visitor: V) -> V::Output;
 
-    /// Run `body` once with the current view, or return Pending while the
-    /// caller's scope is still acquiring it.
+    /// Run `body` once with the current view. Without one, ask the caller of
+    /// the call for a view and return Pending.
     fn poll_access<R, B>(&mut self, cx: &mut Context<'_>, body: B) -> Poll<R>
     where
         Self: Sized,
         B: for<'a, 'h> FnOnce(Access<'a, 'h, Self::Family>, &mut Context<'_>) -> Poll<R>,
     {
-        self.visit_scope(
+        self.visit_view(PollAccess {
+            body,
             cx,
-            AccessVisitor {
-                body,
-                output: PhantomData,
-            },
-        )
+            output: PhantomData,
+        })
     }
 
     /// Adapt this access with composition state for the borrow's duration.
@@ -142,93 +157,44 @@ pub trait ReceiverAccess {
     {
         Composed::new(self, state)
     }
-
-    /// Poll a nested call with this access's scope, observing its events.
-    fn poll_call<C, Y, R>(
-        &mut self,
-        call: Pin<&mut C>,
-        cx: &mut Context<'_>,
-    ) -> Poll<ControlFlow<R, Y>>
-    where
-        Self: Sized,
-        C: DynCall<Self::Family, Y, R> + ?Sized,
-    {
-        self.visit_scope(
-            cx,
-            CallVisitor {
-                call,
-                marker: PhantomData,
-            },
-        )
-    }
-
-    /// Erase this access into a slot. Generic operations given erased
-    /// accesses are instantiated once per family rather than per access type.
-    fn erase(&mut self) -> ReceiverSlot<'_, Self::Family, Self::Mode>
-    where
-        Self: Sized,
-    {
-        ReceiverSlot::erased(self)
-    }
 }
 
+impl<A: ReceiverAccess + ?Sized> Sealed for &mut A {}
+#[allow(private_bounds)]
 impl<A: ReceiverAccess + ?Sized> ReceiverAccess for &mut A {
     type Family = A::Family;
     type Mode = A::Mode;
-    fn visit_scope<V: ScopeVisitor<A::Family>>(
-        &mut self,
-        cx: &mut Context<'_>,
-        visitor: V,
-    ) -> V::Output {
-        (**self).visit_scope(cx, visitor)
+    fn visit_view<V: ViewVisitor<A::Family>>(&mut self, visitor: V) -> V::Output {
+        (**self).visit_view(visitor)
     }
 }
 
-struct AccessVisitor<B, R> {
+/// The visitor of `poll_access`.
+struct PollAccess<'c, 'x, B, R> {
     body: B,
+    cx: &'c mut Context<'x>,
     output: PhantomData<fn() -> R>,
 }
-impl<F: ReceiverFamily, B, R> ScopeVisitor<F> for AccessVisitor<B, R>
+impl<F: ReceiverFamily, B, R> ViewOperation<F> for PollAccess<'_, '_, B, R>
 where
     B: for<'a, 'h> FnOnce(Access<'a, 'h, F>, &mut Context<'_>) -> Poll<R>,
 {
     type Output = Poll<R>;
-    fn visit<'view, S: ReceiverScope<'view, Family = F>>(
-        self,
-        scope: Pin<&mut S>,
-        cx: &mut Context<'_>,
-    ) -> Poll<R>
+    fn run<'h>(self, view: Pin<&mut F::ReceiverView<'h>>) -> Poll<R>
     where
-        F: 'view,
+        F: 'h,
     {
-        match scope.poll_view(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(view) => (self.body)(Access::new(view), cx),
-        }
+        (self.body)(Access::new(view), self.cx)
     }
 }
-
-struct CallVisitor<'c, C: ?Sized, Y, R> {
-    call: Pin<&'c mut C>,
-    marker: PhantomData<fn() -> (Y, R)>,
-}
-impl<F: ReceiverFamily, C: DynCall<F, Y, R> + ?Sized, Y, R> ScopeVisitor<F>
-    for CallVisitor<'_, C, Y, R>
+impl<F: ReceiverFamily, B, R> ViewVisitor<F> for PollAccess<'_, '_, B, R>
+where
+    B: for<'a, 'h> FnOnce(Access<'a, 'h, F>, &mut Context<'_>) -> Poll<R>,
 {
-    type Output = Poll<ControlFlow<R, Y>>;
-    fn visit<'view, S: ReceiverScope<'view, Family = F>>(
-        self,
-        scope: Pin<&mut S>,
-        cx: &mut Context<'_>,
-    ) -> Self::Output
-    where
-        F: 'view,
-    {
-        self.call.poll_with(scope, cx)
+    fn absent(self, request: ViewRequest<'_>) -> Poll<R> {
+        request.ask(self.cx)
     }
 }
-
-pub(crate) type Dispatch<F> = unsafe fn(*mut (), &mut Context<'_>, &mut dyn ScopeRequest<F>);
 
 /// An exclusive handle to the views lent to one call.
 ///
@@ -238,10 +204,8 @@ pub(crate) type Dispatch<F> = unsafe fn(*mut (), &mut Context<'_>, &mut dyn Scop
 /// neither `Send` nor `Sync`: it is used only by the thread polling its call.
 #[allow(private_bounds)]
 pub struct ReceiverSlot<'s, F: ReceiverFamily, M: Mode = Local> {
-    target: *mut (),
-    dispatch: Dispatch<F>,
+    cell: *const ViewCell<F>,
     brand: PhantomData<fn(&'s ()) -> &'s ()>,
-    family: PhantomData<fn(F) -> F>,
     mode: PhantomData<fn() -> M>,
 }
 // SAFETY: probe slots are never constructed; they only stand in for the slot
@@ -251,48 +215,38 @@ unsafe impl<F: ReceiverFamily> Send for ReceiverSlot<'_, F, Probe> {}
 unsafe impl<F: ReceiverFamily> Sync for ReceiverSlot<'_, F, Probe> {}
 
 #[allow(private_bounds)]
-impl<'s, F: ReceiverFamily, M: Mode> ReceiverSlot<'s, F, M> {
+impl<F: ReceiverFamily, M: Mode> ReceiverSlot<'_, F, M> {
     /// # Safety
-    /// For `'s`, `dispatch(target, ..)` must be sound to call on the thread
-    /// that owns the slot, and must lend a valid scope exactly once or panic.
-    pub(crate) unsafe fn from_raw(target: *mut (), dispatch: Dispatch<F>) -> Self {
+    /// `cell` must belong to a pinned call that outlives the slot and is
+    /// polled only on the thread that owns the slot.
+    pub(crate) unsafe fn new(cell: &ViewCell<F>) -> Self {
         Self {
-            target,
-            dispatch,
+            cell,
             brand: PhantomData,
-            family: PhantomData,
             mode: PhantomData,
         }
     }
-    fn erased<A: ReceiverAccess<Family = F, Mode = M>>(access: &'s mut A) -> Self {
-        unsafe fn dispatch<A: ReceiverAccess>(
-            target: *mut (),
-            cx: &mut Context<'_>,
-            request: &mut dyn ScopeRequest<A::Family>,
-        ) {
-            // SAFETY: the pointer comes from an exclusive borrow that outlives
-            // the slot, and the slot is borrowed mutably for this call.
-            unsafe { &mut *target.cast::<A>() }.visit_scope(cx, Forward(request))
-        }
-        // SAFETY: the access stays exclusively borrowed for 's, and the slot
-        // stays on the thread of that borrow.
-        unsafe { Self::from_raw((access as *mut A).cast(), dispatch::<A>) }
-    }
 }
+impl<F: ReceiverFamily, M: Mode> Sealed for ReceiverSlot<'_, F, M> {}
 #[allow(private_bounds)]
 impl<F: ReceiverFamily, M: Mode> ReceiverAccess for ReceiverSlot<'_, F, M> {
     type Family = F;
     type Mode = M;
-    fn visit_scope<V: ScopeVisitor<F>>(&mut self, cx: &mut Context<'_>, visitor: V) -> V::Output {
-        let mut request = Visit::<F, V> {
-            visitor: Some(visitor),
-            output: None,
-        };
-        // SAFETY: from_raw's contract; the slot is not Send, so this is the
-        // thread that owns it.
-        unsafe { (self.dispatch)(self.target, cx, &mut request) };
-        request
-            .output
-            .expect("receiver access did not lend its scope")
+    fn visit_view<V: ViewVisitor<F>>(&mut self, visitor: V) -> V::Output {
+        // SAFETY: new's contract; the slot is not Send, so this is the thread
+        // polling the call.
+        let cell = unsafe { &*self.cell };
+        match cell.view.get() {
+            // Outside a poll, which only an operation's destructor can reach,
+            // there is no view either.
+            None => visitor.absent(ViewRequest {
+                requested: &cell.requested,
+                root: cell.root.get(),
+            }),
+            // SAFETY: the call lent this view for its current poll. No other
+            // use of it is in progress: the slot and every access derived
+            // from it are borrowed mutably for each visit.
+            Some(view) => unsafe { view.apply(visitor) },
+        }
     }
 }
