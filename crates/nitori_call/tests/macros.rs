@@ -1,4 +1,4 @@
-#![feature(impl_trait_in_assoc_type, yield_expr)]
+#![feature(impl_trait_in_assoc_type, type_alias_impl_trait, yield_expr)]
 use bytes::BufMut;
 use futures_core::Stream;
 use nitori_call::{
@@ -640,4 +640,64 @@ fn lifetimes_in_bounds_stay_on_the_operation() {
     let data = vec![1, 2, 3];
     let mut input = b"".as_slice();
     assert_eq!(input.sync_measured_unpin(&data), 3);
+}
+
+/// Arguments written as patterns are destructured by the function.
+#[call(sync)]
+async fn span(
+    _io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    (start, end): (u8, u8),
+    _: &str,
+) -> u8 {
+    end - start
+}
+
+#[test]
+fn arguments_may_be_patterns() {
+    let mut input = b"".as_slice();
+    assert_eq!(input.sync_span_unpin((1, 4), "unused"), 3);
+    // Their fields are named after their positions.
+    let operation = Span::new((2, 7), "unused");
+    assert_eq!(
+        (operation.argument_1, operation.argument_2),
+        ((2, 7), "unused")
+    );
+}
+
+/// Returns another generated operation, to be run later.
+#[call(sync)]
+async fn plan(_io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> ReadArray<1> {
+    ReadArray::new()
+}
+
+#[call(sync)]
+async fn plan_and_run(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+) -> Result<[u8; 1], Incomplete> {
+    let next = io.plan().await;
+    nitori_call::Child::new(next, &mut *io).await
+}
+
+mod opaque {
+    use super::*;
+    pub type Value = impl Sized;
+    #[define_opaque(Value)]
+    pub fn value() -> Value {
+        8_u8
+    }
+    /// An operation whose final value has an opaque type defined elsewhere.
+    #[call(sync)]
+    pub async fn opaque_value(
+        _io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    ) -> Value {
+        value()
+    }
+}
+
+#[test]
+fn an_operation_may_return_another_operation_or_an_opaque_value() {
+    let mut input = b"z".as_slice();
+    assert_eq!(input.sync_plan_and_run_unpin(), Ok(*b"z"));
+    use opaque::OpaqueValueHostExt as _;
+    let _: opaque::Value = input.sync_opaque_value_unpin();
 }

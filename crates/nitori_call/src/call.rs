@@ -5,8 +5,9 @@ use crate::{
     loan::RawViewLoan,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, UnsafeCell},
     convert::Infallible,
+    fmt,
     future::{Future, poll_fn},
     marker::{PhantomData, PhantomPinned},
     mem,
@@ -73,6 +74,11 @@ pub struct Emitter<'s, Y> {
 unsafe impl<Y: Send> Send for Emitter<'_, Y> {}
 // SAFETY: shared references expose nothing.
 unsafe impl<Y> Sync for Emitter<'_, Y> {}
+impl<Y> fmt::Debug for Emitter<'_, Y> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Emitter").finish_non_exhaustive()
+    }
+}
 impl<Y> Emitter<'_, Y> {
     pub(crate) fn new(cell: &ItemCell<Y>) -> Self {
         Self {
@@ -182,6 +188,34 @@ fn lend<'view, F: ReceiverFamily + 'view, T>(
     }
 }
 
+/// Storage for a value pinned in place that may hold references into itself,
+/// such as a running future. Safe code can take a shared reference to a
+/// pinned owner through `Pin`; without the cell that reference would assert
+/// that the value is not mutated, invalidating those references. Replace with
+/// `UnsafePinned` once it is stable.
+pub(crate) struct InPlace<T>(UnsafeCell<T>);
+impl<T> InPlace<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+    pub(crate) fn get_mut(&mut self) -> &mut T {
+        self.0.get_mut()
+    }
+    pub(crate) fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
+        // SAFETY: the value is pinned whenever its storage is.
+        unsafe { self.map_unchecked_mut(|this| this.0.get_mut()) }
+    }
+}
+
+/// The size hint of an operation's events: at least the final value until it
+/// has been delivered.
+pub(crate) fn remaining(terminated: bool) -> (usize, Option<usize>) {
+    match terminated {
+        true => (0, Some(0)),
+        false => (1, None),
+    }
+}
+
 pub(crate) enum State<Op, Fut, R> {
     Start(Op),
     Running(Fut),
@@ -253,6 +287,7 @@ pub(crate) unsafe fn poll_events<Op, Fut: Future, Y>(
 type Running<F, Op> = <Op as Start<'static, ReceiverSlot<'static, F>>>::Fut;
 type Output<F, Op> = <Op as Operation<F>>::Output;
 type Yield<F, Op> = <Op as Operation<F>>::Yield;
+type CallState<F, Op> = State<Op, Running<F, Op>, Output<F, Op>>;
 
 /// An operation and its cells, polled with a view supplied by the caller on
 /// each poll.
@@ -269,10 +304,11 @@ where
     Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
 {
     // Dropped before the cells its future points into.
-    state: State<Op, Running<F, Op>, Output<F, Op>>,
+    state: InPlace<CallState<F, Op>>,
     cell: ViewCell<F>,
     emitted: ItemCell<Yield<F, Op>>,
     poisoned: Cell<bool>,
+    finished: bool,
     _pinned: PhantomPinned,
 }
 // SAFETY: the running future is the operation's future for the call's slot.
@@ -291,6 +327,25 @@ where
     Yield<F, Op>: Send,
 {
 }
+// SAFETY: a shared reference only reads whether the call has finished, which
+// changes only through `Pin<&mut Self>`.
+unsafe impl<F, Op> Sync for Call<F, Op>
+where
+    F: ReceiverFamily,
+    Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
+{
+}
+impl<F, Op> fmt::Debug for Call<F, Op>
+where
+    F: ReceiverFamily,
+    Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Call")
+            .field("terminated", &self.finished)
+            .finish_non_exhaustive()
+    }
+}
 
 impl<F, Op> Call<F, Op>
 where
@@ -300,12 +355,19 @@ where
     /// Prepare a call. The operation starts on the first poll.
     pub fn new(operation: Op) -> Self {
         Self {
-            state: State::Start(operation),
+            state: InPlace::new(State::Start(operation)),
             cell: ViewCell::new(),
             emitted: ItemCell::new(),
             poisoned: Cell::new(false),
+            finished: false,
             _pinned: PhantomPinned,
         }
+    }
+
+    /// Whether the call has delivered its final value and must not be polled
+    /// again.
+    pub fn is_terminated(&self) -> bool {
+        self.finished
     }
 
     /// Advance the operation with this poll's view, if the caller has one.
@@ -336,13 +398,17 @@ where
         // pointers into the cells, so they are only accessed through shared
         // references.
         let this = unsafe { self.get_unchecked_mut() };
-        let (cell, emitted, poisoned, state) =
-            (&this.cell, &this.emitted, &this.poisoned, &mut this.state);
+        let (cell, emitted, poisoned, state) = (
+            &this.cell,
+            &this.emitted,
+            &this.poisoned,
+            this.state.get_mut(),
+        );
         if let State::Finished = state {
             panic!("call polled after completion");
         }
         emitted.set_discard(discard);
-        lend(cell, poisoned, view, cx.waker(), || {
+        let poll = lend(cell, poisoned, view, cx.waker(), || {
             let start = |operation: Op| {
                 // SAFETY: the call is pinned, so the cells keep their address,
                 // and the future holding the slot and the emitter is dropped
@@ -353,7 +419,9 @@ where
             };
             // SAFETY: the state is a field of the pinned call.
             unsafe { poll_events(state, emitted, start, cx) }
-        })
+        });
+        this.finished = matches!(poll, CallPoll::Ready(ControlFlow::Break(_)));
+        poll
     }
 
     /// Advance to the final value with this poll's view. Emitted items are

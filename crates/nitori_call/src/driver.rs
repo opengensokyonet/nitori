@@ -2,9 +2,13 @@
 //! Executors: values that run operations with their own access policy, so
 //! that `executor.operation(..).await` works whether the executor can lend a
 //! view at once or must acquire one.
-use crate::{Call, CallPoll, DynCall, Operation, Receiver, ReceiverFamily, ReceiverSlot, Start};
-use futures_core::Stream;
+use crate::{
+    Call, CallPoll, DynCall, Operation, Receiver, ReceiverFamily, ReceiverSlot, Start,
+    call::{InPlace, remaining},
+};
+use futures_core::{FusedFuture, FusedStream, Stream};
 use std::{
+    fmt,
     future::Future,
     marker::PhantomData,
     ops::ControlFlow,
@@ -80,7 +84,7 @@ pin_project_lite::pin_project! {
     pub struct AcquisitionState<F, Make, Acquire> {
         make: Make,
         #[pin]
-        pending: Option<Acquire>,
+        pending: InPlace<Option<Acquire>>,
         family: PhantomData<fn() -> F>,
     }
 }
@@ -88,9 +92,14 @@ impl<F, Make, Acquire> AcquisitionState<F, Make, Acquire> {
     pub fn new(make: Make) -> Self {
         Self {
             make,
-            pending: None,
+            pending: InPlace::new(None),
             family: PhantomData,
         }
+    }
+}
+impl<F, Make, Acquire> fmt::Debug for AcquisitionState<F, Make, Acquire> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AcquisitionState").finish_non_exhaustive()
     }
 }
 impl<'view, F, Make, Acquire> ViewAcquisition<'view> for AcquisitionState<F, Make, Acquire>
@@ -101,12 +110,13 @@ where
 {
     type Family = F;
     fn poll_acquire(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::ReceiverView<'view>> {
-        let mut this = self.project();
-        if this.pending.is_none() {
-            this.pending.set(Some((this.make)()));
+        let this = self.project();
+        let mut pending = this.pending.get_pin_mut();
+        if pending.is_none() {
+            pending.set(Some((this.make)()));
         }
-        let view = ready!(this.pending.as_mut().as_pin_mut().unwrap().poll(cx));
-        this.pending.set(None);
+        let view = ready!(pending.as_mut().as_pin_mut().unwrap().poll(cx));
+        pending.set(None);
         Poll::Ready(view)
     }
 }
@@ -126,6 +136,13 @@ pin_project_lite::pin_project! {
 impl<'source, 'view, S: ?Sized, F: ReceiverFamily + 'view> AcquiredScope<'source, 'view, S, F> {
     pub fn new(source: Pin<&'source mut S>) -> Self {
         Self { source, view: None }
+    }
+}
+impl<'view, S: ?Sized, F: ReceiverFamily + 'view> fmt::Debug for AcquiredScope<'_, 'view, S, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AcquiredScope")
+            .field("acquired", &self.view.is_some())
+            .finish_non_exhaustive()
     }
 }
 impl<'view, S, F> ReceiverScope<'view> for AcquiredScope<'_, 'view, S, F>
@@ -181,7 +198,6 @@ impl<R: Receiver + ?Sized> CallExecutor for R {
         BoundCall {
             host: self,
             call: Call::new(operation),
-            finished: false,
         }
     }
 }
@@ -194,29 +210,37 @@ where
 {
     host: Pin<&'a mut R>,
     call: Call<R::Family, Op>,
-    finished: bool,
+}
+// SAFETY: a shared reference only reads whether the call has finished.
+unsafe impl<R, Op> Sync for BoundCall<'_, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
 }
 impl<'a, R, Op> BoundCall<'a, R, Op>
 where
     R: Receiver + ?Sized,
     Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
 {
-    #[allow(clippy::type_complexity)]
-    fn project(
-        self: Pin<&mut Self>,
-    ) -> (
-        &mut Pin<&'a mut R>,
-        Pin<&mut Call<R::Family, Op>>,
-        &mut bool,
-    ) {
+    fn project(self: Pin<&mut Self>) -> (&mut Pin<&'a mut R>, Pin<&mut Call<R::Family, Op>>) {
         // SAFETY: the call is structurally pinned and never moved out; the
-        // other fields are not pinned.
+        // host is not pinned.
         let this = unsafe { self.get_unchecked_mut() };
-        (
-            &mut this.host,
-            unsafe { Pin::new_unchecked(&mut this.call) },
-            &mut this.finished,
-        )
+        (&mut this.host, unsafe {
+            Pin::new_unchecked(&mut this.call)
+        })
+    }
+}
+impl<R, Op> fmt::Debug for BoundCall<'_, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BoundCall")
+            .field("terminated", &self.call.is_terminated())
+            .finish_non_exhaustive()
     }
 }
 impl<R, Op> Future for BoundCall<'_, R, Op>
@@ -226,11 +250,9 @@ where
 {
     type Output = Output<R::Family, Op>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (host, call, finished) = self.project();
+        let (host, call) = self.project();
         let view = pin!(host.as_mut().view());
-        let poll = call.poll_return_with(Some(view), cx).lent();
-        *finished = poll.is_ready();
-        poll
+        call.poll_return_with(Some(view), cx).lent()
     }
 }
 impl<R, Op> Stream for BoundCall<'_, R, Op>
@@ -240,14 +262,33 @@ where
 {
     type Item = Event<R::Family, Op>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let (host, call, finished) = self.project();
-        if *finished {
+        let (host, call) = self.project();
+        if call.is_terminated() {
             return Poll::Ready(None);
         }
         let view = pin!(host.as_mut().view());
-        let event = ready!(call.poll_with(Some(view), cx).lent());
-        *finished = event.is_break();
-        Poll::Ready(Some(event))
+        call.poll_with(Some(view), cx).lent().map(Some)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        remaining(self.call.is_terminated())
+    }
+}
+impl<R, Op> FusedFuture for BoundCall<'_, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    fn is_terminated(&self) -> bool {
+        self.call.is_terminated()
+    }
+}
+impl<R, Op> FusedStream for BoundCall<'_, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    fn is_terminated(&self) -> bool {
+        self.call.is_terminated()
     }
 }
 
@@ -258,28 +299,43 @@ where
     S: ViewAcquisition<'view>,
     Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
 {
-    acquisition: S,
+    acquisition: InPlace<S>,
     call: Call<S::Family, Op>,
-    finished: bool,
     view: PhantomData<&'view ()>,
+}
+// SAFETY: a shared reference only reads whether the call has finished.
+unsafe impl<'view, S, Op> Sync for Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
 }
 impl<'view, S, Op> Drive<'view, S, Op>
 where
     S: ViewAcquisition<'view>,
     Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
 {
-    #[allow(clippy::type_complexity)]
-    fn project(self: Pin<&mut Self>) -> (Pin<&mut S>, Pin<&mut Call<S::Family, Op>>, &mut bool) {
+    fn project(self: Pin<&mut Self>) -> (Pin<&mut S>, Pin<&mut Call<S::Family, Op>>) {
         // SAFETY: the acquisition and the call are structurally pinned and
-        // never moved out; the flag is not pinned.
+        // never moved out.
         let this = unsafe { self.get_unchecked_mut() };
         unsafe {
             (
-                Pin::new_unchecked(&mut this.acquisition),
+                Pin::new_unchecked(this.acquisition.get_mut()),
                 Pin::new_unchecked(&mut this.call),
-                &mut this.finished,
             )
         }
+    }
+}
+impl<'view, S, Op> fmt::Debug for Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Drive")
+            .field("terminated", &self.call.is_terminated())
+            .finish_non_exhaustive()
     }
 }
 impl<'view, S, Op> Future for Drive<'view, S, Op>
@@ -289,11 +345,9 @@ where
 {
     type Output = Output<S::Family, Op>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (acquisition, call, finished) = self.project();
+        let (acquisition, call) = self.project();
         let scope = pin!(AcquiredScope::<_, S::Family>::new(acquisition));
-        let poll = poll_return_call(scope, call, cx);
-        *finished = poll.is_ready();
-        poll
+        poll_return_call(scope, call, cx)
     }
 }
 impl<'view, S, Op> Stream for Drive<'view, S, Op>
@@ -303,14 +357,33 @@ where
 {
     type Item = Event<S::Family, Op>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let (acquisition, call, finished) = self.project();
-        if *finished {
+        let (acquisition, call) = self.project();
+        if call.is_terminated() {
             return Poll::Ready(None);
         }
         let scope = pin!(AcquiredScope::<_, S::Family>::new(acquisition));
-        let event = ready!(scope.poll_call(call, cx));
-        *finished = event.is_break();
-        Poll::Ready(Some(event))
+        scope.poll_call(call, cx).map(Some)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        remaining(self.call.is_terminated())
+    }
+}
+impl<'view, S, Op> FusedFuture for Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    fn is_terminated(&self) -> bool {
+        self.call.is_terminated()
+    }
+}
+impl<'view, S, Op> FusedStream for Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    fn is_terminated(&self) -> bool {
+        self.call.is_terminated()
     }
 }
 
@@ -321,9 +394,8 @@ where
     Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
 {
     Drive {
-        acquisition,
+        acquisition: InPlace::new(acquisition),
         call: Call::new(operation),
-        finished: false,
         view: PhantomData,
     }
 }

@@ -1,6 +1,6 @@
 //! Pinned views whose inner lifetime is hidden behind a visit.
 use crate::{Access, ReceiverFamily};
-use std::{marker::PhantomData, pin::Pin};
+use std::{fmt, marker::PhantomData, pin::Pin};
 
 /// A synchronous operation on a view. Its result cannot borrow the view.
 pub trait ViewOperation<F: ReceiverFamily> {
@@ -105,6 +105,11 @@ impl<F: ReceiverFamily> RawViewLoan<F> {
 pub struct ViewLoan<'scope, F: ReceiverFamily> {
     raw: RawViewLoan<F>,
     borrow: PhantomData<&'scope mut ()>,
+}
+impl<F: ReceiverFamily> fmt::Debug for ViewLoan<'_, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ViewLoan").finish_non_exhaustive()
+    }
 }
 impl<'scope, F: ReceiverFamily + 'scope> ViewLoan<'scope, F> {
     pub fn new<'parent: 'scope>(view: Pin<&'scope mut F::ReceiverView<'parent>>) -> Self

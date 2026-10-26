@@ -55,6 +55,7 @@ where
 
 /// An access adapted by composition state. It borrows its parent mutably,
 /// so the parent is unavailable while the adapted access exists.
+#[derive(Debug)]
 pub struct Composed<'p, A: ?Sized, S> {
     parent: &'p mut A,
     state: S,

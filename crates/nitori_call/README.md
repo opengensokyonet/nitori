@@ -90,7 +90,10 @@ operation needs. Outputs and items may mention the access only through
 `#[call]` keeps the function and generates:
 
 - the operation struct `ReadRecord`, named after the function, with the other
-  arguments as public fields and a `new` constructor;
+  arguments as public fields and a `new` constructor; an argument written as a
+  pattern, such as `(start, end): (u8, u8)`, is destructured by the function
+  and its field is named `argument_N` after its position, counting the access
+  as 0;
 - `ReadRecordExt`, with the method `io.read_record(..)` on receiver accesses
   inside other operations;
 - `ReadRecordHostExt`, with `read_record` on a pinned executor and
@@ -298,7 +301,7 @@ type can be named, so a call can be a field of a connection that lends another
 of its fields on each poll; successive polls may lend views of different
 resources. A call is `Send` when everything its operation keeps apart from the
 access is `Send`, even if the resource is not. `DynCall` is its dyn-compatible
-form.
+form. `is_terminated` tells whether the call has delivered its final value.
 
 ## Executors
 
@@ -316,4 +319,57 @@ Waiting for anything else holds nothing. The
 [executor tests](tests/executor.rs) lend one acquired view to several calls in
 one pass.
 
-Dropping a call cancels it without rolling back completed IO.
+Each poll of an execution is separate, so reading one as a stream releases the
+view after every item: the reader may wait for something else before it asks
+for the next one. To let the items that are ready in one poll share an
+acquisition, read them inside an operation, which keeps the view for its whole
+poll:
+
+```rust
+#![feature(impl_trait_in_assoc_type, yield_expr)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{Read, calls::{ReadArrayExt as _, ReadExactError, ReadExactExt as _}};
+use std::{ops::ControlFlow, pin::pin};
+
+/// Length-prefixed records, until an empty one.
+#[call(yields = Vec<u8>)]
+async fn read_records<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+) -> Result<(), ReadExactError<<A::Family as Read>::Error>> {
+    loop {
+        let [length] = io.read_array::<1>().await?;
+        if length == 0 {
+            return Ok(());
+        }
+        let mut record = Vec::new();
+        io.read_exact(&mut record, usize::from(length)).await?;
+        yield record;
+    }
+}
+
+#[call(sync)]
+async fn collect_records<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+    records: &mut Vec<Vec<u8>>,
+) -> Result<(), ReadExactError<<A::Family as Read>::Error>> {
+    let mut items = pin!(io.read_records());
+    while let Some(event) = items.as_mut().next().await {
+        match event {
+            ControlFlow::Continue(record) => records.push(record),
+            ControlFlow::Break(result) => return result,
+        }
+    }
+    unreachable!("the final value ends the stream")
+}
+
+fn main() {
+    let mut input = b"\x01a\x02bc\x00".as_slice();
+    let mut records = Vec::new();
+    input.sync_collect_records_unpin(&mut records).unwrap();
+    assert_eq!(records, [b"a".to_vec(), b"bc".to_vec()]);
+}
+```
+
+`BoundCall`, `Drive` and `Child` implement `FusedFuture` and `FusedStream`, as
+`futures::select!` requires. Dropping a call cancels it without rolling back
+completed IO.

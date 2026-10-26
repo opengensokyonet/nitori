@@ -155,8 +155,10 @@ pub use driver::{
 /// receiver access first.
 ///
 /// The operation is a struct named after the function in CamelCase, with the
-/// remaining arguments as fields. Users of the macro enable
-/// `impl_trait_in_assoc_type`.
+/// remaining arguments as fields. An argument written as a pattern, such as
+/// `(start, end): (u8, u8)` or `_: u8`, is passed to the function whole and
+/// named `argument_N` after its position in the parameter list, counting the
+/// access as 0. Users of the macro enable `impl_trait_in_assoc_type`.
 ///
 /// With `yields = Item`, each `yield value` written directly in the function
 /// body emits an item, and the return value is the final value. The crate
@@ -204,6 +206,15 @@ pub use driver::{
 /// async fn nested(io: &mut impl ReceiverAccess<Family: Sized>) {
 ///     let emit = || yield 1;
 /// }
+/// ```
+///
+/// A parameter may not take the name of a destructured argument:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn clash(io: &mut impl ReceiverAccess<Family: Sized>, (a, b): (u8, u8), argument_1: u8) {}
 /// ```
 ///
 /// Without `sync`, there are no synchronous host methods:

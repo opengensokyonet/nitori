@@ -586,10 +586,8 @@ fn primitive(
             "a poll method takes the view and the context first",
         ));
     };
-    let mut arguments = Vec::new();
-    for input in inputs {
-        arguments.push(argument(input)?);
-    }
+    // The view and the context come first.
+    let mut arguments = arguments(inputs, 2)?;
     let lifetimes = name_lifetimes(&mut arguments, &[], Tokens::new());
     for argument in &arguments {
         let ty = &argument.ty;
@@ -759,10 +757,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         ));
     };
     let mut yield_type = options.yields.clone();
-    let mut arguments = Vec::new();
-    for input in inputs {
-        arguments.push(argument(input)?);
-    }
+    let mut arguments = arguments(inputs, 1)?;
 
     let mut generics = signature.generics.clone();
     let (access_name, family_bounds) = take_access_bounds(&access.ty, &mut generics)?;
@@ -1209,23 +1204,52 @@ fn is_ident(ty: &Type, ident: &Ident) -> bool {
     matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.is_ident(ident))
 }
 
-fn argument(input: &FnArg) -> Result<Argument> {
-    let FnArg::Typed(typed) = input else {
-        return Err(Error::new(
-            input.span(),
-            "operations take no self parameter",
-        ));
-    };
-    let Pat::Ident(pattern) = &*typed.pat else {
-        return Err(Error::new(
-            typed.pat.span(),
-            "operation arguments must be named",
-        ));
-    };
-    Ok(Argument {
-        name: pattern.ident.clone(),
-        ty: (*typed.ty).clone(),
-    })
+/// The arguments of an operation, from the parameters after the first
+/// `first` ones. The function destructures an argument written as a pattern
+/// itself; its field and method parameter are named `argument_N` after its
+/// position in the parameter list.
+fn arguments<'a>(inputs: impl Iterator<Item = &'a FnArg>, first: usize) -> Result<Vec<Argument>> {
+    let typed = inputs
+        .map(|input| match input {
+            FnArg::Typed(typed) => Ok(typed),
+            FnArg::Receiver(_) => Err(Error::new(
+                input.span(),
+                "operations take no self parameter",
+            )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let written: Vec<&Ident> = typed
+        .iter()
+        .filter_map(|typed| match &*typed.pat {
+            Pat::Ident(pattern) => Some(&pattern.ident),
+            _ => None,
+        })
+        .collect();
+    (first..)
+        .zip(typed)
+        .map(|(position, typed)| {
+            let name = match &*typed.pat {
+                Pat::Ident(pattern) => pattern.ident.clone(),
+                pattern => {
+                    let name = format_ident!("argument_{position}", span = pattern.span());
+                    if let Some(taken) = written.iter().find(|written| ***written == name) {
+                        return Err(Error::new(
+                            taken.span(),
+                            format!(
+                                "`{name}` names the destructured argument at position \
+                                 {position}; rename this parameter"
+                            ),
+                        ));
+                    }
+                    name
+                }
+            };
+            Ok(Argument {
+                name,
+                ty: (*typed.ty).clone(),
+            })
+        })
+        .collect()
 }
 
 /// Name elided lifetimes in argument types; return them with the declared

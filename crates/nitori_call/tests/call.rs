@@ -1,7 +1,7 @@
 #![feature(impl_trait_in_assoc_type)]
 mod support;
 
-use futures_core::Stream;
+use futures_core::{FusedStream, Stream};
 use nitori_call::{
     Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Operation, Receiver,
     ReceiverAccess, ReceiverFamily, Start, call, direct_receiver,
@@ -411,6 +411,89 @@ fn a_call_is_poisoned_by_a_panic() {
 }
 
 fn assert_send<T: Send>(_: &T) {}
+fn assert_sync<T: Sync>(_: &T) {}
+
+/// Counts bytes until the end of input through a borrow of its own local,
+/// written before and after each wait.
+#[call]
+async fn count_bytes(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> usize {
+    let mut count = 0;
+    let counter = &mut count;
+    while read_array::<1, _>(io).await.is_ok() {
+        *counter += 1;
+    }
+    count
+}
+
+#[test]
+fn a_shared_reference_to_a_running_call_leaves_it_intact() {
+    let mut feed = Feed::new(b"ab");
+    let mut call = pin!(Call::new(CountBytes::new()));
+    assert!(poll(call.as_mut(), Pin::new(&mut feed)).is_pending());
+    // Safe code can borrow a pinned call.
+    let shared: &Call<_, _> = &call;
+    assert!(!shared.is_terminated());
+    assert_eq!(format!("{shared:?}"), "Call { terminated: false, .. }");
+    feed.data.push_back(b'c');
+    feed.closed = true;
+    assert_eq!(poll(call.as_mut(), Pin::new(&mut feed)), Poll::Ready(3));
+    assert!(call.is_terminated());
+}
+
+#[test]
+fn a_call_is_sync_even_if_its_operation_is_not() {
+    let pending = Cell::new(false);
+    assert_sync(&Call::<Memory, _>::new(AccessWhenDropped::new(&pending)));
+}
+
+/// Emits a countdown and returns how many items it emitted, counting them
+/// through a borrow of its own local written before each emission.
+struct Countdown(u8);
+impl<F: ReceiverFamily> Operation<F> for Countdown {
+    type Output = u8;
+    type Yield = u8;
+}
+impl<'s, A: ReceiverAccess> Start<'s, A> for Countdown {
+    type Fut = impl Future<Output = u8>;
+    fn start(self, _: A, mut emitter: Emitter<'s, u8>) -> Self::Fut {
+        async move {
+            let mut emitted = 0;
+            let counter = &mut emitted;
+            for item in (0..self.0).rev() {
+                *counter += 1;
+                emitter.emit(item).await;
+            }
+            emitted
+        }
+    }
+}
+
+/// Whether the child has terminated, and its size hint, before and after
+/// each event.
+#[call]
+async fn observe_child(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+) -> Vec<(bool, (usize, Option<usize>))> {
+    let mut child = pin!(Child::new(Countdown(2), &mut *io));
+    let observe = |child: &Child<_, _>| (FusedStream::is_terminated(child), child.size_hint());
+    let mut seen = vec![observe(&child)];
+    while poll_fn(|cx| child.as_mut().poll_next(cx)).await.is_some() {
+        seen.push(observe(&child));
+    }
+    assert_eq!(format!("{child:?}"), "Child { terminated: true, .. }");
+    seen
+}
+
+#[test]
+fn a_child_reports_when_it_has_terminated() {
+    let mut input = b"".as_slice();
+    let mut call = pin!(Call::new(ObserveChild::new()));
+    let running = (false, (1, None));
+    assert_eq!(
+        poll(call.as_mut(), Pin::new(&mut input)),
+        Poll::Ready(vec![running, running, running, (true, (0, Some(0)))])
+    );
+}
 
 #[test]
 fn a_call_over_a_generic_family_is_send() {

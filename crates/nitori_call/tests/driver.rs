@@ -4,7 +4,7 @@
 mod support;
 
 use bytes::BufMut;
-use futures_core::Stream;
+use futures_core::{FusedFuture, FusedStream, Stream};
 use nitori_call::{
     AcquisitionState, CallExecutor, Operation, ReceiverAccess, ReceiverFamily, ReceiverSlot, Start,
     call, drive,
@@ -218,6 +218,48 @@ fn waiting_for_something_else_acquires_nothing() {
     assert_eq!(output, b"q");
 }
 
+/// Writes through a borrow of its own local before and after a wait that
+/// needs no resource.
+#[call]
+async fn read_record_counted(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    gate: &Gate,
+) -> Result<Vec<u8>, ReadError<Infallible>> {
+    let mut record = vec![0];
+    let output = &mut record;
+    output.clear();
+    gate.wait().await;
+    read_record(io, output).await?;
+    Ok(record)
+}
+
+#[test]
+fn shared_references_to_running_executions_leave_them_intact() {
+    let gate = Gate::default();
+    let mut input = b"\x01q".as_slice();
+    let pipe = Mutex::new(Pipe::default());
+    pipe.try_lock().unwrap().push(b"\x01r");
+    let acquisition =
+        AcquisitionState::<Locked, _, _>::new(|| async { PipeGuard(pipe.lock().await) });
+    {
+        let mut bound = pin!(input.read_record_counted_unpin(&gate));
+        let mut driven = pin!(drive(acquisition, ReadRecordCounted::new(&gate)));
+        assert!(poll_once(bound.as_mut()).is_pending());
+        assert!(poll_once(driven.as_mut()).is_pending());
+        // Safe code can borrow pinned executions.
+        assert!(!FusedFuture::is_terminated(&*bound));
+        assert!(!FusedFuture::is_terminated(&*driven));
+        assert_eq!(format!("{bound:?}"), "BoundCall { terminated: false, .. }");
+        assert_eq!(format!("{driven:?}"), "Drive { terminated: false, .. }");
+        gate.open.set(true);
+        assert_eq!(poll_once(bound.as_mut()), Poll::Ready(Ok(b"q".to_vec())));
+        assert_eq!(poll_once(driven.as_mut()), Poll::Ready(Ok(b"r".to_vec())));
+        assert!(FusedFuture::is_terminated(&*bound));
+        assert!(FusedStream::is_terminated(&*driven));
+        assert_eq!(driven.size_hint(), (0, Some(0)));
+    }
+}
+
 /// Records as items until an empty one, then how many there were.
 #[call(yields = Vec<u8>)]
 async fn read_records(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> usize {
@@ -259,4 +301,35 @@ fn an_executor_delivers_items_as_a_stream_and_releases_the_lock_between_them() {
     assert_eq!(next(), Poll::Ready(Some(ControlFlow::Break(2))));
     assert_eq!(next(), Poll::Ready(None));
     assert_eq!(acquisitions.get(), 4);
+}
+
+/// Reads the records as a stream inside the operation, so the records ready
+/// in one poll share one acquisition.
+#[call]
+async fn collect_records(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+) -> Vec<Vec<u8>> {
+    let mut records = pin!(io.read_records());
+    let mut collected = Vec::new();
+    while let Some(ControlFlow::Continue(record)) = records.as_mut().next().await {
+        collected.push(record);
+    }
+    collected
+}
+
+#[test]
+fn items_read_inside_an_operation_share_an_acquisition() {
+    let pipe = Mutex::new(Pipe::default());
+    pipe.try_lock().unwrap().push(b"\x01a\x01b\x00");
+    let acquisitions = Cell::new(0);
+    let mut reader = Reader {
+        pipe: &pipe,
+        acquisitions: &acquisitions,
+    };
+    let mut records = pin!(reader.collect_records_unpin());
+    assert_eq!(
+        poll_once(records.as_mut()),
+        Poll::Ready(vec![b"a".to_vec(), b"b".to_vec()])
+    );
+    assert_eq!(acquisitions.get(), 1);
 }

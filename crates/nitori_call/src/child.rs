@@ -1,10 +1,11 @@
 //! An emitting operation started on its parent's access.
 use crate::{
     Emitter, Operation, ReceiverAccess, Start,
-    call::{ItemCell, State, poll_events},
+    call::{InPlace, ItemCell, State, poll_events, remaining},
 };
-use futures_core::Stream;
+use futures_core::{FusedFuture, FusedStream, Stream};
 use std::{
+    fmt,
     future::Future,
     marker::PhantomPinned,
     ops::ControlFlow,
@@ -15,6 +16,7 @@ use std::{
 type Running<A, Op> = <Op as Start<'static, A>>::Fut;
 type Output<A, Op> = <Op as Operation<<A as ReceiverAccess>::Family>>::Output;
 type Yield<A, Op> = <Op as Operation<<A as ReceiverAccess>::Family>>::Yield;
+type ChildState<A, Op> = State<(Op, A), Running<A, Op>, Output<A, Op>>;
 
 /// An emitting operation running on an access borrowed from its parent, with
 /// a cell of its own for its items.
@@ -28,9 +30,29 @@ where
     Op: for<'e> Start<'e, A>,
 {
     // Dropped before the cell its future points into.
-    state: State<(Op, A), Running<A, Op>, Output<A, Op>>,
+    state: InPlace<ChildState<A, Op>>,
     emitted: ItemCell<Yield<A, Op>>,
+    finished: bool,
     _pinned: PhantomPinned,
+}
+// SAFETY: a shared reference only reads whether the child has finished, which
+// changes only through `Pin<&mut Self>`.
+unsafe impl<A, Op> Sync for Child<A, Op>
+where
+    A: ReceiverAccess,
+    Op: for<'e> Start<'e, A>,
+{
+}
+impl<A, Op> fmt::Debug for Child<A, Op>
+where
+    A: ReceiverAccess,
+    Op: for<'e> Start<'e, A>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Child")
+            .field("terminated", &self.finished)
+            .finish_non_exhaustive()
+    }
 }
 impl<A, Op> Child<A, Op>
 where
@@ -39,8 +61,9 @@ where
 {
     pub fn new(operation: Op, access: A) -> Self {
         Self {
-            state: State::Start((operation, access)),
+            state: InPlace::new(State::Start((operation, access))),
             emitted: ItemCell::new(),
+            finished: false,
             _pinned: PhantomPinned,
         }
     }
@@ -61,13 +84,15 @@ where
         // pointer into the cell, which is only accessed through shared
         // references.
         let this = unsafe { self.get_unchecked_mut() };
-        let (emitted, state) = (&this.emitted, &mut this.state);
+        let (emitted, state) = (&this.emitted, this.state.get_mut());
         emitted.set_discard(discard);
         // `Op: for<'e> Start` keeps the operation from relying on the 'static
         // brand chosen for storage; the future is dropped before the cell.
         let start = |(operation, access): (Op, A)| operation.start(access, Emitter::new(emitted));
         // SAFETY: the state is a field of the pinned child.
-        unsafe { poll_events(state, emitted, start, cx) }
+        let poll = unsafe { poll_events(state, emitted, start, cx) };
+        this.finished = matches!(poll, Poll::Ready(ControlFlow::Break(_)));
+        poll
     }
 }
 impl<A, Op> Future for Child<A, Op>
@@ -90,15 +115,30 @@ where
 {
     type Item = ControlFlow<Output<A, Op>, Yield<A, Op>>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // SAFETY: as in `poll_event`. A shared reference to the whole child
-        // would invalidate the running future's references into itself.
-        let this = unsafe { self.get_unchecked_mut() };
-        if let State::Finished = this.state {
+        if self.finished {
             return Poll::Ready(None);
         }
-        // SAFETY: the child was pinned and is not moved.
-        unsafe { Pin::new_unchecked(this) }
-            .poll_event(false, cx)
-            .map(Some)
+        self.poll_event(false, cx).map(Some)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        remaining(self.finished)
+    }
+}
+impl<A, Op> FusedFuture for Child<A, Op>
+where
+    A: ReceiverAccess,
+    Op: for<'e> Start<'e, A>,
+{
+    fn is_terminated(&self) -> bool {
+        self.finished
+    }
+}
+impl<A, Op> FusedStream for Child<A, Op>
+where
+    A: ReceiverAccess,
+    Op: for<'e> Start<'e, A>,
+{
+    fn is_terminated(&self) -> bool {
+        self.finished
     }
 }

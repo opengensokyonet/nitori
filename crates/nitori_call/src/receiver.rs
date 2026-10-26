@@ -23,6 +23,7 @@ pub trait ReceiverFamily: Sized {
 
 /// A family whose views are pinned borrows of one resource type.
 pub struct Direct<T: ?Sized>(PhantomData<fn(&T)>);
+#[derive(Debug)]
 pub struct DirectView<'visit, T: ?Sized>(pub Pin<&'visit mut T>);
 impl<T: ?Sized> ReceiverFamily for Direct<T> {
     type ReceiverView<'visit>
@@ -99,6 +100,7 @@ direct_receiver!(impl [] for i32);
 direct_receiver!(impl [T] for std::cell::Cell<T>);
 
 /// A pinned resource borrow that keeps the resource's canonical family.
+#[derive(Debug)]
 pub struct BorrowedReceiver<'visit, H: Receiver + ?Sized>(pub Pin<&'visit mut H>);
 impl<H: Receiver + ?Sized> Receiver for BorrowedReceiver<'_, H> {
     type Family = H::Family;

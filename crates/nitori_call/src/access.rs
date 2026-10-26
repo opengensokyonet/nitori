@@ -2,6 +2,7 @@
 use crate::{Compose, Composed, ReceiverFamily, ViewOperation, loan::RawViewLoan};
 use std::{
     cell::Cell,
+    fmt,
     marker::PhantomData,
     pin::Pin,
     ptr,
@@ -14,6 +15,14 @@ use std::{
 /// callback result cannot borrow the temporary access.
 pub struct Access<'a, 'h, F: ReceiverFamily + 'h> {
     view: Pin<&'a mut F::ReceiverView<'h>>,
+}
+impl<'h, F: ReceiverFamily + 'h> fmt::Debug for Access<'_, 'h, F>
+where
+    F::ReceiverView<'h>: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Access").field("view", &self.view).finish()
+    }
 }
 impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
     pub fn new(view: Pin<&'a mut F::ReceiverView<'h>>) -> Self {
@@ -214,6 +223,12 @@ unsafe impl<F: ReceiverFamily> Send for ReceiverSlot<'_, F, Probe> {}
 // SAFETY: as above.
 unsafe impl<F: ReceiverFamily> Sync for ReceiverSlot<'_, F, Probe> {}
 
+#[allow(private_bounds)]
+impl<F: ReceiverFamily, M: Mode> fmt::Debug for ReceiverSlot<'_, F, M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiverSlot").finish_non_exhaustive()
+    }
+}
 #[allow(private_bounds)]
 impl<F: ReceiverFamily, M: Mode> ReceiverSlot<'_, F, M> {
     /// # Safety
