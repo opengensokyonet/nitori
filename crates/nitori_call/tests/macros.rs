@@ -701,3 +701,65 @@ fn an_operation_may_return_another_operation_or_an_opaque_value() {
     use opaque::OpaqueValueHostExt as _;
     let _: opaque::Value = input.sync_opaque_value_unpin();
 }
+
+/// A capability whose primitive takes a value of a type the family defines.
+#[capability(sync)]
+pub trait Append: ReceiverFamily {
+    type Item;
+    fn poll_append<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        item: &Self::Item,
+    ) -> Poll<usize>
+    where
+        Self: 'visit;
+}
+impl Append for Direct<Vec<u16>> {
+    type Item = u16;
+    fn poll_append<'visit>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        _: &mut Context<'_>,
+        item: &u16,
+    ) -> Poll<usize>
+    where
+        Self: 'visit,
+    {
+        let items = host.get_mut().0.as_mut().get_mut();
+        items.push(*item);
+        Poll::Ready(items.len())
+    }
+}
+
+/// A derived operation whose argument has a type the family defines.
+#[call(sync)]
+async fn append_twice<A: ReceiverAccess<Family: Append>>(
+    io: &mut A,
+    item: &<A::Family as Append>::Item,
+) -> usize {
+    io.append(item).await;
+    io.append(item).await
+}
+
+#[test]
+fn arguments_may_depend_on_the_family() {
+    let mut items: Vec<u16> = Vec::new();
+    assert_eq!(items.sync_append_unpin(&1), 1);
+    assert_eq!(items.sync_append_twice_unpin(&2), 3);
+    // Built directly, the operation names its family.
+    let mut call = pin!(Call::<Direct<Vec<u16>>, _>::new(AppendTwice::new(&3)));
+    let result = call.as_mut().poll_return_with(
+        Some(pin!(Pin::new(&mut items).view())),
+        &mut Context::from_waker(Waker::noop()),
+    );
+    assert_eq!(result, CallPoll::Ready(5));
+    assert_eq!(items, [1, 2, 2, 3, 3]);
+    let _: append::Append<'_, Direct<Vec<u16>>> = append::Append::new(&4);
+}
+
+#[test]
+fn a_call_with_family_dependent_arguments_is_send() {
+    fn build<F: Append<Item: Sync>>(item: &F::Item) {
+        assert_send(&Call::<F, _>::new(AppendTwice::<F>::new(item)));
+    }
+    build::<Direct<Vec<u16>>>(&1);
+}

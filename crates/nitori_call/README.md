@@ -84,8 +84,9 @@ fn main() {
 
 The first parameter is the access, `&mut impl ReceiverAccess<Family: ..>` or
 `&mut A` with such a bound; the family bound says which capabilities the
-operation needs. Outputs and items may mention the access only through
-`A::Family`. Crates that define operations enable `impl_trait_in_assoc_type`.
+operation needs. Arguments, outputs and items may mention the access only
+through `A::Family`. Crates that define operations enable
+`impl_trait_in_assoc_type`.
 
 `#[call]` keeps the function and generates:
 
@@ -93,7 +94,10 @@ operation needs. Outputs and items may mention the access only through
   arguments as public fields and a `new` constructor; an argument written as a
   pattern, such as `(start, end): (u8, u8)`, is destructured by the function
   and its field is named `argument_N` after its position, counting the access
-  as 0;
+  as 0. When an argument's type mentions `A::Family`, the struct takes the
+  family as a last type parameter `Family` and is an operation of that family
+  only. Built directly rather than through the generated methods, it needs
+  the family named, as in `Call::<F, _>::new(..)`;
 - `ReadRecordExt`, with the method `io.read_record(..)` on receiver accesses
   inside other operations;
 - `ReadRecordHostExt`, with `read_record` on a pinned executor and
@@ -132,7 +136,9 @@ primitive operation `Name`, which is also its future, and generates `{Trait}Ext`
 and `{Trait}HostExt` the same way `#[call]` does. The structs go into a module
 named after the trait in snake case, `module = name` or `module = self` choose
 another. Type and const parameters of the trait become parameters of the
-structs and of the traits; lifetime parameters are not supported.
+structs and of the traits; lifetime parameters are not supported. A poll method
+whose arguments mention `Self`, such as `item: &Self::Item`, gives its struct a
+`Family` parameter, as with `#[call]`.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
@@ -369,6 +375,13 @@ fn main() {
     assert_eq!(records, [b"a".to_vec(), b"bc".to_vec()]);
 }
 ```
+
+An operation that needs two resources behind separate locks has two choices.
+A family whose view holds both guards acquires them together, in a fixed
+order, and lends both for the same polls. Or the operation runs a nested
+`drive(acquisition, operation)` for the second resource, which acquires it
+only for the polls that use it; the first resource is not held while the
+nested operation waits. The [driver tests](tests/driver.rs) show both.
 
 `BoundCall`, `Drive` and `Child` implement `FusedFuture` and `FusedStream`, as
 `futures::select!` requires. Dropping a call cancels it without rolling back

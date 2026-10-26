@@ -116,6 +116,9 @@ struct Operation {
     /// For capability operations, the trait as named from the current module.
     capability: Option<Path>,
     arguments: Vec<Argument>,
+    /// The family as a parameter of the struct, when an argument's type
+    /// depends on it.
+    family_parameter: Option<Ident>,
     output: Type,
     /// The item type of an emitter parameter, for operations that emit.
     yield_type: Option<Type>,
@@ -136,8 +139,17 @@ impl Operation {
             .map(|argument| &argument.name)
             .collect()
     }
-    fn types(&self) -> Vec<&Type> {
-        self.arguments.iter().map(|argument| &argument.ty).collect()
+    /// Argument types with the family of the current context.
+    fn types(&self, family: &Type, place: Place) -> Vec<Type> {
+        self.arguments
+            .iter()
+            .map(|argument| self.substitute(argument.ty.clone(), family, place))
+            .collect()
+    }
+    /// The family as named inside impls over the struct, if it is a parameter.
+    fn family_parameter_type(&self) -> Option<Type> {
+        let family = self.family_parameter.as_ref()?;
+        Some(parse_quote!(#family))
     }
     fn capability_at(&self, place: Place) -> Option<Path> {
         let capability = self.capability.as_ref()?;
@@ -197,13 +209,32 @@ impl Operation {
     fn parameters(&self) -> Tokens {
         let lifetimes = &self.lifetimes;
         let values = self.value_parameters();
-        quote!(#(#lifetimes,)* #(#values,)*)
+        let family = self.family_parameter.as_ref().map(|family| {
+            let bounds = self.family_bound_tokens(Place::Inside);
+            quote!(#family: #bounds,)
+        });
+        quote!(#(#lifetimes,)* #(#values,)* #family)
     }
-    /// Generic arguments of the struct, without the access.
+    /// Generic arguments of the struct inside impls over it, without the access.
     fn arguments(&self) -> Tokens {
+        let family = self.family_parameter_type();
+        self.arguments_for(family.as_ref())
+    }
+    /// Generic arguments of the struct where its family is `family`.
+    fn arguments_for(&self, family: Option<&Type>) -> Tokens {
         let lifetimes = self.lifetime_names();
         let values = self.value_arguments();
-        quote!(#(#lifetimes,)* #(#values,)*)
+        let family = self.family_parameter.as_ref().map(|_| {
+            let family = family.expect("the family of a struct with a family parameter");
+            quote!(#family,)
+        });
+        quote!(#(#lifetimes,)* #(#values,)* #family)
+    }
+    /// The predicate tying an access to the struct's family parameter.
+    fn access_family_predicate(&self, access: &Tokens) -> Option<Tokens> {
+        let runtime = runtime();
+        let family = self.family_parameter.as_ref()?;
+        Some(quote!(#access: #runtime::ReceiverAccess<Family = #family>,))
     }
     fn all_predicates(&self) -> Vec<WherePredicate> {
         [&self.trait_generics, &self.method_generics]
@@ -256,6 +287,7 @@ impl Operation {
                 GenericParam::Type(parameter) => Some(&parameter.ident),
                 _ => None,
             })
+            .chain(&self.family_parameter)
             .collect();
         if lifetimes.is_empty() && types.is_empty() {
             return None;
@@ -279,7 +311,8 @@ impl Operation {
         let parameters = self.parameters();
         let arguments = self.arguments();
         let names = self.names();
-        let types = self.types();
+        let field_family = self.family_parameter_type().unwrap_or(parse_quote!(Self));
+        let types = self.types(&field_family, Place::Inside);
         let predicates = self.struct_predicates();
         let (marker, marker_init) = self.marker().unzip();
         let (access_parameter, access_field, access_init) = if access {
@@ -291,8 +324,13 @@ impl Operation {
         } else {
             Default::default()
         };
-        let family: Type = parse_quote!(__F);
-        let family_bounds = self.family_bound_tokens(Place::Inside);
+        let (family, family_parameter): (Type, Tokens) = match self.family_parameter_type() {
+            Some(family) => (family, Tokens::new()),
+            None => {
+                let bounds = self.family_bound_tokens(Place::Inside);
+                (parse_quote!(__F), quote!(__F: #bounds))
+            }
+        };
         let family_predicates = self.family_predicates(&family, Place::Inside);
         let output = self.substitute(self.output.clone(), &family, Place::Inside);
         let yield_type = match &self.yield_type {
@@ -320,7 +358,7 @@ impl Operation {
                     Self { #access_init #(#names,)* #marker_init }
                 }
             }
-            impl<#parameters __F: #family_bounds> #runtime::Operation<__F> for #name<#arguments>
+            impl<#parameters #family_parameter> #runtime::Operation<#family> for #name<#arguments>
             where #(#family_predicates,)*
             {
                 type Output = #output;
@@ -365,14 +403,14 @@ impl Operation {
         let family: Type = parse_quote!(<Self as #runtime::CallExecutor>::Family);
         let path = self.struct_path();
         let names = self.names();
-        let types = self.types();
+        let types = self.types(&family, Place::Outside);
         let output = self.substitute(self.output.clone(), &family, Place::Outside);
         let name = &self.name;
         let unpin = format_ident!("{}_unpin", name);
         let lifetimes = &self.lifetimes;
         let parameters = &self.method_generics.params;
         let predicates = self.predicates(&self.method_generics, &family, Place::Outside);
-        let arguments = self.arguments();
+        let arguments = self.arguments_for(Some(&family));
         let mut methods = quote! {
             fn #name<'__d, #(#lifetimes,)* #parameters>(
                 self: ::core::pin::Pin<&'__d mut Self>,
@@ -589,15 +627,7 @@ fn primitive(
     // The view and the context come first.
     let mut arguments = arguments(inputs, 2)?;
     let lifetimes = name_lifetimes(&mut arguments, &[], Tokens::new());
-    for argument in &arguments {
-        let ty = &argument.ty;
-        if mentions(quote!(#ty), "Self") {
-            return Err(Error::new(
-                ty.span(),
-                "operation arguments cannot depend on the family",
-            ));
-        }
-    }
+    let family_parameter = family_parameter(&arguments, &item.generics)?;
     let output = poll_output(&signature.output)?;
 
     // The view lifetime and `Self: 'view` belong to the poll, not the operation.
@@ -633,6 +663,7 @@ fn primitive(
         family_bounds: Punctuated::new(),
         capability: Some(capability.clone()),
         arguments,
+        family_parameter,
         output,
         yield_type: None,
         sync,
@@ -649,6 +680,7 @@ fn primitive(
     let access_family: Type = parse_quote!(<__A as #runtime::ReceiverAccess>::Family);
     let struct_predicates = operation.struct_predicates();
     let predicates = operation.family_predicates(&access_family, Place::Inside);
+    let access_predicate = operation.access_family_predicate(&quote!(__A));
     let output = operation.substitute(operation.output.clone(), &access_family, Place::Inside);
     let (_, marker_init) = operation.marker().unzip();
     let bindings = operation.arguments.iter().map(|argument| {
@@ -666,6 +698,7 @@ fn primitive(
         impl<'__s, #parameters __A> #runtime::Start<'__s, __A> for #struct_name<#arguments>
         where
             __A: #runtime::ReceiverAccess,
+            #access_predicate
             <__A as #runtime::ReceiverAccess>::Family: #inside,
             #(#predicates,)*
         {
@@ -685,6 +718,7 @@ fn primitive(
         impl<#parameters __A> ::core::future::Future for #struct_name<#arguments __A>
         where
             __A: #runtime::ReceiverAccess,
+            #access_predicate
             <__A as #runtime::ReceiverAccess>::Family: #inside,
             #(#predicates,)*
         {
@@ -705,18 +739,19 @@ fn primitive(
     });
 
     let self_family: Type = parse_quote!(<Self as #runtime::ReceiverAccess>::Family);
-    let types = operation.types();
+    let types = operation.types(&self_family, Place::Outside);
     let lifetimes = &operation.lifetimes;
     let method_parameters = &operation.method_generics.params;
     let method_predicates =
         operation.predicates(&operation.method_generics, &self_family, Place::Outside);
     let path = operation.struct_path();
     let name = &operation.name;
+    let method_arguments = operation.arguments_for(Some(&self_family));
     let method = quote! {
         fn #name<#(#lifetimes,)* '__a, #method_parameters>(
             &'__a mut self,
             #(#names: #types),*
-        ) -> #path<#arguments &'__a mut Self>
+        ) -> #path<#method_arguments &'__a mut Self>
         where Self: ::core::marker::Sized, #(#method_predicates,)*
         {
             #path { __access: self, #(#names,)* #marker_init }
@@ -817,12 +852,15 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
                 ));
             }
         }
-        for argument in &arguments {
+        for argument in &mut arguments {
+            replace.visit_type_mut(&mut argument.ty);
             let ty = &argument.ty;
             if mentions(quote!(#ty), &access_name.to_string()) {
                 return Err(Error::new(
                     ty.span(),
-                    "operation arguments cannot depend on the access",
+                    format!(
+                        "operation arguments may mention the access only as `{access_name}::Family`"
+                    ),
                 ));
             }
         }
@@ -838,6 +876,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         .collect();
     let lifetimes = name_lifetimes(&mut arguments, &declared, quote!(#generics #output));
     let anonymous = name_impl_traits(&mut arguments);
+    let family_parameter = family_parameter(&arguments, &signature.generics)?;
     let (trait_generics, mut method_generics) = split_generics(generics, &family_bounds);
     method_generics
         .params
@@ -862,6 +901,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         family_bounds,
         capability: None,
         arguments,
+        family_parameter,
         output,
         yield_type,
         sync: options.sync,
@@ -880,6 +920,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let access_family: Type = parse_quote!(<__A as #runtime::ReceiverAccess>::Family);
     let bounds = operation.family_bound_tokens(Place::Inside);
     let predicates = operation.family_predicates(&access_family, Place::Inside);
+    let access_predicate = operation.access_family_predicate(&quote!(__A));
     let mut definition = operation.struct_definition(false);
     let (emitter_type, emitter_argument) = match &operation.yield_type {
         Some(item) => (
@@ -892,6 +933,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         impl<'__s, #parameters __A> #runtime::Start<'__s, __A> for #struct_name<#arguments>
         where
             __A: #runtime::ReceiverAccess,
+            #access_predicate
             <__A as #runtime::ReceiverAccess>::Family: #bounds,
             #(#predicates,)*
         {
@@ -916,12 +958,13 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let definition = operation.in_module(definition);
 
     let self_family: Type = parse_quote!(<Self as #runtime::ReceiverAccess>::Family);
-    let types = operation.types();
+    let types = operation.types(&self_family, Place::Outside);
     let lifetimes = &operation.lifetimes;
     let method_parameters = &operation.method_generics.params;
     let method_predicates =
         operation.predicates(&operation.method_generics, &self_family, Place::Outside);
     let path = operation.struct_path();
+    let arguments = operation.arguments_for(Some(&self_family));
     let access_methods = match &operation.yield_type {
         // An emitting child has a cell of its own for its items.
         Some(_) => quote! {
@@ -1202,6 +1245,30 @@ impl<'ast> Visit<'ast> for FindYield {
 
 fn is_ident(ty: &Type, ident: &Ident) -> bool {
     matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.is_ident(ident))
+}
+
+/// The family parameter of an operation whose argument types use `Self`
+/// for the family; such an operation exists for that family only.
+fn family_parameter(arguments: &[Argument], generics: &Generics) -> Result<Option<Ident>> {
+    let dependent = arguments.iter().any(|argument| {
+        let ty = &argument.ty;
+        mentions(quote!(#ty), "Self")
+    });
+    if !dependent {
+        return Ok(None);
+    }
+    let family = format_ident!("Family");
+    if let Some(taken) = generics
+        .type_params()
+        .find(|parameter| parameter.ident == family)
+    {
+        return Err(Error::new(
+            taken.ident.span(),
+            "`Family` names the family of this operation, whose arguments depend on it; \
+             rename this parameter",
+        ));
+    }
+    Ok(Some(family))
 }
 
 /// The arguments of an operation, from the parameters after the first

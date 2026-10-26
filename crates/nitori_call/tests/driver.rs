@@ -333,3 +333,155 @@ fn items_read_inside_an_operation_share_an_acquisition() {
     );
     assert_eq!(acquisitions.get(), 1);
 }
+
+/// Appends bytes to a log.
+trait Log: ReceiverFamily {
+    fn append<'visit>(host: Pin<&mut Self::ReceiverView<'visit>>, bytes: &[u8])
+    where
+        Self: 'visit;
+}
+fn append_log<'a, A: ReceiverAccess<Family: Log>>(
+    io: &'a mut A,
+    bytes: &'a [u8],
+) -> impl Future<Output = ()> + 'a {
+    poll_fn(move |cx| {
+        io.poll_access(cx, |access, _| {
+            <A::Family as Log>::append(access.into_pin(), bytes);
+            Poll::Ready(())
+        })
+    })
+}
+
+/// Reads from the pipe, waiting while it is empty.
+fn poll_pipe(
+    pipe: &mut Pipe,
+    cx: &mut Context<'_>,
+    destination: &mut (impl BufMut + ?Sized),
+) -> Poll<Result<usize, Infallible>> {
+    if pipe.data.is_empty() && destination.has_remaining_mut() {
+        pipe.reader = Some(cx.waker().clone());
+        return Poll::Pending;
+    }
+    let count = pipe.data.len().min(destination.remaining_mut());
+    for byte in pipe.data.drain(..count) {
+        destination.put_u8(byte);
+    }
+    Poll::Ready(Ok(count))
+}
+
+/// Copies a record from the pipe to the log, with one access for both.
+#[call]
+async fn copy_record(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible> + Log>,
+) -> Record {
+    let mut record = Vec::new();
+    let length = read_record(io, &mut record).await?;
+    append_log(io, &record).await;
+    Ok(length)
+}
+
+/// One family over both resources: each view holds both guards, which are
+/// acquired together.
+struct PipeAndLog;
+struct BothGuards<'v>(MutexGuard<'v, Pipe>, MutexGuard<'v, Vec<u8>>);
+impl ReceiverFamily for PipeAndLog {
+    type ReceiverView<'v> = BothGuards<'v>;
+}
+impl Read for PipeAndLog {
+    type Error = Infallible;
+    fn poll_read<'visit, Output: BufMut + ?Sized>(
+        host: Pin<&mut BothGuards<'visit>>,
+        cx: &mut Context<'_>,
+        destination: &mut Output,
+    ) -> Poll<Result<usize, Infallible>>
+    where
+        Self: 'visit,
+    {
+        poll_pipe(&mut host.get_mut().0, cx, destination)
+    }
+}
+impl Log for PipeAndLog {
+    fn append<'visit>(host: Pin<&mut BothGuards<'visit>>, bytes: &[u8])
+    where
+        Self: 'visit,
+    {
+        host.get_mut().1.extend_from_slice(bytes);
+    }
+}
+
+#[test]
+fn two_resources_acquired_together_as_one_family() {
+    let pipe = Mutex::new(Pipe::default());
+    let log = Mutex::new(Vec::new());
+    let acquisitions = Cell::new(0);
+    let acquisition = AcquisitionState::<PipeAndLog, _, _>::new(|| {
+        acquisitions.set(acquisitions.get() + 1);
+        // Always in the same order, so that two such families cannot deadlock.
+        async { BothGuards(pipe.lock().await, log.lock().await) }
+    });
+    let mut copy = pin!(drive(acquisition, CopyRecord::new()));
+    assert!(poll_once(copy.as_mut()).is_pending());
+    // Waiting for data holds neither lock.
+    assert!(log.try_lock().is_ok());
+    pipe.try_lock().unwrap().push(b"\x02hi");
+    assert_eq!(poll_once(copy.as_mut()), Poll::Ready(Ok(2)));
+    assert_eq!(acquisitions.get(), 2);
+    assert_eq!(*log.try_lock().unwrap(), b"hi");
+}
+
+/// Views of the log alone.
+struct Logged;
+struct LogGuard<'v>(MutexGuard<'v, Vec<u8>>);
+impl ReceiverFamily for Logged {
+    type ReceiverView<'v> = LogGuard<'v>;
+}
+impl Log for Logged {
+    fn append<'visit>(host: Pin<&mut LogGuard<'visit>>, bytes: &[u8])
+    where
+        Self: 'visit,
+    {
+        host.get_mut().0.extend_from_slice(bytes);
+    }
+}
+
+#[call]
+async fn write_log(io: &mut impl ReceiverAccess<Family: Log>, bytes: &[u8]) {
+    append_log(io, bytes).await;
+}
+
+/// Copies a record from the pipe to a log that it acquires separately.
+#[call]
+async fn copy_record_to(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    log: &Mutex<Vec<u8>>,
+) -> Record {
+    let mut record = Vec::new();
+    let length = read_record(io, &mut record).await?;
+    let acquisition =
+        AcquisitionState::<Logged, _, _>::new(|| async { LogGuard(log.lock().await) });
+    drive(acquisition, WriteLog::new(&record)).await;
+    Ok(length)
+}
+
+#[test]
+fn a_second_resource_is_driven_inside_the_operation() {
+    let pipe = Mutex::new(Pipe::default());
+    let log = Mutex::new(Vec::new());
+    let acquisitions = Cell::new(0);
+    let mut reader = Reader {
+        pipe: &pipe,
+        acquisitions: &acquisitions,
+    };
+    let mut copy = pin!(reader.copy_record_to_unpin(&log));
+    pipe.try_lock().unwrap().push(b"\x02ok");
+    {
+        // The log is busy: the record has been read, and the pipe is free
+        // while the operation waits for the log.
+        let busy = log.try_lock().unwrap();
+        assert!(poll_once(copy.as_mut()).is_pending());
+        assert!(pipe.try_lock().is_ok());
+        drop(busy);
+    }
+    assert_eq!(poll_once(copy.as_mut()), Poll::Ready(Ok(2)));
+    assert_eq!(*log.try_lock().unwrap(), b"ok");
+}

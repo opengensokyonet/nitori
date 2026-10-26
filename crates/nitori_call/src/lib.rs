@@ -158,7 +158,9 @@ pub use driver::{
 /// remaining arguments as fields. An argument written as a pattern, such as
 /// `(start, end): (u8, u8)` or `_: u8`, is passed to the function whole and
 /// named `argument_N` after its position in the parameter list, counting the
-/// access as 0. Users of the macro enable `impl_trait_in_assoc_type`.
+/// access as 0. Arguments may mention the access only as `A::Family`; when one
+/// does, the struct takes the family as a last type parameter `Family`. Users
+/// of the macro enable `impl_trait_in_assoc_type`.
 ///
 /// With `yields = Item`, each `yield value` written directly in the function
 /// body emits an item, and the return value is the final value. The crate
@@ -232,7 +234,9 @@ pub use nitori_call_macros::call;
 ///
 /// Each `poll_name` method becomes an operation struct `Name`, which is also
 /// the future it starts. Type and const parameters of the trait become
-/// parameters of the structs and of the convenience traits. Arguments:
+/// parameters of the structs and of the convenience traits. A method whose
+/// arguments mention `Self` gives its struct a type parameter `Family`.
+/// Arguments:
 ///
 /// - `module = name` generates the operations in module `name`; by default
 ///   the module is the trait's name in snake case. `module = self` generates
