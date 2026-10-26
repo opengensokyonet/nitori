@@ -53,7 +53,6 @@ jobs:
       - name: Check compiler boundaries and examples
         run: |
           python3 examples/data-frame-codec/scripts/check_boundaries.py
-          python3 examples/data-frame-codec/scripts/check_resume.py
           cargo run --locked --example macro_demo
           cargo run --locked --example expansion_demo
           cargo run --locked -p nitori_call --example call_composition
@@ -68,4 +67,3 @@ jobs:
           if-no-files-found: ignore
           path: |
             examples/data-frame-codec/target/boundary-consumer/*.log
-            examples/data-frame-codec/target/resume-probes/*.log

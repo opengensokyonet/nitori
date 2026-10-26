@@ -1,12 +1,23 @@
-//! Named and anonymous calls performing the same IO; see expanded/expansion_demo.rs.
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+//! A named operation and a one-off root operation declared in a block,
+//! performing the same IO; see expanded/expansion_demo.rs.
+#![feature(impl_trait_in_assoc_type)]
 
-use nitori_call::{Direct, Target, call, call_closure, run_sync};
-use nitori_io::{Read, TargetReadExt, calls::ReadBeError};
-use std::{convert::Infallible, pin::Pin};
+use nitori_call::{CallExecutor, ReceiverAccess, call};
+use nitori_io::{
+    Read,
+    calls::{ReadBeError, ReadBeExt as _},
+};
+use std::{
+    convert::Infallible,
+    future::Future,
+    pin::{Pin, pin},
+    task::{Context, Poll, Waker},
+};
 
 #[call(sync)]
-async fn read_pair<H: Read>(io: Target<H>) -> Result<u16, ReadBeError<H::Error>> {
+async fn read_pair<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+) -> Result<u16, ReadBeError<<A::Family as Read>::Error>> {
     let first = io.read_be::<u8>().await?;
     let second = io.read_be::<u8>().await?;
     Ok(u16::from(first) + u16::from(second))
@@ -18,13 +29,22 @@ fn main() {
     assert!(input.is_empty());
 
     let mut input = b"\x01\x02".as_slice();
-    let operation = call_closure!(
-        |io: Target<Direct<&[u8]>>| -> Result<u16, ReadBeError<Infallible>> {
+    let sum = {
+        // The generated items stay inside this block.
+        #[call]
+        async fn sum<A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+            io: &mut A,
+        ) -> Result<u16, ReadBeError<Infallible>> {
             let first = io.read_be::<u8>().await?;
             let second = io.read_be::<u8>().await?;
             Ok(u16::from(first) + u16::from(second))
         }
-    );
-    assert_eq!(run_sync(Pin::new(&mut input), operation).unwrap(), 3);
+        let execution = pin!(CallExecutor::execute(Pin::new(&mut input), Sum::new()));
+        match execution.poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(sum) => sum,
+            Poll::Pending => unreachable!("slice IO never waits"),
+        }
+    };
+    assert_eq!(sum.unwrap(), 3);
     assert!(input.is_empty());
 }

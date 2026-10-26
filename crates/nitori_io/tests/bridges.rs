@@ -1,8 +1,8 @@
 #![cfg(any(feature = "tokio", feature = "futures"))]
 use bytes::{Buf, BufMut, Bytes};
-use nitori_call::BoundCall;
+use nitori_call::CallExecutor;
 use nitori_io::{PollReadExt as _, PollWriteExt as _};
-use nitori_io::{Read, Write, adapters::Chunked, calls};
+use nitori_io::{Read, Write, adapters::Chunked, read_chunk};
 use std::{
     cell::Cell,
     future::Future,
@@ -197,9 +197,9 @@ where
     // Cancellation while waiting for a chunk must consume nothing.
     action.set(Action::Pending);
     {
-        let mut call = pin!(BoundCall::new(
+        let mut call = pin!(CallExecutor::execute(
             host.as_mut(),
-            calls::ReadChunk::new(NonZeroUsize::new(1).unwrap())
+            read_chunk::ReadChunk::new(NonZeroUsize::new(1).unwrap())
         ));
         assert!(call.as_mut().poll(&mut cx).is_pending());
     }

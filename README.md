@@ -8,12 +8,11 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Layout
 
-- `crates/nitori_call`: `ReceiverFamily`, `ReceiverScope`, `ResourceDriver`, `CallOn`, composition, asynchronous and synchronous adapters, and the public macro re-exports; see its [README](crates/nitori_call/README.md) for `#[call(sync)]` and synchronous event iteration.
+- `crates/nitori_call`: calls written as ordinary async functions and polled with a view of their resource, or none, on each poll; operations, receiver accesses, composition, executors, and the `#[call]` and `#[capability]` macros. Executions are both futures of the final value and streams of yielded items. See its [README](crates/nitori_call/README.md).
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
-- `prototypes/call` and `prototypes/call-macros`: a prototype of calls written as ordinary async functions. A call is polled with an optional view on each poll and asks for one when its operation needs it; executions are both futures of the final value and streams of yielded items.
-- `prototypes/call-bench`: framed reads from a Tokio duplex pipe with ordinary async, `nitori_call`, and the prototype, on an exclusive and a `tokio::sync::Mutex`-shared connection. Run `cargo run --release -p nitori-call-bench`; add `trickle` to make the reader wait for nearly every frame, or `sizes` to print the size of each per-frame future.
+- `benches/call-bench`: framed reads from a Tokio duplex pipe with ordinary async and `nitori_call`, on an exclusive and a `tokio::sync::Mutex`-shared connection. Run `cargo run --release -p nitori-call-bench`; add `trickle` to make the reader wait for nearly every frame, or `sizes` to print the size of each per-frame future.
 
 ## Development
 
@@ -40,7 +39,6 @@ cargo test --locked --workspace --doc --all-features
 cargo test --locked -p nitori_io --features tokio
 cargo test --locked -p nitori_io --features futures
 python3 examples/data-frame-codec/scripts/check_boundaries.py
-python3 examples/data-frame-codec/scripts/check_resume.py
 cargo run --locked --example macro_demo
 cargo run --locked --example expansion_demo
 cargo run --locked -p nitori_call --example call_composition

@@ -1,14 +1,22 @@
 // expect: pass
 // facade-only
-#![feature(coroutines,coroutine_trait,type_alias_impl_trait)]
-use nitori_call::{TargetExt as _, PollCallExt as _};
-use nitori_call::{call,call_closure,CallOn};
-use std::{future::Future,pin::{Pin,pin},task::{Context,Poll,Waker}};
-#[call]
-async fn bump(io:nitori_call::Target<nitori_call::Direct<usize>>)->usize {io.with(|__access| { let mut host = __access.into_pin().get_mut().0.as_mut(); {*host+=1;*host} }).await}
-fn main(){
- let mut host=0usize;let mut cx=Context::from_waker(Waker::noop());
- {let mut future=pin!(host.bump_unpin());assert_eq!(future.as_mut().poll(&mut cx),Poll::Ready(1));}
- let mut operation=pin!(call_closure!(|io:nitori_call::Target<nitori_call::Direct<usize>>|{io.bump().await}));
- let _=operation.as_mut().poll_receiver(Pin::new(&mut host),&mut cx);
+// A crate that enables no features stores, awaits and streams executions.
+use futures_core::Stream;
+use nitori_call::CallExecutor;
+use nitori_io::calls::{ReadArray, ReadArrayHostExt as _};
+use std::{future::Future, ops::ControlFlow, pin::{Pin, pin}, task::{Context, Poll, Waker}};
+struct Reading<'a> {
+    execution: <&'static [u8] as CallExecutor>::Execution<'a, ReadArray<2>>,
+}
+fn main() {
+    let mut input: &'static [u8] = b"abcd";
+    let mut cx = Context::from_waker(Waker::noop());
+    {
+        let reading = Reading { execution: input.read_array_unpin::<2>() };
+        let execution = pin!(reading.execution);
+        assert!(matches!(execution.poll(&mut cx), Poll::Ready(Ok(bytes)) if bytes == *b"ab"));
+    }
+    let mut execution = pin!(Pin::new(&mut input).read_array::<2>());
+    assert!(matches!(execution.as_mut().poll_next(&mut cx), Poll::Ready(Some(ControlFlow::Break(Ok(bytes)))) if bytes == *b"cd"));
+    assert!(matches!(execution.as_mut().poll_next(&mut cx), Poll::Ready(None)));
 }

@@ -32,30 +32,8 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "futures-core",
- "nitori-call-prototype",
  "nitori_call",
- "nitori_io",
  "tokio",
-]
-
-[[package]]
-name = "nitori-call-prototype"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "futures-core",
- "nitori-call-prototype-macros",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "nitori-call-prototype-macros"
-version = "0.0.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -63,6 +41,7 @@ name = "nitori-data-frame-codec-example"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "nitori_call",
  "nitori_io",
  "snafu",
@@ -94,6 +73,7 @@ name = "nitori_io"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "futures-io",
  "nitori_call",
  "pin-project-lite",

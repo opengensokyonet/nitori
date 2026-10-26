@@ -1,193 +1,329 @@
-//! Resource execution control is an ordinary receiver, not a resume flag.
-use crate::{
-    AcquiredScope, AwaitOn, BorrowedScope, CallEvent, CallOn, IntoAwaitOn, Receiver,
-    ReceiverFamily, ReceiverScope, ViewAcquisition,
-};
+#![allow(clippy::multiple_bound_locations)] // pin-project-lite projection bounds
+//! Executors: values that run operations with their own access policy, so
+//! that `executor.operation(..).await` works whether the executor can lend a
+//! view at once or must acquire one.
+use crate::{Call, CallPoll, DynCall, Operation, Receiver, ReceiverFamily, ReceiverSlot, Start};
 use futures_core::Stream;
 use std::{
-    future::{Future, poll_fn},
+    future::Future,
     marker::PhantomData,
-    ops::CoroutineState,
+    ops::ControlFlow,
     pin::{Pin, pin},
-    task::{Context, Poll},
+    task::{Context, Poll, ready},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DriveMode {
-    Event,
-    Return,
-}
-/// Per-poll control supplied only to the resource-driving call.
-#[derive(Clone, Copy)]
-pub struct ExecutionControl {
-    pub mode: DriveMode,
-}
-impl ReceiverFamily for ExecutionControl {
-    type ReceiverView<'v> = Self;
-}
-impl Receiver for ExecutionControl {
-    type Family = Self;
-    fn view<'v>(self: Pin<&'v mut Self>) -> Self
+/// A view acquired lazily for one poll. Ready is sticky until the scope is
+/// dropped; Pending must arrange a wakeup.
+pub trait ReceiverScope<'view> {
+    type Family: ReceiverFamily + 'view;
+    fn poll_view(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Pin<&mut <Self::Family as ReceiverFamily>::ReceiverView<'view>>>;
+
+    /// Poll `call` for one event without a view, then with this scope's view
+    /// if its operation asks for one.
+    fn poll_call<C, Y, R>(
+        mut self: Pin<&mut Self>,
+        mut call: Pin<&mut C>,
+        cx: &mut Context<'_>,
+    ) -> Poll<ControlFlow<R, Y>>
     where
-        Self::Family: 'v,
+        Self: Sized,
+        C: DynCall<Self::Family, Y, R> + ?Sized,
     {
-        *self
-    }
-}
-/// An implementation chooses its persistent execution state. Pending acquisition
-/// survives all rounds until delivery or termination. Delivered views do not.
-pub trait ResourceDriver {
-    type Family: ReceiverFamily;
-    type Execution<'a, O>: Future<Output = O::Return> + Stream<Item = CallEvent<Self::Family, O>>
-    where
-        Self: 'a,
-        O: CallOn<Self::Family> + 'a;
-    fn execute<'a, O>(self: Pin<&'a mut Self>, operation: O) -> Self::Execution<'a, O>
-    where
-        O: CallOn<Self::Family> + 'a;
-}
-impl<R: Receiver + ?Sized> ResourceDriver for R {
-    type Family = R::Family;
-    type Execution<'a, O>
-        = crate::BoundCall<'a, R, O>
-    where
-        Self: 'a,
-        O: CallOn<Self::Family> + 'a;
-    fn execute<'a, O>(self: Pin<&'a mut Self>, operation: O) -> Self::Execution<'a, O>
-    where
-        O: CallOn<Self::Family> + 'a,
-    {
-        crate::BoundCall::new(self, operation)
-    }
-}
-pin_project_lite::pin_project! {
- /// Bind a transparent resource-driving call to per-poll execution control.
- /// Event transformations belong in the driven business call: Return mode may
- /// consume that call's yields before the driving call sees them.
- #[must_use="executions do nothing until polled"]
- pub struct Execution<O> { #[pin] operation:O, terminal:bool }
-}
-impl<O: CallOn<ExecutionControl>> Execution<O> {
-    pub fn new(operation: O) -> Self {
-        Self {
-            operation,
-            terminal: false,
+        match call.as_mut().poll_with(None, cx) {
+            CallPoll::Ready(event) => Poll::Ready(event),
+            CallPoll::Pending => Poll::Pending,
+            CallPoll::NeedsView => {
+                let view = ready!(self.as_mut().poll_view(cx));
+                call.poll_with(Some(view), cx).lent()
+            }
         }
     }
-    /// Request one event; dropping this temporary future does not cancel execution.
-    pub fn next(
-        mut self: Pin<&mut Self>,
-    ) -> impl Future<Output = Option<CallEvent<ExecutionControl, O>>> {
-        poll_fn(move |cx| self.as_mut().poll_next(cx))
+}
+
+/// Poll `call` to its final value as `poll_call` does, keeping the view for
+/// the rest of the poll once acquired.
+fn poll_return_call<'view, S, C, Y, R>(
+    mut scope: Pin<&mut S>,
+    mut call: Pin<&mut C>,
+    cx: &mut Context<'_>,
+) -> Poll<R>
+where
+    S: ReceiverScope<'view>,
+    C: DynCall<S::Family, Y, R> + ?Sized,
+{
+    match call.as_mut().poll_return_with(None, cx) {
+        CallPoll::Ready(result) => Poll::Ready(result),
+        CallPoll::Pending => Poll::Pending,
+        CallPoll::NeedsView => {
+            let view = ready!(scope.as_mut().poll_view(cx));
+            call.poll_return_with(Some(view), cx).lent()
+        }
     }
 }
-impl<O: CallOn<ExecutionControl>> Stream for Execution<O> {
-    type Item = CallEvent<ExecutionControl, O>;
+
+/// Acquires complete views, keeping a pending acquisition across polls. A
+/// new acquisition starts after each delivered view; dropping the source
+/// cancels a pending one.
+pub trait ViewAcquisition<'view> {
+    type Family: ReceiverFamily + 'view;
+    fn poll_acquire(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<<Self::Family as ReceiverFamily>::ReceiverView<'view>>;
+}
+
+pin_project_lite::pin_project! {
+    /// Acquires views by starting a future from `make` whenever none is pending.
+    pub struct AcquisitionState<F, Make, Acquire> {
+        make: Make,
+        #[pin]
+        pending: Option<Acquire>,
+        family: PhantomData<fn() -> F>,
+    }
+}
+impl<F, Make, Acquire> AcquisitionState<F, Make, Acquire> {
+    pub fn new(make: Make) -> Self {
+        Self {
+            make,
+            pending: None,
+            family: PhantomData,
+        }
+    }
+}
+impl<'view, F, Make, Acquire> ViewAcquisition<'view> for AcquisitionState<F, Make, Acquire>
+where
+    F: ReceiverFamily + 'view,
+    Make: FnMut() -> Acquire,
+    Acquire: Future<Output = F::ReceiverView<'view>>,
+{
+    type Family = F;
+    fn poll_acquire(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::ReceiverView<'view>> {
+        let mut this = self.project();
+        if this.pending.is_none() {
+            this.pending.set(Some((this.make)()));
+        }
+        let view = ready!(this.pending.as_mut().as_pin_mut().unwrap().poll(cx));
+        this.pending.set(None);
+        Poll::Ready(view)
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// One poll's scope over an acquisition. The view it acquires is
+    /// released when the scope is dropped at the end of the poll.
+    pub struct AcquiredScope<'source, 'view, S: ?Sized, F: ReceiverFamily>
+    where
+        F: 'view,
+    {
+        source: Pin<&'source mut S>,
+        #[pin]
+        view: Option<F::ReceiverView<'view>>,
+    }
+}
+impl<'source, 'view, S: ?Sized, F: ReceiverFamily + 'view> AcquiredScope<'source, 'view, S, F> {
+    pub fn new(source: Pin<&'source mut S>) -> Self {
+        Self { source, view: None }
+    }
+}
+impl<'view, S, F> ReceiverScope<'view> for AcquiredScope<'_, 'view, S, F>
+where
+    S: ViewAcquisition<'view, Family = F> + ?Sized,
+    F: ReceiverFamily + 'view,
+{
+    type Family = F;
+    fn poll_view(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Pin<&mut F::ReceiverView<'view>>> {
+        let mut this = self.project();
+        if this.view.is_none() {
+            let view = ready!(this.source.as_mut().poll_acquire(cx));
+            this.view.set(Some(view));
+        }
+        Poll::Ready(this.view.as_pin_mut().unwrap())
+    }
+}
+
+type Output<F, Op> = <Op as Operation<F>>::Output;
+type Event<F, Op> = ControlFlow<<Op as Operation<F>>::Output, <Op as Operation<F>>::Yield>;
+
+/// Chooses how operations run on a value: how each poll obtains a view.
+///
+/// The execution is a future of the final value, discarding emitted items,
+/// and a stream that delivers each item as `Continue` and then the final
+/// value as `Break`. Every [`Receiver`] is an executor that constructs a view
+/// on each poll; other executors usually acquire views with [`drive`].
+pub trait CallExecutor {
+    type Family: ReceiverFamily;
+    type Execution<'a, Op>: Future<Output = Output<Self::Family, Op>>
+        + Stream<Item = Event<Self::Family, Op>>
+    where
+        Self: 'a,
+        Op: Operation<Self::Family> + for<'s> Start<'s, ReceiverSlot<'s, Self::Family>> + 'a;
+    fn execute<'a, Op>(self: Pin<&'a mut Self>, operation: Op) -> Self::Execution<'a, Op>
+    where
+        Op: Operation<Self::Family> + for<'s> Start<'s, ReceiverSlot<'s, Self::Family>> + 'a;
+}
+impl<R: Receiver + ?Sized> CallExecutor for R {
+    type Family = R::Family;
+    type Execution<'a, Op>
+        = BoundCall<'a, R, Op>
+    where
+        Self: 'a,
+        Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>> + 'a;
+    fn execute<'a, Op>(self: Pin<&'a mut Self>, operation: Op) -> BoundCall<'a, R, Op>
+    where
+        Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>> + 'a,
+    {
+        BoundCall {
+            host: self,
+            call: Call::new(operation),
+            finished: false,
+        }
+    }
+}
+
+/// An operation run on a receiver, with a view constructed on each poll.
+pub struct BoundCall<'a, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    host: Pin<&'a mut R>,
+    call: Call<R::Family, Op>,
+    finished: bool,
+}
+impl<'a, R, Op> BoundCall<'a, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    #[allow(clippy::type_complexity)]
+    fn project(
+        self: Pin<&mut Self>,
+    ) -> (
+        &mut Pin<&'a mut R>,
+        Pin<&mut Call<R::Family, Op>>,
+        &mut bool,
+    ) {
+        // SAFETY: the call is structurally pinned and never moved out; the
+        // other fields are not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        (
+            &mut this.host,
+            unsafe { Pin::new_unchecked(&mut this.call) },
+            &mut this.finished,
+        )
+    }
+}
+impl<R, Op> Future for BoundCall<'_, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    type Output = Output<R::Family, Op>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let (host, call, finished) = self.project();
+        let view = pin!(host.as_mut().view());
+        let poll = call.poll_return_with(Some(view), cx).lent();
+        *finished = poll.is_ready();
+        poll
+    }
+}
+impl<R, Op> Stream for BoundCall<'_, R, Op>
+where
+    R: Receiver + ?Sized,
+    Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>>,
+{
+    type Item = Event<R::Family, Op>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        if *this.terminal {
+        let (host, call, finished) = self.project();
+        if *finished {
             return Poll::Ready(None);
         }
-        *this.terminal = true;
-        let mut control = ExecutionControl {
-            mode: DriveMode::Event,
-        };
-        let result = {
-            let mut scope = pin!(BorrowedScope::new(Pin::new(&mut control)));
-            this.operation.poll_call(scope.as_mut(), cx)
-        };
-        if !matches!(&result, Poll::Ready(CoroutineState::Complete(_))) {
-            *this.terminal = false;
-        }
-        result.map(Some)
+        let view = pin!(host.as_mut().view());
+        let event = ready!(call.poll_with(Some(view), cx).lent());
+        *finished = event.is_break();
+        Poll::Ready(Some(event))
     }
 }
-impl<O: CallOn<ExecutionControl>> Future for Execution<O> {
-    type Output = O::Return;
+
+/// An operation run with views from an acquisition, acquiring one only on
+/// polls whose operation asks for it and releasing it at the end of each.
+pub struct Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    acquisition: S,
+    call: Call<S::Family, Op>,
+    finished: bool,
+    view: PhantomData<&'view ()>,
+}
+impl<'view, S, Op> Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    #[allow(clippy::type_complexity)]
+    fn project(self: Pin<&mut Self>) -> (Pin<&mut S>, Pin<&mut Call<S::Family, Op>>, &mut bool) {
+        // SAFETY: the acquisition and the call are structurally pinned and
+        // never moved out; the flag is not pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        unsafe {
+            (
+                Pin::new_unchecked(&mut this.acquisition),
+                Pin::new_unchecked(&mut this.call),
+                &mut this.finished,
+            )
+        }
+    }
+}
+impl<'view, S, Op> Future for Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    type Output = Output<S::Family, Op>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        assert!(
-            !*this.terminal,
-            "execution polled after completion or panic"
-        );
-        *this.terminal = true;
-        let mut control = ExecutionControl {
-            mode: DriveMode::Return,
-        };
-        let result = {
-            let mut scope = pin!(BorrowedScope::new(Pin::new(&mut control)));
-            this.operation.poll_return(scope.as_mut(), cx)
-        };
-        if result.is_pending() {
-            *this.terminal = false;
-        }
-        result
+        let (acquisition, call, finished) = self.project();
+        let scope = pin!(AcquiredScope::<_, S::Family>::new(acquisition));
+        let poll = poll_return_call(scope, call, cx);
+        *finished = poll.is_ready();
+        poll
     }
 }
-/// Await the next result under the current execution-control mode. Each poll
-/// owns a fresh scope; Pending is propagated normally without losing acquisition.
-pub struct Drive<'a, 'view, F: ReceiverFamily, S, O> {
-    acquisition: Pin<&'a mut S>,
-    operation: Pin<&'a mut O>,
-    terminal: bool,
-    marker: PhantomData<fn() -> &'view F>,
+impl<'view, S, Op> Stream for Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
+    type Item = Event<S::Family, Op>;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let (acquisition, call, finished) = self.project();
+        if *finished {
+            return Poll::Ready(None);
+        }
+        let scope = pin!(AcquiredScope::<_, S::Family>::new(acquisition));
+        let event = ready!(scope.poll_call(call, cx));
+        *finished = event.is_break();
+        Poll::Ready(Some(event))
+    }
 }
-impl<F: ReceiverFamily, S, O> Unpin for Drive<'_, '_, F, S, O> {}
-pub fn drive<'a, 'v, F: ReceiverFamily + 'v, S: ViewAcquisition<'v, Family = F>, O: CallOn<F>>(
-    acquisition: Pin<&'a mut S>,
-    operation: Pin<&'a mut O>,
-) -> Drive<'a, 'v, F, S, O> {
+
+/// Run `operation` with views from `acquisition`.
+pub fn drive<'view, S, Op>(acquisition: S, operation: Op) -> Drive<'view, S, Op>
+where
+    S: ViewAcquisition<'view>,
+    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+{
     Drive {
         acquisition,
-        operation,
-        terminal: false,
-        marker: PhantomData,
-    }
-}
-impl<'v, F: ReceiverFamily + 'v, S: ViewAcquisition<'v, Family = F>, O: CallOn<F>>
-    IntoAwaitOn<ExecutionControl> for Drive<'_, 'v, F, S, O>
-{
-    type Awaitable = Self;
-    fn into_await_on(self) -> Self {
-        self
-    }
-}
-impl<'v, F: ReceiverFamily + 'v, S: ViewAcquisition<'v, Family = F>, O: CallOn<F>>
-    AwaitOn<ExecutionControl> for Drive<'_, 'v, F, S, O>
-{
-    type Output = CallEvent<F, O>;
-    fn poll_on<'control>(
-        self: Pin<&mut Self>,
-        scope: Pin<&mut dyn ReceiverScope<'control, Family = ExecutionControl>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Self::Output>
-    where
-        ExecutionControl: 'control,
-    {
-        let this = self.get_mut();
-        assert!(!this.terminal, "drive awaited after completion or panic");
-        this.terminal = true;
-        let mode = match scope.poll_view(cx) {
-            Poll::Ready(view) => view.mode,
-            Poll::Pending => {
-                this.terminal = false;
-                return Poll::Pending;
-            }
-        };
-        let result = {
-            let mut scope = pin!(AcquiredScope::new(this.acquisition.as_mut()));
-            match mode {
-                DriveMode::Event => this.operation.as_mut().poll_call(scope.as_mut(), cx),
-                DriveMode::Return => this
-                    .operation
-                    .as_mut()
-                    .poll_return(scope.as_mut(), cx)
-                    .map(CoroutineState::Complete),
-            }
-        };
-        if result.is_pending() {
-            this.terminal = false;
-        }
-        result
+        call: Call::new(operation),
+        finished: false,
+        view: PhantomData,
     }
 }

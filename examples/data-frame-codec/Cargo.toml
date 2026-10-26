@@ -10,3 +10,6 @@ bytes.workspace = true
 snafu.workspace = true
 nitori_call.workspace = true
 nitori_io.workspace = true
+
+[dev-dependencies]
+futures-core.workspace = true

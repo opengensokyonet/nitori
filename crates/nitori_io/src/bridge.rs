@@ -1,4 +1,5 @@
-//! One-way adapters from standard, Tokio, and futures IO into this crate.
+//! Adapters from standard, Tokio, and futures IO into this crate, and from a
+//! receiver access inside an operation to the async reader traits.
 //!
 //! Reads use an initialized, bounded 8 KiB scratch buffer to support arbitrary
 //! `BufMut` destinations without unsafe code. No data is prefetched or retained
@@ -237,3 +238,81 @@ nitori_call::direct_receiver!(impl [T] for Std<T>);
 nitori_call::direct_receiver!(impl [T] for Tokio<T>);
 #[cfg(feature = "futures")]
 nitori_call::direct_receiver!(impl [T] for Futures<T>);
+
+/// A receiver access read as `tokio::io::AsyncRead` or `futures_io::AsyncRead`,
+/// so that codecs written for those traits can run inside an operation.
+///
+/// Each poll reads through the access, so the reader uses the view the
+/// operation's call holds on that poll; it buffers nothing. Errors of the
+/// family's [`Read`] are converted into `std::io::Error`. Available with the
+/// `tokio` or `futures` feature.
+#[cfg(any(feature = "tokio", feature = "futures"))]
+#[derive(Debug)]
+pub struct ReadAccess<A> {
+    access: A,
+}
+#[cfg(any(feature = "tokio", feature = "futures"))]
+impl<A> ReadAccess<A> {
+    pub fn new(access: A) -> Self {
+        Self { access }
+    }
+    pub fn get_ref(&self) -> &A {
+        &self.access
+    }
+    pub fn get_mut(&mut self) -> &mut A {
+        &mut self.access
+    }
+    pub fn into_inner(self) -> A {
+        self.access
+    }
+}
+#[cfg(any(feature = "tokio", feature = "futures"))]
+impl<A> From<A> for ReadAccess<A> {
+    fn from(access: A) -> Self {
+        Self::new(access)
+    }
+}
+#[cfg(any(feature = "tokio", feature = "futures"))]
+impl<A> ReadAccess<A>
+where
+    A: nitori_call::ReceiverAccess<Family: Read<Error: Into<io::Error>>> + Unpin,
+{
+    fn poll_slice(&mut self, cx: &mut Context<'_>, buffer: &mut [u8]) -> Poll<io::Result<usize>> {
+        let mut destination = buffer;
+        self.access
+            .poll_access(cx, |access, cx| {
+                <A::Family as Read>::poll_read(access.into_pin(), cx, &mut destination)
+            })
+            .map_err(Into::into)
+    }
+}
+#[cfg(feature = "tokio")]
+impl<A> tokio::io::AsyncRead for ReadAccess<A>
+where
+    A: nitori_call::ReceiverAccess<Family: Read<Error: Into<io::Error>>> + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        // Zeroes the unfilled part once. Filling `ReadBuf` as a `BufMut`, which
+        // needs Tokio's `io-util` feature, would avoid that.
+        let count = ready!(self.get_mut().poll_slice(cx, buffer.initialize_unfilled()))?;
+        buffer.advance(count);
+        Poll::Ready(Ok(()))
+    }
+}
+#[cfg(feature = "futures")]
+impl<A> futures_io::AsyncRead for ReadAccess<A>
+where
+    A: nitori_call::ReceiverAccess<Family: Read<Error: Into<io::Error>>> + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().poll_slice(cx, buffer)
+    }
+}

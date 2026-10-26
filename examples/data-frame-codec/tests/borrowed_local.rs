@@ -1,13 +1,10 @@
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type)]
 
 use bytes::{Buf, Bytes};
-use nitori_call::PollCallExt as _;
-use nitori_call::call;
-use nitori_io::TargetWriteExt as _;
-use nitori_io::Write;
+use nitori_call::{Call, CallPoll, Receiver, ReceiverAccess, call};
+use nitori_io::{Write, WriteExt as _};
 use std::convert::Infallible;
 use std::{
-    ops::CoroutineState,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
@@ -27,7 +24,7 @@ impl Write for Output {
     where
         Self: 'visit,
     {
-        let mut this = host.get_mut().0.as_mut();
+        let this = host.get_mut().0.as_mut().get_mut();
         if !this.waited {
             this.waited = true;
             cx.waker().wake_by_ref();
@@ -42,15 +39,13 @@ impl Write for Output {
 }
 
 #[call]
-async fn write_local_buffer(
-    io: nitori_call::Target<Output>,
+async fn write_local_buffer<A: ReceiverAccess<Family: Write<Error = Infallible>>>(
+    io: &mut A,
 ) -> Result<(Bytes, usize, Bytes, usize), Infallible> {
     let mut buf = Bytes::from_static(b"abc");
-    let returned = io.write(&mut buf).await;
-    let first_count = returned.result?;
+    let first_count = io.write(&mut buf).await?;
     let tail = buf.clone();
-    let returned = io.write(&mut buf).await;
-    let second_count = returned.result?;
+    let second_count = io.write(&mut buf).await?;
     Ok((buf, first_count, tail, second_count))
 }
 
@@ -60,27 +55,18 @@ fn named_call_reborrows_local_buf_across_pending() {
         bytes: Vec::new(),
         waited: false,
     };
-    let mut operation = pin!(write_local_buffer());
-    let mut cx = Context::from_waker(Waker::noop());
-    assert!(
-        operation
-            .as_mut()
-            .poll_receiver(Pin::new(&mut output), &mut cx)
-            .is_pending()
-    );
+    let mut call = pin!(Call::<Output, _>::new(WriteLocalBuffer::new()));
+    let mut poll = |output: &mut Output| {
+        call.as_mut().poll_return_with(
+            Some(pin!(Pin::new(output).view())),
+            &mut Context::from_waker(Waker::noop()),
+        )
+    };
+    assert!(matches!(poll(&mut output), CallPoll::Pending));
     assert!(output.bytes.is_empty());
-    assert!(
-        operation
-            .as_mut()
-            .poll_receiver(Pin::new(&mut output), &mut cx)
-            .is_pending()
-    );
+    assert!(matches!(poll(&mut output), CallPoll::Pending));
     assert_eq!(output.bytes, b"ab");
-    let Poll::Ready(CoroutineState::Complete(Ok((buf, first_count, tail, second_count)))) =
-        operation
-            .as_mut()
-            .poll_receiver(Pin::new(&mut output), &mut cx)
-    else {
+    let CallPoll::Ready(Ok((buf, first_count, tail, second_count))) = poll(&mut output) else {
         panic!("expected completion")
     };
     assert_eq!(first_count, 2);

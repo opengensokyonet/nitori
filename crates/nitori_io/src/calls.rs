@@ -1,19 +1,15 @@
-//! Operations for family-based `CallOn`. Target methods are exported by the crate.
+//! Operations derived from the capabilities, with their operation-specific
+//! failures. The primitive operations are generated in [`crate::read`],
+//! [`crate::read_chunk`] and [`crate::write`].
 //!
-//! Constructors only capture arguments; all checks and IO happen when polled.
-//! A completed operation must not be polled again. Derived operations preserve
-//! completed prefixes on Pending, errors, and cancellation; they never roll back.
-use core::{ops::CoroutineState, task::Poll};
+//! Each `name` function is also an operation struct `Name` with conveniences:
+//! `NameExt` on receiver accesses inside operations and `NameHostExt` on call
+//! executors. Constructing an operation only captures its arguments; all checks
+//! and IO happen when it is polled. Derived operations preserve completed
+//! prefixes on Pending, errors, and cancellation; they never roll back.
 
 mod read;
 mod write;
 
-// The public operation facade keeps call types and their errors together.
-pub use read::{
-    EndianValue, Read, ReadArray, ReadArrayError, ReadBe, ReadBeError, ReadChunk, ReadChunks,
-    ReadChunksError, ReadChunksExact, ReadChunksExactError, ReadExact, ReadExactError, ReadLe,
-    ReadLeError, ReadToEnd, ReadToEndError,
-};
-pub use write::{Write, WriteAll, WriteAllError, WriteReturn};
-
-type Step<Y, R> = Poll<CoroutineState<Y, R>>;
+pub use read::*;
+pub use write::*;

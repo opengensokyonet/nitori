@@ -197,9 +197,8 @@ fn std_errors_preserve_buffers_and_empty_requests_reach_host() {
 }
 
 #[test]
-fn operations_extend_actual_resources_and_views() {
-    use nitori_call::Receiver;
-    use nitori_io::{ReadExt, WriteExt};
+fn operations_extend_actual_resources_and_forwarding_receivers() {
+    use nitori_io::calls::{ReadArrayHostExt, WriteAllHostExt};
     use std::{future::Future, pin::pin};
     let mut source = &b"abcd"[..];
     {
@@ -207,8 +206,8 @@ fn operations_extend_actual_resources_and_views() {
         assert_eq!(ready(call.as_mut().poll(&mut cx())), *b"ab");
     }
     {
-        let mut view = pin!(Pin::new(&mut source).view());
-        let mut call = pin!(view.as_mut().read_array::<2>());
+        let forwarded = &mut source;
+        let mut call = pin!(forwarded.read_array_unpin::<2>());
         assert_eq!(ready(call.as_mut().poll(&mut cx())), *b"cd");
     }
     let mut output = Vec::new();

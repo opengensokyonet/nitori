@@ -1,9 +1,7 @@
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 
-//! Current coroutine-based DATA-frame codec example.
+//! DATA-frame codec example built on `nitori_call` and `nitori_io`.
 
 pub mod current_codec;
 #[cfg(test)]
 mod helper_tests;
-#[cfg(test)]
-mod stack_tests;

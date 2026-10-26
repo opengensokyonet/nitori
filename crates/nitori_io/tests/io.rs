@@ -1,24 +1,21 @@
-#![feature(
-    coroutine_trait,
-    coroutines,
-    stmt_expr_attributes,
-    type_alias_impl_trait
-)]
+#![feature(impl_trait_in_assoc_type)]
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use nitori_call::{BoundCall, call};
-use nitori_io::{PollReadExt as _, TargetReadExt as _, TargetWriteExt as _};
+use futures_core::Stream;
+use nitori_call::{CallExecutor, ReceiverAccess, call};
+use nitori_io::PollReadExt as _;
 use nitori_io::{
     Read as ReadHost, ReadChunk as ChunkHost, Write as WriteHost,
     calls::*,
     error::{Incomplete, InsufficientCapacity, WriteZero},
     helpers::*,
+    read, read_chunk, write,
 };
 use std::{
     cell::Cell,
     future::Future,
     io,
     num::NonZeroUsize,
-    ops::CoroutineState,
+    ops::ControlFlow,
     pin::{Pin, pin},
     rc::Rc,
     sync::{
@@ -37,6 +34,9 @@ impl Wake for Wakes {
     fn wake(self: Arc<Self>) {
         self.0.fetch_add(1, Ordering::Relaxed);
     }
+}
+fn next<S: Stream + ?Sized>(mut stream: Pin<&mut S>) -> impl Future<Output = Option<S::Item>> + '_ {
+    std::future::poll_fn(move |cx| stream.as_mut().poll_next(cx))
 }
 fn run<F: Future>(future: F) -> F::Output {
     let wake = Arc::new(Wakes::default());
@@ -205,7 +205,7 @@ impl WriteHost for Sink {
 fn exact_prechecks_capacity_and_limits_source() {
     let mut source = Source::new(b"abcdef");
     let mut small = [0; 2];
-    let error = run(BoundCall::new(
+    let error = run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadExact::new(&mut small.as_mut_slice(), 3),
     ))
@@ -223,7 +223,7 @@ fn exact_prechecks_capacity_and_limits_source() {
     assert_eq!(source.polls.get(), 0);
     let mut large = [0; 8];
     let mut out = large.as_mut_slice();
-    run(BoundCall::new(
+    run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadExact::new(&mut out, 3),
     ))
@@ -237,7 +237,7 @@ fn exact_prechecks_capacity_and_limits_source() {
 fn exact_errors_preserve_prefix_and_source_chain() {
     let mut source = Source::new(b"ab");
     let mut out = vec![];
-    let error = run(BoundCall::new(
+    let error = run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadExact::new(&mut out, 4),
     ))
@@ -254,7 +254,11 @@ fn exact_errors_preserve_prefix_and_source_chain() {
     assert_eq!(out, b"ab");
     source = Source::new(b"abcdef");
     source.fail_at = Some(2);
-    let error = run(BoundCall::new(Pin::new(&mut source), ReadArray::<4>::new())).unwrap_err();
+    let error = run(CallExecutor::execute(
+        Pin::new(&mut source),
+        ReadArray::<4>::new(),
+    ))
+    .unwrap_err();
     assert_eq!(error.completed(), 2);
     assert_eq!(error.host_error().unwrap().kind(), io::ErrorKind::Other);
     assert_eq!(
@@ -268,7 +272,7 @@ fn read_to_end_appends_and_requires_confirmed_eof() {
     let mut source = Source::new(b"abcd");
     let mut out = b"prefix".to_vec();
     assert_eq!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut source),
             ReadToEnd::new(&mut out)
         ))
@@ -278,7 +282,7 @@ fn read_to_end_appends_and_requires_confirmed_eof() {
     assert_eq!(out, b"prefixabcd");
     let mut source = Source::new(b"abcd");
     let mut bytes = [0; 4];
-    let error = run(BoundCall::new(
+    let error = run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadToEnd::new(&mut bytes.as_mut_slice()),
     ))
@@ -298,28 +302,32 @@ fn chunks_are_lazy_bounded_and_share_the_fill_cursor() {
     let mut source = ChunkSource(Source::new(b"abcdefgh"));
     let polls = source.0.polls.clone();
     assert_eq!(
-        run(BoundCall::new(Pin::new(&mut source), ReadArray::<1>::new())).unwrap(),
+        run(CallExecutor::execute(
+            Pin::new(&mut source),
+            ReadArray::<1>::new()
+        ))
+        .unwrap(),
         *b"a"
     );
-    let mut bound = pin!(BoundCall::new(
+    let mut bound = pin!(CallExecutor::execute(
         Pin::new(&mut source),
         ReadChunks::new(4, nz(3))
     ));
     for expected in [b"bc", b"de"] {
         let before = polls.get();
-        match run(bound.as_mut().next()).unwrap() {
-            CoroutineState::Yielded(bytes) => assert_eq!(bytes, expected[..]),
+        match run(next(bound.as_mut())).unwrap() {
+            ControlFlow::Continue(bytes) => assert_eq!(bytes, expected[..]),
             _ => panic!(),
         }
         assert_eq!(polls.get(), before + 2); // one Pending, one chunk; no prefetch
     }
     let before = polls.get();
     assert!(matches!(
-        run(bound.as_mut().next()),
-        Some(CoroutineState::Complete(Ok(4)))
+        run(next(bound.as_mut())),
+        Some(ControlFlow::Break(Ok(4)))
     ));
     assert_eq!(polls.get(), before);
-    assert!(run(bound.as_mut().next()).is_none());
+    assert!(run(next(bound.as_mut())).is_none());
 }
 
 #[test]
@@ -329,15 +337,15 @@ fn exact_chunks_deliver_prefix_before_eof_or_error() {
         if fail {
             source.0.fail_at = Some(2);
         }
-        let mut bound = pin!(BoundCall::new(
+        let mut bound = pin!(CallExecutor::execute(
             Pin::new(&mut source),
             ReadChunksExact::new(3, nz(2))
         ));
         assert!(matches!(
-            run(bound.as_mut().next()),
-            Some(CoroutineState::Yielded(_))
+            run(next(bound.as_mut())),
+            Some(ControlFlow::Continue(_))
         ));
-        let Some(CoroutineState::Complete(Err(error))) = run(bound.as_mut().next()) else {
+        let Some(ControlFlow::Break(Err(error))) = run(next(bound.as_mut())) else {
             panic!()
         };
         assert_eq!(error.completed(), 2);
@@ -348,15 +356,16 @@ fn exact_chunks_deliver_prefix_before_eof_or_error() {
 #[test]
 fn write_ownership_borrowing_and_partial_errors() {
     let mut sink = Sink::new();
-    let result = run(BoundCall::new(
+    let mut input = Bytes::from_static(b"abcd");
+    let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
-        Write::new(Bytes::from_static(b"abcd")),
+        write::Write::new(&mut input),
     ));
-    assert_eq!(result.result.unwrap(), 2);
-    assert_eq!(result.input, b"cd"[..]);
+    assert_eq!(result.unwrap(), 2);
+    assert_eq!(input, b"cd"[..]);
     let mut input = Bytes::from_static(b"efghij");
     sink.fail_at = Some(4);
-    let result = run(BoundCall::new(
+    let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
         WriteAll::new(&mut input),
     ));
@@ -367,7 +376,7 @@ fn write_ownership_borrowing_and_partial_errors() {
     assert_eq!(sink.bytes, b"abef");
     let mut sink = Sink::new();
     sink.zero = true;
-    let result = run(BoundCall::new(
+    let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
         WriteAll::new(Bytes::from_static(b"x")),
     ));
@@ -385,7 +394,10 @@ fn segmented_and_unsized_buffers() {
     let mut sink = Sink::new();
     let mut input = (&b"ab"[..]).chain(&b"cde"[..]);
     let input: &mut dyn Buf = &mut input;
-    let result = run(BoundCall::new(Pin::new(&mut sink), WriteAll::new(input)));
+    let result = run(CallExecutor::execute(
+        Pin::new(&mut sink),
+        WriteAll::new(input),
+    ));
     assert_eq!(result.result.unwrap(), 5);
     assert_eq!(sink.bytes, b"abcde");
     let mut source = Source::new(b"abcde");
@@ -393,7 +405,7 @@ fn segmented_and_unsized_buffers() {
     let mut right = [0; 3];
     let mut chain = left.as_mut_slice().chain_mut(right.as_mut_slice());
     let out: &mut dyn BufMut = &mut chain;
-    run(BoundCall::new(
+    run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadExact::new(out, 5),
     ))
@@ -438,9 +450,9 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
 }
 
 #[call]
-async fn local_codec<H: ReadHost>(
-    io: nitori_call::Target<H>,
-) -> Result<[u8; 3], nitori_io::calls::ReadExactError<H::Error>> {
+async fn local_codec<A: ReceiverAccess<Family: ReadHost>>(
+    io: &mut A,
+) -> Result<[u8; 3], nitori_io::calls::ReadExactError<<A::Family as ReadHost>::Error>> {
     let [first] = io.read_array::<1>().await?;
     let mut rest = [0; 2];
     let mut destination = rest.as_mut_slice();
@@ -448,27 +460,27 @@ async fn local_codec<H: ReadHost>(
     Ok([first, rest[0], rest[1]])
 }
 #[call]
-async fn number_codec<H: ReadHost>(
-    io: nitori_call::Target<H>,
-) -> Result<u32, nitori_io::calls::ReadLeError<H::Error>> {
+async fn number_codec<A: ReceiverAccess<Family: ReadHost>>(
+    io: &mut A,
+) -> Result<u32, nitori_io::calls::ReadLeError<<A::Family as ReadHost>::Error>> {
     io.read_le::<u32>().await
 }
 #[test]
 fn family_calls_capture_local_buffers_across_pending() {
     let mut source = Source::new(b"abc");
     assert_eq!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut source),
-            LocalCodec::<Source>::new()
+            LocalCodec::new()
         ))
         .unwrap(),
         *b"abc"
     );
     let mut source = Source::new(&0x12345678u32.to_le_bytes());
     assert_eq!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut source),
-            NumberCodec::<Source>::new()
+            NumberCodec::new()
         ))
         .unwrap(),
         0x12345678
@@ -481,7 +493,7 @@ fn cancellation_keeps_completed_prefix() {
     source.pending = false;
     let mut out = vec![];
     {
-        let mut bound = pin!(BoundCall::new(
+        let mut bound = pin!(CallExecutor::execute(
             Pin::new(&mut source),
             ReadExact::new(&mut out, 4)
         ));
@@ -498,7 +510,7 @@ fn cancellation_keeps_completed_prefix() {
     sink.pending = false;
     let mut input = Bytes::from_static(b"abcd");
     {
-        let mut bound = pin!(BoundCall::new(
+        let mut bound = pin!(CallExecutor::execute(
             Pin::new(&mut sink),
             WriteAll::new(&mut input)
         ));
@@ -518,28 +530,37 @@ fn zero_composites_are_noops_but_basic_requests_reach_host() {
     let mut source = Source::new(b"");
     source.fail_at = Some(0);
     assert_eq!(
-        run(BoundCall::new(Pin::new(&mut source), ReadArray::<0>::new())).unwrap(),
+        run(CallExecutor::execute(
+            Pin::new(&mut source),
+            ReadArray::<0>::new()
+        ))
+        .unwrap(),
         []
     );
     assert!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut source),
-            Read::new(&mut [0u8; 0].as_mut_slice())
+            read::Read::new(&mut [0u8; 0].as_mut_slice())
         ))
         .is_err()
     );
     let mut sink = Sink::new();
     sink.fail_at = Some(0);
     assert_eq!(
-        run(BoundCall::new(Pin::new(&mut sink), WriteAll::new(&b""[..])))
-            .result
-            .unwrap(),
+        run(CallExecutor::execute(
+            Pin::new(&mut sink),
+            WriteAll::new(&b""[..])
+        ))
+        .result
+        .unwrap(),
         0
     );
     assert!(
-        run(BoundCall::new(Pin::new(&mut sink), Write::new(&b""[..])))
-            .result
-            .is_err()
+        run(CallExecutor::execute(
+            Pin::new(&mut sink),
+            write::Write::new(&mut &b""[..])
+        ))
+        .is_err()
     );
 }
 
@@ -549,10 +570,18 @@ fn endian_numbers_preserve_bits() {
         ($ty:ty, $value:expr) => {{
             let value: $ty = $value;
             let mut source = Source::new(&value.to_le_bytes());
-            let actual = run(BoundCall::new(Pin::new(&mut source), ReadLe::<$ty>::new())).unwrap();
+            let actual = run(CallExecutor::execute(
+                Pin::new(&mut source),
+                ReadLe::<$ty>::new(),
+            ))
+            .unwrap();
             assert_eq!(actual.to_le_bytes(), value.to_le_bytes());
             let mut source = Source::new(&value.to_be_bytes());
-            let actual = run(BoundCall::new(Pin::new(&mut source), ReadBe::<$ty>::new())).unwrap();
+            let actual = run(CallExecutor::execute(
+                Pin::new(&mut source),
+                ReadBe::<$ty>::new(),
+            ))
+            .unwrap();
             assert_eq!(actual.to_be_bytes(), value.to_be_bytes());
         }};
     }
@@ -577,28 +606,38 @@ fn basic_calls_and_chunk_termination() {
     let mut source = ChunkSource(Source::new(b"abcde"));
     let mut out = vec![];
     assert_eq!(
-        run(BoundCall::new(Pin::new(&mut source), Read::new(&mut out))).unwrap(),
+        run(CallExecutor::execute(
+            Pin::new(&mut source),
+            read::Read::new(&mut out)
+        ))
+        .unwrap(),
         2
     );
     assert_eq!(out, b"ab");
     assert_eq!(
-        run(BoundCall::new(Pin::new(&mut source), ReadChunk::new(nz(1))))
-            .unwrap()
-            .unwrap(),
+        run(CallExecutor::execute(
+            Pin::new(&mut source),
+            read_chunk::ReadChunk::new(nz(1))
+        ))
+        .unwrap()
+        .unwrap(),
         b"c"[..]
     );
-    run(BoundCall::new(
+    run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadChunksExact::new(2, nz(1)),
     ))
     .unwrap();
     assert!(
-        run(BoundCall::new(Pin::new(&mut source), ReadChunk::new(nz(1))))
-            .unwrap()
-            .is_none()
+        run(CallExecutor::execute(
+            Pin::new(&mut source),
+            read_chunk::ReadChunk::new(nz(1))
+        ))
+        .unwrap()
+        .is_none()
     );
     assert_eq!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut source),
             ReadChunks::new(100, nz(5))
         ))
@@ -607,7 +646,7 @@ fn basic_calls_and_chunk_termination() {
     );
     let before = source.0.polls.get();
     assert_eq!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut source),
             ReadChunks::new(0, nz(5))
         ))
@@ -656,7 +695,11 @@ fn fill_to_chunk_clears_storage_on_eof_error_and_cancel() {
     );
     drop(storage);
     assert_eq!(
-        run(BoundCall::new(Pin::new(&mut source), ReadArray::<3>::new())).unwrap(),
+        run(CallExecutor::execute(
+            Pin::new(&mut source),
+            ReadArray::<3>::new()
+        ))
+        .unwrap(),
         *b"abc"
     );
 }
@@ -666,7 +709,7 @@ fn read_to_end_preserves_partial_host_failure() {
     let mut source = Source::new(b"abcd");
     source.fail_at = Some(2);
     let mut out = b"prefix".to_vec();
-    let error = run(BoundCall::new(
+    let error = run(CallExecutor::execute(
         Pin::new(&mut source),
         ReadToEnd::new(&mut out),
     ))
@@ -705,7 +748,7 @@ fn host_does_not_need_unpin() {
     };
     let mut host = pin!(host);
     assert_eq!(
-        run(BoundCall::new(host.as_mut(), ReadArray::<3>::new())).unwrap(),
+        run(CallExecutor::execute(host.as_mut(), ReadArray::<3>::new())).unwrap(),
         *b"abc"
     );
 }
@@ -728,14 +771,18 @@ impl<'a> ReadHost for BorrowedErrorHost<'a> {
 fn host_errors_need_neither_error_trait_nor_static_lifetime() {
     let message = String::from("borrowed");
     let mut host = BorrowedErrorHost(&message);
-    let error = run(BoundCall::new(Pin::new(&mut host), ReadArray::<1>::new())).unwrap_err();
+    let error = run(CallExecutor::execute(
+        Pin::new(&mut host),
+        ReadArray::<1>::new(),
+    ))
+    .unwrap_err();
     assert_eq!(*error.host_error().unwrap(), message);
 }
 
 #[call]
-async fn borrowed_write<H: WriteHost>(
-    io: nitori_call::Target<H>,
-) -> Result<usize, nitori_io::calls::WriteAllError<H::Error>> {
+async fn borrowed_write<A: ReceiverAccess<Family: WriteHost>>(
+    io: &mut A,
+) -> Result<usize, nitori_io::calls::WriteAllError<<A::Family as WriteHost>::Error>> {
     let mut input = Bytes::from_static(b"abc");
     let returned = io.write_all(&mut input).await;
     returned.result
@@ -744,9 +791,9 @@ async fn borrowed_write<H: WriteHost>(
 fn family_write_borrows_local_input() {
     let mut host = Sink::new();
     assert_eq!(
-        run(BoundCall::new(
+        run(CallExecutor::execute(
             Pin::new(&mut host),
-            BorrowedWrite::<Sink>::new()
+            BorrowedWrite::new()
         ))
         .unwrap(),
         3
@@ -810,7 +857,7 @@ fn operation_errors_accept_borrowed_payloads_without_diagnostic_traits() {
     };
     macro_rules! check_read {
         ($call:expr) => {
-            let error = run(BoundCall::new(Pin::new(&mut host), $call))
+            let error = run(CallExecutor::execute(Pin::new(&mut host), $call))
                 .err()
                 .unwrap();
             assert_eq!(error.host_error().unwrap().0, message);
@@ -826,27 +873,27 @@ fn operation_errors_accept_borrowed_payloads_without_diagnostic_traits() {
     check_read!(ReadExact::new(&mut buffer, 2));
     check_read!(ReadToEnd::new(&mut buffer));
 
-    let mut chunks = pin!(BoundCall::new(
+    let mut chunks = pin!(CallExecutor::execute(
         Pin::new(&mut host),
         ReadChunks::new(2, nz(2))
     ));
-    let Some(CoroutineState::Complete(Err(error))) = run(chunks.as_mut().next()) else {
+    let Some(ControlFlow::Break(Err(error))) = run(next(chunks.as_mut())) else {
         panic!("expected chunk host failure");
     };
     assert_eq!(error.host_error().0, message);
     assert_eq!(error.to_string(), "read failed after 0 bytes");
 
-    let mut exact = pin!(BoundCall::new(
+    let mut exact = pin!(CallExecutor::execute(
         Pin::new(&mut host),
         ReadChunksExact::new(2, nz(2))
     ));
-    let Some(CoroutineState::Complete(Err(error))) = run(exact.as_mut().next()) else {
+    let Some(ControlFlow::Break(Err(error))) = run(next(exact.as_mut())) else {
         panic!("expected exact chunk host failure");
     };
     assert_eq!(error.host_error().unwrap().0, message);
     assert_eq!(error.to_string(), "read failed after 0 bytes");
 
-    let returned = run(BoundCall::new(
+    let returned = run(CallExecutor::execute(
         Pin::new(&mut host),
         WriteAll::new(Bytes::from_static(b"x")),
     ));
@@ -862,7 +909,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
     let mut host = RawHost { failure: None };
     macro_rules! incomplete {
         ($call:expr, $error:ident) => {
-            let error = run(BoundCall::new(Pin::new(&mut host), $call))
+            let error = run(CallExecutor::execute(Pin::new(&mut host), $call))
                 .err()
                 .unwrap();
             assert_eq!(error.to_string(), "read incomplete after 0 of 2 bytes");
@@ -884,7 +931,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
     incomplete!(ReadLe::<u16>::new(), ReadLeError);
     incomplete!(ReadBe::<u16>::new(), ReadBeError);
     let mut empty: &mut [u8] = &mut [];
-    let error = run(BoundCall::new(
+    let error = run(CallExecutor::execute(
         Pin::new(&mut host),
         ReadExact::new(&mut empty, 1),
     ))
@@ -892,7 +939,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
     .unwrap();
     assert_eq!(error.completed(), 0);
     assert!(matches!(error, ReadExactError::InsufficientCapacity { .. }));
-    let returned = run(BoundCall::new(
+    let returned = run(CallExecutor::execute(
         Pin::new(&mut host),
         WriteAll::new(Bytes::from_static(b"x")),
     ));
@@ -913,7 +960,7 @@ fn numeric_errors_preserve_progress_and_original_source() {
         ($call:expr, $error:ident) => {
             let mut source = Source::new(b"abcd");
             source.fail_at = Some(2);
-            let error = run(BoundCall::new(Pin::new(&mut source), $call)).unwrap_err();
+            let error = run(CallExecutor::execute(Pin::new(&mut source), $call)).unwrap_err();
             assert_eq!(error.completed(), 2);
             let original = std::error::Error::source(&error).unwrap();
             assert!(std::ptr::eq(
@@ -947,36 +994,23 @@ nitori_call::family_receiver!(impl ['a] for RawHost<'a>);
 
 #[test]
 fn local_validation_and_zero_length_composites_do_not_request_a_view() {
-    use nitori_call::{CallOn, Direct, DirectView, ReceiverScope};
-    struct Unavailable;
-    impl<'v> ReceiverScope<'v> for Unavailable {
-        type Family = Direct<std::io::Cursor<Vec<u8>>>;
-        fn poll_view(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-        ) -> Poll<Pin<&mut DirectView<'v, std::io::Cursor<Vec<u8>>>>> {
-            panic!("receiver should not be requested")
-        }
-    }
-    let mut scope = Unavailable;
-    let mut cx = Context::from_waker(std::task::Waker::noop());
+    use nitori_call::{Call, CallPoll, Direct};
+    type F = Direct<std::io::Cursor<Vec<u8>>>;
+    let mut cx = Context::from_waker(Waker::noop());
     let mut destination = &mut [0u8; 0][..];
-    let mut insufficient = nitori_io::calls::ReadExact::new(&mut destination, 1);
+    let insufficient = pin!(Call::<F, _>::new(ReadExact::new(&mut destination, 1)));
     assert!(matches!(
-        Pin::new(&mut insufficient).poll_call(Pin::<&mut Unavailable>::new(&mut scope), &mut cx),
-        Poll::Ready(CoroutineState::Complete(Err(_)))
+        insufficient.poll_return_with(None, &mut cx),
+        CallPoll::Ready(Err(_))
     ));
-    let mut empty = nitori_io::calls::ReadArray::<0>::new();
+    let empty = pin!(Call::<F, _>::new(ReadArray::<0>::new()));
     assert!(matches!(
-        Pin::new(&mut empty).poll_call(Pin::<&mut Unavailable>::new(&mut scope), &mut cx),
-        Poll::Ready(CoroutineState::Complete(Ok([])))
+        empty.poll_return_with(None, &mut cx),
+        CallPoll::Ready(Ok([]))
     ));
-    let mut empty = nitori_io::calls::WriteAll::new(&b""[..]);
+    let empty = pin!(Call::<F, _>::new(WriteAll::new(&b""[..])));
     assert!(matches!(
-        Pin::new(&mut empty).poll_call(Pin::<&mut Unavailable>::new(&mut scope), &mut cx),
-        Poll::Ready(CoroutineState::Complete(nitori_io::calls::WriteReturn {
-            result: Ok(_),
-            ..
-        }))
+        empty.poll_return_with(None, &mut cx),
+        CallPoll::Ready(WriteReturn { result: Ok(0), .. })
     ));
 }

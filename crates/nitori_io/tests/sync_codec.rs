@@ -1,37 +1,38 @@
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::{BoundCall, call};
-use nitori_io::{PollReadExt as _, TargetReadExt as _, TargetWriteExt as _};
+#![feature(impl_trait_in_assoc_type, yield_expr)]
+use futures_core::Stream;
+use nitori_call::{CallExecutor, ReceiverAccess, call};
+use nitori_io::PollReadExt as _;
 use nitori_io::{
     Read, Write,
-    calls::{ReadArrayError, WriteAllError, WriteReturn},
+    calls::{ReadArrayError, ReadArrayExt as _, WriteAllError, WriteAllExt as _, WriteReturn},
 };
 use std::{
     future::Future,
-    ops::CoroutineState,
+    ops::ControlFlow,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
 
 #[call(sync)]
-async fn header<Receiver: Read>(
-    io: nitori_call::Target<Receiver>,
-) -> Result<[u8; 3], ReadArrayError<Receiver::Error>> {
+async fn header<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+) -> Result<[u8; 3], ReadArrayError<<A::Family as Read>::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let rest = io.read_array::<2>().await?;
     Ok([tag, rest[0], rest[1]])
 }
 #[call(sync)]
-async fn encode<'input, Receiver: Write>(
-    io: nitori_call::Target<Receiver>,
+async fn encode<'input, A: ReceiverAccess<Family: Write>>(
+    io: &mut A,
     input: &'input [u8],
-) -> WriteReturn<&'input [u8], WriteAllError<Receiver::Error>> {
+) -> WriteReturn<&'input [u8], WriteAllError<<A::Family as Write>::Error>> {
     io.write_all(input).await
 }
 #[call(sync, yields = [u8; 3])]
-async fn headers<Receiver: Read>(
-    io: nitori_call::Target<Receiver>,
+async fn headers<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
     count: usize,
-) -> Result<(), ReadArrayError<Receiver::Error>> {
+) -> Result<(), ReadArrayError<<A::Family as Read>::Error>> {
     for _ in 0..count {
         yield io.header().await?;
     }
@@ -58,10 +59,11 @@ fn memory_codec_reports_natural_incomplete_and_preserves_cursor() {
 fn yielded_frames_stop_consumption_until_resumed() {
     let mut source = &b"abcdef"[..];
     {
-        let mut events = pin!(source.sync_headers_unpin(2));
-        assert!(
-            matches!(events.as_mut().next(), Some(CoroutineState::Yielded(frame)) if frame == *b"abc")
-        );
+        let mut events = pin!(source.headers_unpin(2));
+        assert!(matches!(
+            events.as_mut().poll_next(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(Some(ControlFlow::Continue(frame))) if frame == *b"abc"
+        ));
     }
     assert_eq!(source, b"def");
 }
@@ -95,7 +97,7 @@ fn same_codec_can_resume_on_async_host() {
         source: b"abc",
         waiting: false,
     };
-    let mut call = pin!(BoundCall::new(Pin::new(&mut host), Header::new()));
+    let mut call = pin!(CallExecutor::execute(Pin::new(&mut host), Header::new()));
     let mut cx = Context::from_waker(Waker::noop());
     assert!(call.as_mut().poll(&mut cx).is_pending());
     assert!(call.as_mut().poll(&mut cx).is_pending());

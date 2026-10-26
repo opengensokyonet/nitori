@@ -1,4 +1,4 @@
-#![feature(coroutine_trait, read_le)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
@@ -25,6 +25,7 @@ pub mod helpers;
 /// `Pending` and `Err` must not consume source bytes or advance the destination.
 /// Report a completed prefix before a subsequent error. Register the waker
 /// before returning `Pending`; retain no pointer into this temporary borrow.
+#[nitori_call::capability(sync)]
 pub trait Read: nitori_call::ReceiverFamily {
     type Error;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
@@ -42,13 +43,14 @@ pub trait Read: nitori_call::ReceiverFamily {
 /// A chunk need not be contiguous or zero-copy and does not borrow this poll's
 /// host access. `Pending` and `Err` consume nothing. There are no recursive
 /// defaults: use an explicit conversion helper when one path is not native.
+#[nitori_call::capability(sync)]
 pub trait ReadChunk: Read {
     type Chunk: Buf;
     fn poll_read_chunk<'visit>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Self::Chunk>, Self::Error>>
+    ) -> Poll<Result<Option<Self::Chunk>, <Self as Read>::Error>>
     where
         Self: 'visit;
 }
@@ -57,9 +59,10 @@ pub trait ReadChunk: Read {
 ///
 /// The return count equals the decrease in `remaining()`. `Pending` and `Err`
 /// leave the cursor and accepted byte count unchanged. Waiting is `Pending`,
-/// never `Ok(0)`; [`calls::WriteAll`] reports zero progress as an error.
+/// never `Ok(0)`; [`calls::write_all`] reports zero progress as an error.
 /// Acceptance does not imply flushing or remote delivery. Empty requests reach
 /// the host. The buffer borrow lasts only for this poll.
+#[nitori_call::capability(sync)]
 pub trait Write: nitori_call::ReceiverFamily {
     type Error;
     fn poll_write<'visit, Input: Buf + ?Sized>(

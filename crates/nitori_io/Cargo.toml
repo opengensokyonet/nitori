@@ -17,3 +17,7 @@ pin-project-lite.workspace = true
 bytes.workspace = true
 nitori_call = { workspace = true, features = ["bytes"] }
 snafu.workspace = true
+
+[dev-dependencies]
+futures-core.workspace = true
+tokio = { workspace = true, features = ["io-util"] }

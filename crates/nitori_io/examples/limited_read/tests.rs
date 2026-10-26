@@ -1,9 +1,8 @@
 use super::*;
 use bytes::BufMut;
-use nitori_call::{Direct, PollCallExt, family_receiver};
+use nitori_call::{Call, CallPoll, Direct, Receiver, family_receiver};
 use std::{
     convert::Infallible,
-    ops::CoroutineState,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
@@ -38,6 +37,16 @@ impl Read for Delayed<'_> {
     }
 }
 
+fn poll<'data>(
+    call: Pin<&mut Call<Delayed<'data>, ReadRecord>>,
+    host: &mut Delayed<'data>,
+) -> CallPoll<Result<[u8; 2], ReadArrayError<Infallible>>> {
+    call.poll_return_with(
+        Some(pin!(Pin::new(host).view())),
+        &mut Context::from_waker(Waker::noop()),
+    )
+}
+
 #[test]
 fn boundary_keeps_the_next_record() {
     super::main();
@@ -49,23 +58,12 @@ fn budget_survives_pending_and_partial_reads() {
         input: b"\x01A\x02BC",
         waiting: false,
     };
-    let mut call = pin!(read_record::<Delayed<'_>>());
-    let mut cx = Context::from_waker(Waker::noop());
-    assert!(
-        call.as_mut()
-            .poll_receiver(Pin::new(&mut host), &mut cx)
-            .is_pending()
-    );
+    let mut call = pin!(Call::new(ReadRecord::new()));
+    assert!(matches!(poll(call.as_mut(), &mut host), CallPoll::Pending));
     assert_eq!(host.input, b"\x01A\x02BC");
-    assert!(
-        call.as_mut()
-            .poll_receiver(Pin::new(&mut host), &mut cx)
-            .is_pending()
-    );
+    assert!(matches!(poll(call.as_mut(), &mut host), CallPoll::Pending));
     assert_eq!(host.input, b"A\x02BC");
-    let Poll::Ready(CoroutineState::Complete(Err(error))) =
-        call.as_mut().poll_receiver(Pin::new(&mut host), &mut cx)
-    else {
+    let CallPoll::Ready(Err(error)) = poll(call.as_mut(), &mut host) else {
         panic!("expected record boundary")
     };
     assert_eq!(error.completed(), 1);
@@ -79,23 +77,10 @@ fn cancellation_preserves_unread_payload() {
         waiting: false,
     };
     {
-        let mut call = pin!(read_record::<Delayed<'_>>());
-        let mut cx = Context::from_waker(Waker::noop());
-        assert!(
-            call.as_mut()
-                .poll_receiver(Pin::new(&mut host), &mut cx)
-                .is_pending()
-        );
-        assert!(
-            call.as_mut()
-                .poll_receiver(Pin::new(&mut host), &mut cx)
-                .is_pending()
-        );
-        assert!(
-            call.as_mut()
-                .poll_receiver(Pin::new(&mut host), &mut cx)
-                .is_pending()
-        );
+        let mut call = pin!(Call::new(ReadRecord::new()));
+        for _ in 0..3 {
+            assert!(matches!(poll(call.as_mut(), &mut host), CallPoll::Pending));
+        }
     }
     assert_eq!(host.input, b"B\x02CD");
 }

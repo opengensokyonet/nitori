@@ -1,8 +1,7 @@
 # nitori_io
 
 Experimental byte IO built on `nitori_call`. Requires Rust nightly (currently
-verified with 1.100.0-nightly, 2026-09-19). The crate uses `read_le` for synchronous
-numeric decoding and does not reference `std::io::FromEndianBytes`.
+verified with 1.100.0-nightly, 2026-09-19).
 
 ## Capabilities and operations
 
@@ -14,59 +13,69 @@ chunks from the same cursor. `Write` accepts any `Buf`. Buffer generics belong
 to the methods. Neither hosts nor buffers require `Send`, `Sync`, `Unpin`, or
 `'static`. These traits are not dyn-compatible; buffer arguments can be unsized.
 
-Import receiver extension traits for child calls, and operation types from
-`nitori_io::calls` when constructing operations explicitly:
+`#[capability]` generates a primitive operation for each poll method: `read::Read`,
+`read_chunk::ReadChunk` and `write::Write`. Each borrows its buffer and completes
+with the poll's result. The operations derived from them live in `calls`,
+together with their errors. Import the generated extension traits to call them:
+`ReadExt`, `ReadChunkExt`, `WriteExt` and `calls::{Name}Ext` on receiver accesses
+inside operations, and `ReadHostExt`, `ReadChunkHostExt`, `WriteHostExt` and
+`calls::{Name}HostExt` on executors such as memory buffers and bridges.
 
 ```rust
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
-use nitori_call::{call, Target};
-use nitori_io::{Read as ReadHost, TargetReadExt};
-use nitori_io::calls::ReadExactError;
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::Read;
+use nitori_io::calls::{ReadArrayExt as _, ReadExactError, ReadExactExt as _};
 
-#[call]
-async fn header<H: ReadHost>(io: Target<H>) -> Result<[u8; 3], ReadExactError<H::Error>> {
+#[call(sync)]
+async fn header<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+) -> Result<[u8; 3], ReadExactError<<A::Family as Read>::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
     io.read_exact(&mut destination, 2).await?;
     Ok([tag, bytes[0], bytes[1]])
 }
-# fn main() {}
+
+fn main() {
+    let mut input = b"abcd".as_slice();
+    assert_eq!(input.sync_header_unpin().unwrap(), *b"abc");
+}
 ```
 
-Consumers of `#[call]` need the feature gates above, but no direct
-pin-projection dependency. Bind an operation explicitly with
-`BoundCall::new(pinned_host, ReadArray::<3>::new())` to execute outside a call body. Local buffers and their named cursor views may remain borrowed across
-Pending. Bind temporary buffer views to locals before passing their borrows to
-child calls.
+Crates that define operations enable `impl_trait_in_assoc_type`; using the
+generated host methods needs no features. Local buffers and their cursor views
+may stay borrowed across Pending.
 
-| Operation constructor | Completion |
+| Operation | Final value |
 | --- | --- |
-| `Read::new(&mut destination)` | `Result<usize, H::Error>` |
-| `ReadChunk::new(nonzero_maximum)` | `Result<Option<H::Chunk>, H::Error>` |
-| `Write::new(input)` | `WriteReturn<Input, H::Error>` |
-| `ReadExact::new(&mut destination, length)` | `Result<(), ReadExactError<H::Error>>` |
-| `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<H::Error>>` |
-| `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; `Result<usize, ReadChunksError<H::Error>>` |
-| `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; `Result<(), ReadChunksExactError<H::Error>>` |
-| `WriteAll::new(input)` | `WriteReturn<Input, WriteAllError<H::Error>>` |
-| `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<H::Error>>` |
-| `ReadLe::<T>::new()` | `Result<T, ReadLeError<H::Error>>` |
-| `ReadBe::<T>::new()` | `Result<T, ReadBeError<H::Error>>` |
+| `read::Read::new(&mut destination)` | `Result<usize, F::Error>` |
+| `read_chunk::ReadChunk::new(nonzero_maximum)` | `Result<Option<F::Chunk>, F::Error>` |
+| `write::Write::new(&mut input)` | `Result<usize, F::Error>` |
+| `ReadExact::new(&mut destination, length)` | `Result<(), ReadExactError<F::Error>>` |
+| `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<F::Error>>` |
+| `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; `Result<usize, ReadChunksError<F::Error>>` |
+| `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; `Result<(), ReadChunksExactError<F::Error>>` |
+| `WriteAll::new(input)` | `WriteReturn<Input, WriteAllError<F::Error>>` |
+| `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<F::Error>>` |
+| `ReadLe::<T>::new()` | `Result<T, ReadLeError<F::Error>>` |
+| `ReadBe::<T>::new()` | `Result<T, ReadBeError<F::Error>>` |
+
+The derived operations are also functions, such as `calls::read_exact(io,
+destination, length)`, for use inside other operations.
 
 Numeric operations support all integer primitives (including `usize`/`isize`)
 and `f32`/`f64`, preserving floating-point bits. They read a `size_of::<T>()` array
 before synchronous decoding. Pointer-sized encodings depend on the target width.
 
-Actual hosts provide `ReadExt`, `ChunkExt`, and `WriteExt` operation methods
-returning bound calls, with pinned and `_unpin` entries. They also provide `PollReadExt` / `PollWriteExt` for synchronous poll
-access through their canonical family. `TargetReadExt`, `TargetChunkExt`,
-and `TargetWriteExt` work on both root and composed receivers. A local
-resource can use `nitori_call::family_receiver!` and implement the family capability
-on itself; custom wrapper families define their own views and capability identity.
-IO operations request the current scope lazily and invoke capabilities on its
-cached view, without reconstructing it. Resource extension methods also work
-on custom `ResourceDriver` implementations.
+Host methods have pinned and `_unpin` entries, plus `sync_` entries for
+resources that never wait. Receivers also provide `PollReadExt` and
+`PollWriteExt` for one synchronous poll through their family. Access methods
+work on the root access and on composed ones. A local resource can use
+`nitori_call::family_receiver!` and implement the capability on itself; custom
+wrapper families define their own views. Host methods also work on custom
+`CallExecutor` implementations.
 
 ## Built-in hosts and bridges
 
@@ -100,6 +109,13 @@ The `bridge` module adapts external IO **into** nitori capabilities:
 - `bridge::Futures<T>` accepts the traits re-exported by `futures::io` with
   feature `futures`, depending only on `futures-io`.
 
+In the other direction, `bridge::ReadAccess<A>` wraps a receiver access inside
+an operation and implements `tokio::io::AsyncRead` and `futures_io::AsyncRead`
+with the corresponding feature, so codecs written for those traits can run
+inside an operation. It reads through the access on each poll, buffers nothing,
+and converts the family's read errors into `std::io::Error`. Writing is not yet
+adapted, since flush and close are not part of `Write`.
+
 Default features are empty. Both optional features may be enabled together.
 The crate still requires std when default features are disabled. Async bridges
 support pinned, borrowed, and non-Send hosts. Each wrapper provides `new`,
@@ -112,7 +128,6 @@ on Pending and errors without unsafe code. They retain no unread bytes or
 per-poll buffer pointers. Writes pass one contiguous input segment directly to
 the host. Empty requests still reach the host. Flush, close, and seek remain
 explicit operations on the underlying object; dropping a bridge adds no flush.
-Reverse conversion is not provided.
 
 `adapters::Chunked<T>` adds copying `ReadChunk` to a host whose family implements `Read`, including a bridge,
 with an explicit nonzero chunk capacity. It caps each read by both that capacity
@@ -152,7 +167,7 @@ reports only newly appended bytes. If its destination fills before EOF is
 confirmed, it reports capacity failure, even for an exactly fitting source; it
 does not consume a probe byte.
 
-Each composite operation has its own error type in `calls`, defined alongside
+Each derived operation has its own error type in `calls`, defined alongside
 the operation and containing only failures that operation can produce.
 `Incomplete`, `InsufficientCapacity`, and `WriteZero` are reusable error primitives
 in `error`. Match operation error variants directly to recover their structured
@@ -168,9 +183,10 @@ when the host error implements `Error + 'static`. Primitive variants delegate
 diagnostics transparently; host variants retain the original source directly.
 Array/numeric failures report progress but do not return the partial array.
 
-`WriteReturn` contains `input` and `result`. Owned input or a borrowed cursor is
-returned on success and ordinary failure. `WriteAll` errors report total accepted
-bytes and preserve the remaining tail. A nonempty successful zero write is a
+`write::Write` borrows its input cursor and advances it by the accepted count.
+`WriteAll` owns its input and completes with a `WriteReturn` containing `input`
+and `result`, on success and on ordinary failure; its errors report total
+accepted bytes and preserve the remaining tail. A nonempty successful zero write is a
 `WriteZero` failure. Accepted bytes do not imply flushing or remote delivery.
 
 Derived operations retain progress across Pending. Dropping a call does not
@@ -185,11 +201,11 @@ fails locally. Empty basic reads do not establish EOF.
 
 ## Chunks and conversion helpers
 
-Chunk sequences yield one nonempty bounded chunk per resumption and never collect
-the whole sequence. Use `BoundCall` as a Stream or its pinned `next()` method to
-receive `CoroutineState::Yielded` followed by one `Complete` event. Directly
-awaiting a BoundCall discards yields. Inside a call, pin the child and await `child.as_mut().next()` to relay its
-yields and observe its completion.
+Chunk sequences yield one nonempty bounded chunk per poll and never collect
+the whole sequence. Read an execution as a Stream to receive
+`ControlFlow::Continue(chunk)` for each chunk, then one `Break` with the final
+value; awaiting it drops the chunks. Inside an operation, pin the child and
+await `child.as_mut().next()` to relay its chunks and observe its final value.
 
 `helpers::poll_read_from_chunk` copies a single bounded chunk into the destination.
 The host must perform its terminal-error checks before delegating, especially
@@ -208,11 +224,12 @@ remain outside this first implementation.
 ## Verification
 
 From the repository root, run the checks listed in the root README. The focused
-suite is `cargo test --locked -p nitori_io`; it includes real BoundCall
-execution, family macro calls, Pending/wakeup behavior, typed errors, buffer
+suite is `cargo test --locked -p nitori_io`; it includes execution on hosts,
+operations written with `#[call]`, Pending/wakeup behavior, typed errors, buffer
 ownership, cancellation, conversion helpers, and numeric decoding.
 
 For the optional bridges, also run `cargo test --locked -p nitori_io --features tokio`, `cargo test --locked -p nitori_io --features futures`,
 and `cargo test --locked -p nitori_io --all-features`. The bridge tests
 exercise pinned non-Send hosts, wakeups, error identity, partial progress,
-segmented buffers, and cancellation followed by a different chunk maximum.
+segmented buffers, cancellation followed by a different chunk maximum, and
+codecs for the async reader traits running inside an operation.

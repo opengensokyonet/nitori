@@ -1,5 +1,5 @@
 use bytes::BufMut;
-use nitori_call::{Compose, HasReceiverFamily, ReceiverFamily, ViewLoan};
+use nitori_call::{Compose, ReceiverFamily, ViewLoan};
 use nitori_io::Read;
 use std::{
     marker::PhantomData,
@@ -20,9 +20,6 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
         = LimitedView<'v, F>
     where
         Self: 'v;
-}
-impl<F: ReceiverFamily> HasReceiverFamily for LimitedView<'_, F> {
-    type Family = Limited<F>;
 }
 impl<F: ReceiverFamily> Compose<F> for ReadLimit {
     type Family = Limited<F>;

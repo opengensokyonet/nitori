@@ -1,21 +1,35 @@
-use crate::current_codec::{ReadDataFrameExt, ReadVarintExt};
+use crate::current_codec::{ReadDataFrameHostExt as _, ReadVarintHostExt};
 use bytes::{BufMut, Bytes};
-use nitori_call::call;
-use nitori_call::{CallOn, Stream};
-use nitori_call::{PollCallExt as _, TargetExt as _};
-use nitori_io::calls::{ReadBeError, WriteAllError, WriteReturn};
-use nitori_io::{PollReadExt as _, Read, ReadChunk, WriteExt};
+use futures_core::Stream;
+use nitori_call::{
+    CallExecutor, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start, call,
+};
+use nitori_io::calls::{ReadBeError, WriteAllError, WriteAllHostExt as _, WriteReturn};
+use nitori_io::{PollReadExt as _, Read, ReadChunk};
 use std::convert::Infallible;
 use std::{
     cell::{Cell, RefCell},
-    future::Future,
+    future::{Future, poll_fn},
     marker::PhantomPinned,
     num::NonZeroUsize,
-    ops::CoroutineState,
+    ops::ControlFlow,
     pin::{Pin, pin},
     rc::Rc,
     task::{Context, Poll, Waker},
 };
+
+/// Complete a future that does not wait.
+fn run<F: Future>(future: F) -> F::Output {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("memory input does not wait"),
+    }
+}
+
+/// The next event of a stream.
+fn next<S: Stream + ?Sized>(mut stream: Pin<&mut S>) -> impl Future<Output = Option<S::Item>> + '_ {
+    poll_fn(move |cx| stream.as_mut().poll_next(cx))
+}
 
 struct Memory {
     bytes: Bytes,
@@ -112,7 +126,7 @@ impl ReadChunk for PinnedMemory {
     }
 }
 #[test]
-fn pinned_helper_supports_non_unpin_and_dyn_targets() {
+fn pinned_helper_supports_non_unpin_targets() {
     let mut source = pin!(PinnedMemory {
         inner: RefCell::new(Memory::new(b"\x01\x02", false)),
         _pin: PhantomPinned
@@ -122,9 +136,7 @@ fn pinned_helper_supports_non_unpin_and_dyn_targets() {
         let mut future = pin!(source.as_mut().read_varint());
         assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(1))));
     }
-    let mut view = nitori_call::Receiver::view(source.as_mut());
-    let erased = Pin::new(&mut view);
-    let mut future = pin!(erased.read_varint());
+    let mut future = pin!(source.as_mut().read_varint());
     assert!(matches!(future.as_mut().poll(&mut cx), Poll::Ready(Ok(2))));
 }
 #[test]
@@ -134,15 +146,15 @@ fn streaming_helper_delivers_completion_once_and_preserves_backpressure() {
     let mut cx = Context::from_waker(Waker::noop());
     {
         let mut stream = pin!(source.read_data_frame_unpin(NonZeroUsize::new(2).unwrap()));
-        let Poll::Ready(Some(CoroutineState::Yielded(chunk))) = stream.as_mut().poll_next(&mut cx)
+        let Poll::Ready(Some(ControlFlow::Continue(chunk))) = stream.as_mut().poll_next(&mut cx)
         else {
             panic!("chunk")
         };
         assert_eq!(chunk.as_ref(), b"ab");
         assert_eq!(polls.get(), 3);
         {
-            let mut next = pin!(stream.as_mut().next());
-            let Poll::Ready(Some(CoroutineState::Yielded(chunk))) = next.as_mut().poll(&mut cx)
+            let mut next = pin!(next(stream.as_mut()));
+            let Poll::Ready(Some(ControlFlow::Continue(chunk))) = next.as_mut().poll(&mut cx)
             else {
                 panic!("chunk")
             };
@@ -151,7 +163,7 @@ fn streaming_helper_delivers_completion_once_and_preserves_backpressure() {
         assert_eq!(polls.get(), 4);
         assert!(matches!(
             stream.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(CoroutineState::Complete(Ok(3))))
+            Poll::Ready(Some(ControlFlow::Break(Ok(3))))
         ));
         assert!(matches!(
             stream.as_mut().poll_next(&mut cx),
@@ -183,12 +195,12 @@ fn cancelling_next_preserves_stream_but_dropping_stream_releases_target() {
     {
         let mut stream = pin!(source.read_data_frame_unpin(NonZeroUsize::new(1).unwrap()));
         {
-            let mut next = pin!(stream.as_mut().next());
+            let mut next = pin!(next(stream.as_mut()));
             assert!(next.as_mut().poll(&mut cx).is_pending());
         }
         assert!(matches!(
             stream.as_mut().poll_next(&mut cx),
-            Poll::Ready(Some(CoroutineState::Yielded(_)))
+            Poll::Ready(Some(ControlFlow::Continue(_)))
         ));
     }
     assert_eq!(source.bytes.as_ref(), b"bc");
@@ -199,13 +211,33 @@ impl Drop for DropGuard {
         self.0.set(self.0.get() + 1)
     }
 }
-#[call]
-async fn wait_forever(io: nitori_call::Target<nitori_call::Direct<usize>>, guard: DropGuard) {
-    io.with(|__access| {
-        let mut target = __access.into_pin().get_mut().0.as_mut();
-        *target += 1
+/// A family whose view holds a number.
+trait Counter: ReceiverFamily {
+    fn bump<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> usize
+    where
+        Self: 'v;
+}
+impl Counter for Direct<usize> {
+    fn bump<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> usize
+    where
+        Self: 'v,
+    {
+        let mut target = view.get_mut().0.as_mut();
+        *target += 1;
+        *target
+    }
+}
+async fn bump<A: ReceiverAccess<Family: Counter>>(io: &mut A) -> usize {
+    poll_fn(|cx| {
+        io.poll_access(cx, |access, _| {
+            Poll::Ready(A::Family::bump(access.into_pin()))
+        })
     })
-    .await;
+    .await
+}
+#[call]
+async fn wait_forever<A: ReceiverAccess<Family: Counter>>(io: &mut A, guard: DropGuard) {
+    bump(io).await;
     std::future::pending::<()>().await;
     drop(guard);
 }
@@ -231,15 +263,32 @@ impl Fallible for usize {
         Ok(*self)
     }
 }
+/// A family whose view can produce a number or fail.
+trait FallibleFamily: ReceiverFamily {
+    type Error;
+    fn value<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> Result<usize, Self::Error>
+    where
+        Self: 'v;
+}
+impl<T: Fallible + ?Sized> FallibleFamily for Direct<T> {
+    type Error = T::Error;
+    fn value<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> Result<usize, T::Error>
+    where
+        Self: 'v,
+    {
+        view.get_mut().0.as_ref().get_ref().get()
+    }
+}
 #[call(yields = &'data str)]
-async fn generic_helper<'data, T: Fallible + ?Sized, const EXTRA: usize>(
-    io: nitori_call::Target<nitori_call::Direct<T>>,
+async fn generic_helper<'data, A: ReceiverAccess<Family: FallibleFamily>, const EXTRA: usize>(
+    io: &mut A,
     text: &'data str,
-) -> Result<usize, T::Error> {
+) -> Result<usize, <A::Family as FallibleFamily>::Error> {
     yield text;
-    io.with(|__access| {
-        let target = __access.into_pin().get_mut().0.as_mut();
-        target.get()
+    poll_fn(|cx| {
+        io.poll_access(cx, |access, _| {
+            Poll::Ready(A::Family::value(access.into_pin()))
+        })
     })
     .await
     .map(|value| value + EXTRA)
@@ -248,51 +297,46 @@ async fn generic_helper<'data, T: Fallible + ?Sized, const EXTRA: usize>(
 fn helper_preserves_lifetimes_const_arguments_and_target_errors() {
     let text = String::from("borrowed");
     let mut target = 4usize;
-    let mut stream = pin!(<usize as GenericHelperExt<usize, 3>>::generic_helper_unpin(
+    let mut stream = pin!(<usize as GenericHelperHostExt>::generic_helper_unpin::<3>(
         &mut target,
         &text
     ));
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
         stream.as_mut().poll_next(&mut cx),
-        Poll::Ready(Some(CoroutineState::Yielded("borrowed")))
+        Poll::Ready(Some(ControlFlow::Continue("borrowed")))
     ));
     assert!(matches!(
         stream.as_mut().poll_next(&mut cx),
-        Poll::Ready(Some(CoroutineState::Complete(Ok(7))))
+        Poll::Ready(Some(ControlFlow::Break(Ok(7))))
     ));
 }
-// The new contract permits target-dependent signatures on one operation type.
+// One operation type has an output for each family.
 struct Identity;
-impl<T: Copy> CallOn<nitori_call::Direct<T>> for Identity {
-    type Yield = std::convert::Infallible;
-    type Return = T;
-    fn poll_call<'v>(
-        self: Pin<&mut Self>,
-        target: Pin<&mut dyn nitori_call::ReceiverScope<'v, Family = nitori_call::Direct<T>>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<CoroutineState<Self::Yield, T>>
-    where
-        nitori_call::Direct<T>: 'v,
-    {
-        let target = std::task::ready!(target.poll_view(cx));
-
-        Poll::Ready(CoroutineState::Complete(*target.get_mut().0))
+impl<T: Copy> Operation<Direct<T>> for Identity {
+    type Output = T;
+    type Yield = Infallible;
+}
+impl<'s, T: Copy, A: ReceiverAccess<Family = Direct<T>>> Start<'s, A> for Identity {
+    type Fut = impl Future<Output = T>;
+    fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+        async move {
+            poll_fn(|cx| {
+                io.poll_access(cx, |access, _| Poll::Ready(*access.into_pin().get_mut().0))
+            })
+            .await
+        }
     }
 }
 #[test]
 fn one_operation_type_has_a_signature_for_each_target() {
-    let mut cx = Context::from_waker(Waker::noop());
     let mut number = 7u32;
     let mut flag = true;
     assert_eq!(
-        Pin::new(&mut Identity).poll_receiver(Pin::new(&mut number), &mut cx),
-        Poll::Ready(CoroutineState::Complete(7))
+        run(CallExecutor::execute(Pin::new(&mut number), Identity)),
+        7
     );
-    assert_eq!(
-        Pin::new(&mut Identity).poll_receiver(Pin::new(&mut flag), &mut cx),
-        Poll::Ready(CoroutineState::Complete(true))
-    );
+    assert!(run(CallExecutor::execute(Pin::new(&mut flag), Identity)));
 }
 
 #[test]
@@ -313,9 +357,12 @@ fn write_helper_infers_input_generic_and_preserves_owned_result() {
     assert_eq!(target, b"abc");
 }
 
-async fn through_trait_only<F: Read, T: ReadVarintExt<F> + ?Sized>(
+async fn through_trait_only<T: ReadVarintHostExt + ?Sized>(
     target: Pin<&mut T>,
-) -> Result<u64, ReadBeError<F::Error>> {
+) -> Result<u64, ReadBeError<<T::Family as Read>::Error>>
+where
+    T::Family: Read,
+{
     target.read_varint().await
 }
 #[test]
@@ -333,7 +380,7 @@ fn no_yield_operation_still_exposes_completion_as_a_stream() {
     let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(
         stream.as_mut().poll_next(&mut cx),
-        Poll::Ready(Some(CoroutineState::Complete(Ok(5))))
+        Poll::Ready(Some(ControlFlow::Break(Ok(5))))
     ));
     assert!(matches!(
         stream.as_mut().poll_next(&mut cx),
@@ -346,7 +393,7 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
     let mut cx = Context::from_waker(Waker::noop());
     {
         let mut call = pin!(source.read_data_frame_unpin(NonZeroUsize::new(1).unwrap()));
-        let Poll::Ready(Some(CoroutineState::Yielded(chunk))) = call.as_mut().poll_next(&mut cx)
+        let Poll::Ready(Some(ControlFlow::Continue(chunk))) = call.as_mut().poll_next(&mut cx)
         else {
             panic!("chunk")
         };
@@ -362,7 +409,7 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
 
 async fn write_through_trait_only<
     F: nitori_io::Write,
-    T: nitori_call::ResourceDriver<Family = F> + ?Sized + Unpin,
+    T: CallExecutor<Family = F> + ?Sized + Unpin,
 >(
     target: &mut T,
     input: Bytes,

@@ -1,20 +1,27 @@
 //! A length-prefixed record cannot let its child parser consume the next record.
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type)]
 
 mod limit;
 
 use limit::ReadLimit;
-use nitori_call::{Target, TargetExt, call};
-use nitori_io::{Read, TargetReadExt, calls::ReadArrayError};
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{
+    Read,
+    calls::{ReadArrayError, ReadArrayExt as _},
+};
 
 // This parser can be reused with either an unrestricted or a limited receiver.
 #[call(sync)]
-async fn read_word<H: Read>(io: Target<H>) -> Result<[u8; 2], ReadArrayError<H::Error>> {
+async fn read_word<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+) -> Result<[u8; 2], ReadArrayError<<A::Family as Read>::Error>> {
     io.read_array::<2>().await
 }
 
 #[call(sync)]
-async fn read_record<H: Read>(io: Target<H>) -> Result<[u8; 2], ReadArrayError<H::Error>> {
+async fn read_record<A: ReceiverAccess<Family: Read>>(
+    io: &mut A,
+) -> Result<[u8; 2], ReadArrayError<<A::Family as Read>::Error>> {
     let [length] = io.read_array::<1>().await?;
     io.compose(ReadLimit(usize::from(length))).read_word().await
 }

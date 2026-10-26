@@ -1,257 +1,253 @@
-#![feature(coroutine_trait)]
-#![deny(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../README.md")]
-use std::{
-    future::{Future, poll_fn},
-    ops::CoroutineState,
-    pin::Pin,
-    task::{Context, Poll},
-};
-
-/// Standard Stream contract exposed for consumers of bound operations.
-pub use futures_core::Stream;
+//!
+//! ## Exclusive access
+//!
+//! A slot is borrowed mutably by each use, so steps run one after another:
+//!
+//! ```
+//! # use nitori_call::{Direct, ReceiverAccess, ReceiverSlot};
+//! # use std::{future::poll_fn, task::Poll};
+//! async fn sequential(io: &mut ReceiverSlot<'_, Direct<Vec<u8>>>) {
+//!     poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(()))).await;
+//!     poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(()))).await;
+//! }
+//! ```
+//!
+//! Two concurrent uses of one slot are rejected; sharing must be explicit.
+//!
+//! ```compile_fail
+//! # use nitori_call::{Direct, ReceiverAccess, ReceiverSlot};
+//! # use std::{future::poll_fn, task::Poll};
+//! async fn concurrent(io: &mut ReceiverSlot<'_, Direct<Vec<u8>>>) {
+//!     let first = poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(())));
+//!     let second = poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(())));
+//!     let _ = (first, second);
+//! }
+//! ```
+//!
+//! ## The brand
+//!
+//! No operation returns its slot for every brand:
+//!
+//! ```compile_fail
+//! # use nitori_call::{Emitter, Operation, ReceiverFamily, ReceiverSlot, Start};
+//! # use std::{convert::Infallible, future::{Ready, ready}};
+//! struct Leak;
+//! impl<F: ReceiverFamily> Operation<F> for Leak {
+//!     type Output = ReceiverSlot<'static, F>;
+//!     type Yield = Infallible;
+//! }
+//! impl<'s, F: ReceiverFamily> Start<'s, ReceiverSlot<'s, F>> for Leak {
+//!     type Fut = Ready<ReceiverSlot<'static, F>>;
+//!     fn start(self, io: ReceiverSlot<'s, F>, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!         ready(io)
+//!     }
+//! }
+//! ```
+//!
+//! and a call rejects an operation that accepts only one brand, such as one
+//! that stores its slot in outside state:
+//!
+//! ```compile_fail
+//! # use nitori_call::{Call, Direct, Emitter, Operation, ReceiverSlot, Start};
+//! # use std::{convert::Infallible, future::{Ready, ready}};
+//! type F = Direct<Vec<u8>>;
+//! struct Keep<'x>(&'x mut Option<ReceiverSlot<'x, F>>);
+//! impl Operation<F> for Keep<'_> {
+//!     type Output = ();
+//!     type Yield = Infallible;
+//! }
+//! impl<'x> Start<'x, ReceiverSlot<'x, F>> for Keep<'x> {
+//!     type Fut = Ready<()>;
+//!     fn start(self, io: ReceiverSlot<'x, F>, _: Emitter<'x, Infallible>) -> Ready<()> {
+//!         *self.0 = Some(io);
+//!         ready(())
+//!     }
+//! }
+//! fn store<'x>(kept: &'x mut Option<ReceiverSlot<'x, F>>) {
+//!     let _ = Call::new(Keep(kept));
+//! }
+//! ```
+//!
+//! ## Threads
+//!
+//! A slot stays on the thread polling its call:
+//!
+//! ```compile_fail
+//! # use nitori_call::{Direct, ReceiverAccess, ReceiverSlot};
+//! # use std::task::{Context, Poll, Waker};
+//! fn elsewhere(io: &mut ReceiverSlot<'_, Direct<Vec<u8>>>) {
+//!     std::thread::scope(|scope| {
+//!         scope.spawn(|| io.poll_access(&mut Context::from_waker(Waker::noop()), |_, _| Poll::Ready(())));
+//!     });
+//! }
+//! ```
+//!
+//! A call is `Send` when everything its operation keeps apart from the slot is
+//! `Send`. The resource and its views need not be: they are used only
+//! during a poll, on the polling thread.
+//!
+//! ```
+//! #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_call::{Call, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start};
+//! # use std::{convert::Infallible, future::{Future, poll_fn}, rc::Rc, task::Poll};
+//! struct Touch;
+//! impl<F: ReceiverFamily> Operation<F> for Touch {
+//!     type Output = ();
+//!     type Yield = Infallible;
+//! }
+//! impl<'s, A: ReceiverAccess> Start<'s, A> for Touch {
+//!     type Fut = impl Future<Output = ()>;
+//!     fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!         async move { poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(()))).await }
+//!     }
+//! }
+//! fn assert_send<T: Send>(_: T) {}
+//! assert_send(Call::<Direct<Rc<u8>>, _>::new(Touch));
+//! ```
+//!
+//! An operation that keeps something else that is not `Send` across a wait
+//! makes its call not `Send`:
+//!
+//! ```compile_fail
+//! #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_call::{Call, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start};
+//! # use std::{convert::Infallible, future::{Future, poll_fn}, rc::Rc, task::Poll};
+//! struct Hold;
+//! impl<F: ReceiverFamily> Operation<F> for Hold {
+//!     type Output = ();
+//!     type Yield = Infallible;
+//! }
+//! impl<'s, A: ReceiverAccess> Start<'s, A> for Hold {
+//!     type Fut = impl Future<Output = ()>;
+//!     fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!         async move {
+//!             let kept = Rc::new(());
+//!             poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(()))).await;
+//!             drop(kept);
+//!         }
+//!     }
+//! }
+//! fn assert_send<T: Send>(_: T) {}
+//! assert_send(Call::<Direct<Vec<u8>>, _>::new(Hold));
+//! ```
+#![deny(unsafe_op_in_unsafe_fn)]
 
 mod receiver;
-pub use receiver::{
-    BorrowedReceiver, Direct, DirectView, HasReceiverFamily, Receiver, ReceiverFamily,
-};
-mod scope;
-pub use scope::{BorrowedScope, ReceiverScope, ViewScope};
-mod driver;
-pub use driver::{Drive, DriveMode, Execution, ExecutionControl, ResourceDriver, drive};
+pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamily};
 mod loan;
 pub use loan::{ViewLoan, ViewOperation};
-
-pub trait CallOn<F: ReceiverFamily> {
-    type Yield;
-    type Return;
-    fn poll_call<'visit>(
-        self: Pin<&mut Self>,
-        host: Pin<&mut dyn ReceiverScope<'visit, Family = F>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<CoroutineState<Self::Yield, Self::Return>>
-    where
-        F: 'visit;
-    fn poll_return<'view>(
-        mut self: Pin<&mut Self>,
-        mut scope: Pin<&mut dyn ReceiverScope<'view, Family = F>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Self::Return>
-    where
-        F: 'view,
-    {
-        loop {
-            match self.as_mut().poll_call(scope.as_mut(), cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(CoroutineState::Yielded(value)) => drop(value),
-                Poll::Ready(CoroutineState::Complete(value)) => return Poll::Ready(value),
-            }
-        }
-    }
-}
-
-pin_project_lite::pin_project! {
-    /// An operation bound to a real host borrow. This adapter retains that borrow
-    /// across Pending; the underlying CallOn operation itself does not require this.
-    #[must_use = "bound calls do nothing until polled"]
-    pub struct BoundCall<'host, H: ?Sized, Operation> {
-        host: Pin<&'host mut H>,
-        #[pin]
-        operation: Operation,
-        terminal: bool,
-    }
-}
-impl<'host, H: Receiver + ?Sized, Operation: CallOn<H::Family>> BoundCall<'host, H, Operation> {
-    pub fn new(host: Pin<&'host mut H>, operation: Operation) -> Self {
-        Self {
-            host,
-            operation,
-            terminal: false,
-        }
-    }
-
-    /// Poll one event without requiring the operation to implement Unpin.
-    /// Complete is delivered once, followed by None on subsequent calls.
-    pub fn next(
-        mut self: Pin<&mut Self>,
-    ) -> impl Future<Output = Option<CoroutineState<Operation::Yield, Operation::Return>>> {
-        poll_fn(move |cx| self.as_mut().poll_next(cx))
-    }
-}
-impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> Stream for BoundCall<'_, H, Operation> {
-    type Item = CoroutineState<Operation::Yield, Operation::Return>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        if *this.terminal {
-            return Poll::Ready(None);
-        }
-        // Poison on unwinding; no attempt is made to resume a panicked operation.
-        *this.terminal = true;
-        let result = {
-            let mut scope = std::pin::pin!(BorrowedScope::new(this.host.as_mut()));
-            this.operation.poll_call(scope.as_mut(), cx)
-        };
-        match result {
-            Poll::Pending => {
-                *this.terminal = false;
-                Poll::Pending
-            }
-            Poll::Ready(CoroutineState::Yielded(item)) => {
-                *this.terminal = false;
-                Poll::Ready(Some(CoroutineState::Yielded(item)))
-            }
-            Poll::Ready(CoroutineState::Complete(value)) => {
-                Poll::Ready(Some(CoroutineState::Complete(value)))
-            }
-        }
-    }
-}
-/// Awaiting a bound call discards all intermediate yields and returns completion.
-impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> Future for BoundCall<'_, H, Operation> {
-    type Output = Operation::Return;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        assert!(!*this.terminal, "call polled after completion or panic");
-        *this.terminal = true;
-        let result = {
-            let mut scope = std::pin::pin!(BorrowedScope::new(this.host.as_mut()));
-            this.operation.poll_return(scope.as_mut(), cx)
-        };
-        if result.is_pending() {
-            *this.terminal = false;
-        }
-        result
-    }
-}
-
-/// Advance one event using a no-op waker.
-///
-/// All dependencies of the operation must complete immediately. Panics on
-/// `Pending`; this is a contract violation, not an incomplete-input result.
-/// After a panic, the caller must not resume the operation. The caller also
-/// owns tracking completion and must not poll a completed operation again.
-pub fn step_sync<H: Receiver + ?Sized, Operation: CallOn<H::Family>>(
-    operation: Pin<&mut Operation>,
-    host: Pin<&mut H>,
-) -> CoroutineState<Operation::Yield, Operation::Return> {
-    let mut cx = Context::from_waker(std::task::Waker::noop());
-    let mut view = std::pin::pin!(BorrowedScope::new(host));
-    match operation.poll_call(view.as_mut(), &mut cx) {
-        Poll::Ready(event) => event,
-        Poll::Pending => panic!("synchronous call returned Pending"),
-    }
-}
-
-/// Execute an operation with no intermediate yields and return its result.
-///
-/// The operation is pinned on the stack. See [`step_sync`] for the synchronous
-/// execution contract. Previously consumed or written data is not rolled back.
-pub fn run_sync<H: Receiver + ?Sized, Operation>(
-    host: Pin<&mut H>,
-    operation: Operation,
-) -> Operation::Return
-where
-    Operation: CallOn<H::Family, Yield = std::convert::Infallible>,
-{
-    match step_sync(std::pin::pin!(operation), host) {
-        CoroutineState::Complete(value) => value,
-        CoroutineState::Yielded(never) => match never {},
-    }
-}
-
-pin_project_lite::pin_project! {
-    /// A lazily executed synchronous call that preserves intermediate yields.
-    ///
-    /// Pin this object, then iterate over its pinned mutable reference. Each
-    /// step delivers one yield or the unique completion event. Construction
-    /// does no work; dropping the object cancels remaining work without rollback.
-    /// The host remains borrowed for the lifetime of the binding.
-    #[must_use = "synchronous event calls do nothing until advanced"]
-    pub struct SyncBoundCall<'host, H: ?Sized, Operation> {
-        #[pin]
-        bound: BoundCall<'host, H, Operation>,
-        terminal: bool,
-    }
-}
-impl<'host, H: Receiver + ?Sized, Operation: CallOn<H::Family>> SyncBoundCall<'host, H, Operation> {
-    pub fn new(host: Pin<&'host mut H>, operation: Operation) -> Self {
-        Self {
-            bound: BoundCall::new(host, operation),
-            terminal: false,
-        }
-    }
-
-    /// Synchronously obtain one event; completion is followed by `None`.
-    ///
-    /// Panics on `Pending` and terminates this adapter on any unwinding panic.
-    /// No event is discarded and no external readiness is awaited.
-    pub fn next(
-        self: Pin<&mut Self>,
-    ) -> Option<CoroutineState<Operation::Yield, Operation::Return>> {
-        let this = self.project();
-        if *this.terminal {
-            return None;
-        }
-        *this.terminal = true;
-        let mut cx = Context::from_waker(std::task::Waker::noop());
-        match this.bound.poll_next(&mut cx) {
-            Poll::Pending => panic!("synchronous call returned Pending"),
-            Poll::Ready(event) => {
-                if matches!(&event, Some(CoroutineState::Yielded(_))) {
-                    *this.terminal = false;
-                }
-                event
-            }
-        }
-    }
-}
-impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> Iterator
-    for Pin<&mut SyncBoundCall<'_, H, Operation>>
-{
-    type Item = CoroutineState<Operation::Yield, Operation::Return>;
-    fn next(&mut self) -> Option<Self::Item> {
-        SyncBoundCall::next(self.as_mut())
-    }
-}
-impl<H: Receiver + ?Sized, Operation: CallOn<H::Family>> std::iter::FusedIterator
-    for Pin<&mut SyncBoundCall<'_, H, Operation>>
-{
-}
-
-/// Define named and anonymous operations through the public facade.
-pub use nitori_call_macros::{call, call_closure};
-
-/// Code-generation support, not an author-facing execution API.
-#[doc(hidden)]
-pub mod __private;
-
-mod typed;
-/// Owned child operations and receiver-aware await adapters.
-pub use typed::{AwaitOn, Child, IntoAwaitOn, Next};
-
+mod access;
+pub use access::{Access, ReceiverAccess, ReceiverSlot};
 mod compose;
-pub use compose::{
-    Access, AdaptedCall, Arguments, CallTarget, Compose, Composed, Target, TargetExt, With,
-    WithChild,
+pub use compose::{Compose, Composed};
+mod call;
+pub use call::{Call, CallPoll, DynCall, Emitter, Operation, Start};
+mod child;
+pub use child::Child;
+mod driver;
+pub use driver::{
+    AcquiredScope, AcquisitionState, BoundCall, CallExecutor, Drive, ReceiverScope,
+    ViewAcquisition, drive,
 };
 
-/// Poll using a resource; construct its view lazily and discard it before returning.
-pub trait PollCallExt: Sized {
-    fn poll_receiver<H: Receiver + ?Sized>(
-        self: Pin<&mut Self>,
-        host: Pin<&mut H>,
-        cx: &mut Context<'_>,
-    ) -> Poll<CallEvent<H::Family, Self>>
-    where
-        Self: CallOn<H::Family>,
-    {
-        <Self as CallOn<H::Family>>::poll_call(self, std::pin::pin!(BorrowedScope::new(host)), cx)
+/// Generate an operation and its conveniences from an async function taking a
+/// receiver access first.
+///
+/// The operation is a struct named after the function in CamelCase, with the
+/// remaining arguments as fields. Users of the macro enable
+/// `impl_trait_in_assoc_type`.
+///
+/// With `yields = Item`, each `yield value` written directly in the function
+/// body emits an item, and the return value is the final value. The crate
+/// enables `yield_expr` as well. `yield` in closures (including coroutines),
+/// async blocks, nested items and macro arguments is left as written. The
+/// function gains a last parameter `&mut Emitter<'_, Item>`, and its access
+/// method returns a [`Child`].
+///
+/// Arguments:
+///
+/// - `module = name` generates the operation in a new module `name`;
+///   `module = self`, the default, in the current module.
+/// - `sync` also generates `sync_*` host methods, which return the final value.
+/// - `yields = Item` declares the type of the items.
+///
+/// A `yield` needs the item type declared:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type, yield_expr)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn undeclared(io: &mut impl ReceiverAccess<Family: Sized>) {
+///     yield 1;
+/// }
+/// ```
+///
+/// The crate must enable `yield_expr`, since the compiler checks the syntax
+/// before the macro runs:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call(yields = u8)]
+/// async fn ungated(io: &mut impl ReceiverAccess<Family: Sized>) {
+///     yield 1;
+/// }
+/// ```
+///
+/// and a `yield` inside a closure is not an item:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type, yield_expr)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call(yields = u8)]
+/// async fn nested(io: &mut impl ReceiverAccess<Family: Sized>) {
+///     let emit = || yield 1;
+/// }
+/// ```
+///
+/// Without `sync`, there are no synchronous host methods:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn nothing(io: &mut impl ReceiverAccess<Family: Sized>) {}
+/// let mut host = 0_u8;
+/// host.sync_nothing_unpin();
+/// ```
+pub use nitori_call_macros::call;
+/// Generate operations and conveniences from a capability trait's poll methods.
+///
+/// Each `poll_name` method becomes an operation struct `Name`, which is also
+/// the future it starts. Type and const parameters of the trait become
+/// parameters of the structs and of the convenience traits. Arguments:
+///
+/// - `module = name` generates the operations in module `name`; by default
+///   the module is the trait's name in snake case. `module = self` generates
+///   them in the current module.
+/// - `sync` also generates `sync_*` host methods.
+pub use nitori_call_macros::capability;
+
+/// Support for generated code; not a stable interface.
+#[doc(hidden)]
+pub mod __private {
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
+    /// An emitter for operations that emit nothing.
+    pub fn detached() -> crate::Emitter<'static, std::convert::Infallible> {
+        crate::Emitter::detached()
+    }
+
+    /// Complete a future that must not wait.
+    pub fn run_sync<T>(future: impl Future<Output = T>) -> T {
+        match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("synchronous operation returned Pending"),
+        }
     }
 }
-impl<O> PollCallExt for O {}
-
-/// One event from an operation executing on a family.
-pub type CallEvent<F, O> = CoroutineState<<O as CallOn<F>>::Yield, <O as CallOn<F>>::Return>;
-
-mod acquisition;
-pub use acquisition::{AcquiredScope, AcquisitionState, MapAcquisition, ViewAcquisition};

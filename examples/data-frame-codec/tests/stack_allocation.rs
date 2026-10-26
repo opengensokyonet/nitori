@@ -1,15 +1,12 @@
-#![feature(coroutines, coroutine_trait, type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 #![deny(unsafe_op_in_unsafe_fn)]
-use nitori_call::CallOn;
-use nitori_call::call_closure;
-use nitori_call::{PollCallExt as _, TargetExt as _};
+use nitori_call::{Call, CallPoll, Direct, Receiver, ReceiverAccess, ReceiverFamily, call};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
-    convert::Infallible,
     future::{Future, poll_fn},
-    ops::CoroutineState,
-    pin::{Pin, pin},
+    ops::ControlFlow,
+    pin::pin,
     task::{Context, Poll, Waker},
 };
 
@@ -46,34 +43,51 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
-struct ReadByte;
-impl ReadByte {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl CallOn<nitori_call::Direct<u8>> for ReadByte {
-    type Yield = Infallible;
-    type Return = u8;
-    fn poll_call<'v>(
-        self: Pin<&mut Self>,
-        view: Pin<&mut dyn nitori_call::ReceiverScope<'v, Family = nitori_call::Direct<u8>>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<CoroutineState<Infallible, u8>>
+/// A family whose view holds a byte that each read increments.
+trait Counter: ReceiverFamily {
+    fn bump<'v>(view: std::pin::Pin<&mut Self::ReceiverView<'v>>) -> u8
     where
-        nitori_call::Direct<u8>: 'v,
+        Self: 'v;
+}
+impl Counter for Direct<u8> {
+    fn bump<'v>(view: std::pin::Pin<&mut Self::ReceiverView<'v>>) -> u8
+    where
+        Self: 'v,
     {
-        let view = std::task::ready!(view.poll_view(cx));
-
         let mut target = view.get_mut().0.as_mut();
         *target += 1;
-        Poll::Ready(CoroutineState::Complete(*target))
+        *target
     }
 }
-#[nitori_call::call]
-async fn named_byte(io: nitori_call::Target<nitori_call::Direct<u8>>) -> u8 {
-    io.operation(ReadByte::new()).await
+#[call]
+async fn named_byte<A: ReceiverAccess<Family: Counter>>(io: &mut A) -> u8 {
+    poll_fn(|cx| {
+        io.poll_access(cx, |access, _| {
+            Poll::Ready(A::Family::bump(access.into_pin()))
+        })
+    })
+    .await
+}
+#[call(yields = u8)]
+async fn sum_bytes<A: ReceiverAccess<Family: Counter>>(io: &mut A) -> usize {
+    let mut sum = 0usize;
+    for _ in 0..4 {
+        let mut waited = false;
+        poll_fn(|cx| {
+            if waited {
+                Poll::Ready(())
+            } else {
+                waited = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+        let byte = io.named_byte().await;
+        sum += usize::from(byte);
+        yield byte;
+    }
+    sum
 }
 #[test]
 fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
@@ -82,38 +96,16 @@ fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
     ALLOCATIONS.with(|count| count.set(0));
     COUNTING.with(|flag| flag.set(true));
     let (emitted, waits, returned) = {
-        let mut operation = pin!(call_closure!(|io: nitori_call::Target<
-            nitori_call::Direct<u8>,
-        >| {
-            let mut sum = 0usize;
-            for _ in 0..4 {
-                let mut waited = false;
-                poll_fn(|cx| {
-                    if waited {
-                        Poll::Ready(())
-                    } else {
-                        waited = true;
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                })
-                .await;
-                let byte = io.named_byte().await;
-                sum += usize::from(byte);
-                yield byte;
-            }
-            sum
-        }));
+        let mut call = pin!(Call::<Direct<u8>, _>::new(SumBytes::new()));
         let mut emitted = 0;
         let mut waits = 0;
         let returned = loop {
-            match operation
-                .as_mut()
-                .poll_receiver(Pin::new(&mut target), &mut cx)
-            {
-                Poll::Pending => waits += 1,
-                Poll::Ready(CoroutineState::Yielded(_)) => emitted += 1,
-                Poll::Ready(CoroutineState::Complete(value)) => break value,
+            let view = pin!(std::pin::Pin::new(&mut target).view());
+            match call.as_mut().poll_with(Some(view), &mut cx) {
+                CallPoll::Pending => waits += 1,
+                CallPoll::Ready(ControlFlow::Continue(_)) => emitted += 1,
+                CallPoll::Ready(ControlFlow::Break(value)) => break value,
+                CallPoll::NeedsView => unreachable!("a view is always lent"),
             }
         };
         (emitted, waits, returned)
@@ -124,7 +116,7 @@ fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
 }
 
 #[test]
-fn real_target_helper_allocates_nothing() {
+fn a_host_method_allocates_nothing() {
     let mut target = 7u8;
     let mut cx = Context::from_waker(Waker::noop());
     ALLOCATIONS.with(|count| count.set(0));
