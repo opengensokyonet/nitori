@@ -301,8 +301,9 @@ no view.
 
 ## Calls
 
-`Call<F, Op>` holds an operation and is polled with an optional view:
-`poll_with` delivers each event, `poll_return_with` only the final value. Its
+`Call<F, Op>` holds an operation and is polled with an optional view, lent as
+`Lend::Fixed` or `Lend::Releasable` (see release points below): `poll_with`
+delivers each event, `poll_return_with` only the final value. Its
 type can be named, so a call can be a field of a connection that lends another
 of its fields on each poll; successive polls may lend views of different
 resources. A call is `Send` when everything its operation keeps apart from the
@@ -377,6 +378,18 @@ fn main() {
     assert_eq!(records, [b"a".to_vec(), b"bc".to_vec()]);
 }
 ```
+
+Within one poll, an operation that alternates IO with computation also holds
+the view while it computes. `io.release_view().await` marks a release point:
+what follows does not need the view for a while. Whether releasing pays off
+depends on the resource, so both sides opt in. An acquisition that delivers
+`Lend::Releasable` views, such as `AcquisitionState::releasable`, lets `Drive`
+release the view there, and `ViewAcquisition::should_release` decides at each
+release point, for example only while others wait for the lock. `Drive` then
+continues the operation at once without the view and acquires a new one at the
+next access; the task is not suspended, so others can take the resource while
+the operation computes on another thread. With a fixed view, as from every
+`Receiver`, or without one, a release point completes at once.
 
 An operation that needs two resources behind separate locks has two choices.
 A family whose view holds both guards acquires them together, in a fixed

@@ -3,8 +3,8 @@ mod support;
 
 use futures_core::{FusedStream, Stream};
 use nitori_call::{
-    Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Operation, Receiver,
-    ReceiverAccess, ReceiverFamily, Start, call, direct_receiver,
+    Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Lend, Operation,
+    Receiver, ReceiverAccess, ReceiverFamily, Start, call, direct_receiver,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -41,11 +41,12 @@ fn poll<F: ReceiverFamily, Y, R>(
     host: Pin<&mut impl Receiver<Family = F>>,
 ) -> Poll<R> {
     match call.poll_return_with(
-        Some(pin!(host.view())),
+        Some(Lend::Fixed(pin!(host.view()))),
         &mut Context::from_waker(Waker::noop()),
     ) {
         CallPoll::Ready(event) => Poll::Ready(event),
         CallPoll::Pending => Poll::Pending,
+        CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
         CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
     }
 }
@@ -216,7 +217,10 @@ fn an_executor_lends_one_view_to_several_calls_in_one_poll() {
     let mut cx = Context::from_waker(Waker::noop());
     let results: Vec<_> = calls
         .iter_mut()
-        .map(|call| call.as_mut().poll_return_with(Some(view.as_mut()), &mut cx))
+        .map(|call| {
+            call.as_mut()
+                .poll_return_with(Some(Lend::Fixed(view.as_mut())), &mut cx)
+        })
         .collect();
     assert!(matches!(results[0], CallPoll::Ready(Ok(pair)) if pair == *b"ab"));
     assert!(matches!(results[1], CallPoll::Ready(Ok(pair)) if pair == *b"cd"));
@@ -256,12 +260,13 @@ fn emitted_items_precede_the_final_value() {
     let mut cx = Context::from_waker(Waker::noop());
     loop {
         let view = pin!(Pin::new(&mut input).view());
-        match call.as_mut().poll_with(Some(view), &mut cx) {
+        match call.as_mut().poll_with(Some(Lend::Fixed(view)), &mut cx) {
             CallPoll::Ready(ControlFlow::Continue(chunk)) => events.push(chunk),
             CallPoll::Ready(ControlFlow::Break(result)) => {
                 assert_eq!(result, Ok(5));
                 break;
             }
+            CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
             CallPoll::Pending | CallPoll::NeedsView => panic!("memory input does not wait"),
         }
     }
@@ -278,7 +283,7 @@ fn the_return_form_drops_items_without_suspending() {
     let (wakes, waker) = WakeCount::new();
     let mut call = pin!(Call::<Memory, _>::new(ReadChunks { total: 5 }));
     let result = call.as_mut().poll_return_with(
-        Some(pin!(Pin::new(&mut resource).view())),
+        Some(Lend::Fixed(pin!(Pin::new(&mut resource).view()))),
         &mut Context::from_waker(&waker),
     );
     assert_eq!(result, CallPoll::Ready(Ok(5)));
@@ -292,16 +297,18 @@ fn a_call_switches_from_its_items_to_its_final_value() {
     let (wakes, waker) = WakeCount::new();
     let mut cx = Context::from_waker(&waker);
     let mut call = pin!(Call::<Memory, _>::new(ReadChunks { total: 5 }));
-    let first = call
-        .as_mut()
-        .poll_with(Some(pin!(Pin::new(&mut input).view())), &mut cx);
+    let first = call.as_mut().poll_with(
+        Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
+        &mut cx,
+    );
     assert_eq!(
         first,
         CallPoll::Ready(ControlFlow::Continue(b"ab".to_vec()))
     );
-    let result = call
-        .as_mut()
-        .poll_return_with(Some(pin!(Pin::new(&mut input).view())), &mut cx);
+    let result = call.as_mut().poll_return_with(
+        Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
+        &mut cx,
+    );
     assert_eq!(result, CallPoll::Ready(Ok(5)));
     // The item made the first poll ready; nothing needed a wake.
     assert_eq!(wakes.get(), 0);
@@ -348,7 +355,7 @@ fn an_awaited_child_completes_with_its_final_value() {
     let (wakes, waker) = WakeCount::new();
     let mut call = pin!(Call::<Memory, _>::new(AwaitChild::new()));
     let result = call.as_mut().poll_return_with(
-        Some(pin!(Pin::new(&mut input).view())),
+        Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
         &mut Context::from_waker(&waker),
     );
     assert_eq!(result, CallPoll::Ready(Ok(3)));
@@ -565,7 +572,7 @@ fn lazily<F: ReceiverFamily, Y, R>(
     let poll = match call.as_mut().poll_return_with(None, &mut cx) {
         CallPoll::NeedsView => call
             .as_mut()
-            .poll_return_with(Some(pin!(host.as_mut().view())), &mut cx),
+            .poll_return_with(Some(Lend::Fixed(pin!(host.as_mut().view()))), &mut cx),
         poll => return (false, into_poll(poll)),
     };
     (true, into_poll(poll))
@@ -574,6 +581,7 @@ fn into_poll<T>(poll: CallPoll<T>) -> Poll<T> {
     match poll {
         CallPoll::Ready(event) => Poll::Ready(event),
         CallPoll::Pending => Poll::Pending,
+        CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
         CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
     }
 }
@@ -591,22 +599,6 @@ fn compositions_and_child_streams_ask_for_a_view_through_their_parent() {
     let (requests, result) = lazily(call.as_mut(), Pin::new(&mut input));
     assert!(requests);
     assert!(matches!(result, Poll::Ready((2, Ok(4)))));
-}
-
-/// Polls its branch with a waker of its own, and only after that waker
-/// fired, as executors such as `FuturesUnordered` do.
-async fn only_when_woken<T>(branch: impl Future<Output = T>) -> T {
-    let (wakes, waker) = WakeCount::new();
-    let mut branch = pin!(branch);
-    let mut seen = None;
-    poll_fn(|_| {
-        if seen == Some(wakes.get()) {
-            return Poll::Pending;
-        }
-        seen = Some(wakes.get());
-        branch.as_mut().poll(&mut Context::from_waker(&waker))
-    })
-    .await
 }
 
 #[call]
@@ -651,10 +643,10 @@ fn an_item_from_a_branch_wakes_the_branch() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut events = Vec::new();
     for _ in 0..3 {
-        match call
-            .as_mut()
-            .poll_with(Some(pin!(Pin::new(&mut input).view())), &mut cx)
-        {
+        match call.as_mut().poll_with(
+            Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
+            &mut cx,
+        ) {
             CallPoll::Ready(event) => events.push(event),
             poll => panic!("the branch was not repolled: {poll:?}"),
         }
@@ -814,7 +806,8 @@ fn branches_asking_on_different_polls_are_all_woken_when_a_view_is_lent() {
     // task.
     let view = pin!(Pin::new(&mut input).view());
     assert_eq!(
-        call.as_mut().poll_return_with(Some(view), &mut cx),
+        call.as_mut()
+            .poll_return_with(Some(Lend::Fixed(view)), &mut cx),
         CallPoll::Pending
     );
     assert_eq!(wakes.get(), 2);
@@ -824,7 +817,8 @@ fn branches_asking_on_different_polls_are_all_woken_when_a_view_is_lent() {
     assert_eq!(without_view(call.as_mut()), CallPoll::NeedsView);
     let view = pin!(Pin::new(&mut input).view());
     assert_eq!(
-        call.as_mut().poll_return_with(Some(view), &mut cx),
+        call.as_mut()
+            .poll_return_with(Some(Lend::Fixed(view)), &mut cx),
         CallPoll::Ready(b"abc".to_vec())
     );
     assert_eq!(wakes.get(), 3);
@@ -863,15 +857,14 @@ fn a_wrapper_that_substitutes_the_waker_is_not_woken_by_requests() {
     let mut output = Vec::new();
     {
         let mut call = pin!(Call::new(ReadRecordSubstituted::new(&mut output)));
-        let mut lend = |mut call: Pin<&mut Call<Direct<Feed>, ReadRecordSubstituted>>,
-                        feed: &mut Feed| {
-            match call.as_mut().poll_return_with(None, &mut cx) {
-                CallPoll::NeedsView => {
-                    call.poll_return_with(Some(pin!(Pin::new(feed).view())), &mut cx)
+        let mut lend =
+            |mut call: Pin<&mut Call<Direct<Feed>, ReadRecordSubstituted>>, feed: &mut Feed| {
+                match call.as_mut().poll_return_with(None, &mut cx) {
+                    CallPoll::NeedsView => call
+                        .poll_return_with(Some(Lend::Fixed(pin!(Pin::new(feed).view()))), &mut cx),
+                    poll => poll,
                 }
-                poll => poll,
-            }
-        };
+            };
         // The first view wakes the wrapper's waker, which the wrapper sent to
         // the task before the call intercepted.
         assert_eq!(lend(call.as_mut(), &mut feed), CallPoll::Pending);
@@ -888,4 +881,124 @@ fn a_wrapper_that_substitutes_the_waker_is_not_woken_by_requests() {
         assert_eq!(wakes.get(), 2);
     }
     assert_eq!(output, b"ok");
+}
+
+#[call]
+async fn read_release_read(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
+    let [first] = read_array::<1, _>(io).await?;
+    io.release_view().await;
+    let [second] = read_array::<1, _>(io).await?;
+    Ok([first, second])
+}
+
+#[test]
+fn a_release_point_completes_at_once_with_a_fixed_view() {
+    let mut input = b"ab".as_slice();
+    let mut call = pin!(Call::<Memory, _>::new(ReadReleaseRead::new()));
+    assert_send(&*call);
+    let view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut().poll_return_with(
+            Some(Lend::Fixed(view)),
+            &mut Context::from_waker(Waker::noop())
+        ),
+        CallPoll::Ready(Ok(*b"ab"))
+    );
+}
+
+#[test]
+fn a_releasable_view_is_offered_back_and_may_be_kept() {
+    let mut input = b"ab".as_slice();
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut call = pin!(Call::<Memory, _>::new(ReadReleaseRead::new()));
+    let mut view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut()
+            .poll_return_with(Some(Lend::Releasable(view.as_mut())), &mut cx),
+        CallPoll::Releasable
+    );
+    // Lending the same view again keeps it.
+    assert_eq!(
+        call.as_mut()
+            .poll_return_with(Some(Lend::Releasable(view.as_mut())), &mut cx),
+        CallPoll::Ready(Ok(*b"ab"))
+    );
+}
+
+#[test]
+fn a_released_view_is_asked_for_again() {
+    let mut input = b"ab".as_slice();
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut call = pin!(Call::<Memory, _>::new(ReadReleaseRead::new()));
+    {
+        let view = pin!(Pin::new(&mut input).view());
+        assert_eq!(
+            call.as_mut()
+                .poll_return_with(Some(Lend::Releasable(view)), &mut cx),
+            CallPoll::Releasable
+        );
+    }
+    // Polling without a view releases it; the next access asks again.
+    assert_eq!(
+        call.as_mut().poll_return_with(None, &mut cx),
+        CallPoll::NeedsView
+    );
+    let view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut()
+            .poll_return_with(Some(Lend::Releasable(view)), &mut cx),
+        CallPoll::Ready(Ok(*b"ab"))
+    );
+}
+
+#[call]
+async fn read_release_read_in_branch(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+) -> Pair {
+    only_when_woken(read_release_read(io)).await
+}
+
+#[test]
+fn a_branch_that_offers_its_view_back_is_polled_with_the_answer() {
+    let mut input = b"ab".as_slice();
+    let (wakes, waker) = WakeCount::new();
+    let mut cx = Context::from_waker(&waker);
+    let mut call = pin!(Call::<Memory, _>::new(ReadReleaseReadInBranch::new()));
+    let mut view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut()
+            .poll_return_with(Some(Lend::Releasable(view.as_mut())), &mut cx),
+        CallPoll::Releasable
+    );
+    // Kept: the branch is woken before the operation is polled, and that
+    // wake does not reach the task.
+    assert_eq!(
+        call.as_mut()
+            .poll_return_with(Some(Lend::Releasable(view.as_mut())), &mut cx),
+        CallPoll::Ready(Ok(*b"ab"))
+    );
+    assert_eq!(wakes.get(), 0);
+
+    let mut input = b"ab".as_slice();
+    let mut call = pin!(Call::<Memory, _>::new(ReadReleaseReadInBranch::new()));
+    {
+        let view = pin!(Pin::new(&mut input).view());
+        assert_eq!(
+            call.as_mut()
+                .poll_return_with(Some(Lend::Releasable(view)), &mut cx),
+            CallPoll::Releasable
+        );
+    }
+    // Released: the branch is woken before the poll without a view too.
+    assert_eq!(
+        call.as_mut().poll_return_with(None, &mut cx),
+        CallPoll::NeedsView
+    );
+    let view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut()
+            .poll_return_with(Some(Lend::Releasable(view)), &mut cx),
+        CallPoll::Ready(Ok(*b"ab"))
+    );
+    assert_eq!(wakes.get(), 0);
 }

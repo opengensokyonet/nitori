@@ -1,7 +1,7 @@
 //! Scoped adaptation of the current view into another family.
 use crate::{
     ReceiverAccess, ReceiverFamily, ViewOperation,
-    access::{Sealed, ViewRequest, ViewVisitor},
+    access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
 };
 use std::{
     marker::PhantomData,
@@ -82,6 +82,9 @@ impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
             inner: visitor,
             family: PhantomData,
         })
+    }
+    fn release_point(&mut self) -> ReleasePoint<'_> {
+        self.parent.release_point()
     }
 }
 

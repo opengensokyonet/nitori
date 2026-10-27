@@ -3,6 +3,7 @@ use crate::{Compose, Composed, ReceiverFamily, ViewOperation, call::Intercept, l
 use std::{
     cell::{Cell, OnceCell},
     fmt,
+    future::Future,
     marker::PhantomData,
     pin::Pin,
     ptr,
@@ -35,12 +36,20 @@ impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
 }
 
 /// The view lent to a call for its current poll, if any, whether its
-/// operation asked for one, and the waker the call was polled with.
+/// operation asked for one or offered it back, and the waker the call was
+/// polled with.
 pub(crate) struct ViewCell<F: ReceiverFamily> {
     pub(crate) view: Cell<Option<RawViewLoan<F>>>,
+    /// Whether the lender may release this poll's view at a release point.
+    pub(crate) releasable: Cell<bool>,
     pub(crate) requested: Cell<bool>,
+    /// Whether the operation reached a release point with a releasable view;
+    /// the next poll answers it.
+    pub(crate) release: Cell<bool>,
+    /// Whether this poll answers a release point by keeping the view.
+    pub(crate) kept: Cell<bool>,
     /// Present once a branch of an intermediate executor has asked for a
-    /// view; it keeps the branches waiting for one.
+    /// view or offered it back; it keeps the branches waiting for an answer.
     pub(crate) intercept: OnceCell<Arc<Intercept>>,
     pub(crate) root: RootWaker,
 }
@@ -48,9 +57,22 @@ impl<F: ReceiverFamily> ViewCell<F> {
     pub(crate) fn new() -> Self {
         Self {
             view: Cell::new(None),
+            releasable: Cell::new(false),
             requested: Cell::new(false),
+            release: Cell::new(false),
+            kept: Cell::new(false),
             intercept: OnceCell::new(),
             root: RootWaker::new(),
+        }
+    }
+    fn release_point(&self) -> ReleasePoint<'_> {
+        ReleasePoint {
+            lent: self.view.get().is_some(),
+            releasable: self.releasable.get(),
+            kept: self.kept.get(),
+            release: &self.release,
+            intercept: &self.intercept,
+            root: self.root.get(),
         }
     }
 }
@@ -109,6 +131,36 @@ impl ViewRequest<'_> {
     }
 }
 
+/// Where an operation offers back the view of the current poll.
+pub struct ReleasePoint<'a> {
+    lent: bool,
+    releasable: bool,
+    kept: bool,
+    release: &'a Cell<bool>,
+    intercept: &'a OnceCell<Arc<Intercept>>,
+    root: *const Waker,
+}
+impl ReleasePoint<'_> {
+    /// Offer the view back unless there is none to release. `offered`
+    /// records whether this release point already did. Like a request, an
+    /// offer wakes nothing: the caller answers at once, and a branch of an
+    /// executor between the call and this point is woken before the call
+    /// is polled with the answer.
+    fn poll(self, offered: &mut bool, cx: &mut Context<'_>) -> Poll<()> {
+        if !self.lent || !self.releasable || (*offered && self.kept) {
+            return Poll::Ready(());
+        }
+        *offered = true;
+        self.release.set(true);
+        if !polled_directly(self.root, cx) {
+            self.intercept
+                .get_or_init(|| Arc::new(Intercept::new()))
+                .defer(cx.waker());
+        }
+        Poll::Pending
+    }
+}
+
 /// Receives the view of the current poll, or a request for one, once.
 /// Not exported: every access is in this crate.
 pub trait ViewVisitor<F: ReceiverFamily>: ViewOperation<F> {
@@ -155,6 +207,10 @@ pub trait ReceiverAccess: sealed::Sealed {
     #[doc(hidden)]
     fn visit_view<V: ViewVisitor<Self::Family>>(&mut self, visitor: V) -> V::Output;
 
+    /// Where this poll's view would be offered back.
+    #[doc(hidden)]
+    fn release_point(&mut self) -> ReleasePoint<'_>;
+
     /// Run `body` once with the current view. Without one, ask the caller of
     /// the call for a view and return Pending.
     fn poll_access<R, B>(&mut self, cx: &mut Context<'_>, body: B) -> Poll<R>
@@ -167,6 +223,22 @@ pub trait ReceiverAccess: sealed::Sealed {
             cx,
             output: PhantomData,
         })
+    }
+
+    /// Mark a release point: what follows does not need the view for a
+    /// while, such as a computation between accesses. If the view lent for
+    /// this poll is releasable, the executor decides whether to release it
+    /// and continues at once without suspending the task; the next access
+    /// then acquires a view again. Without a view, or with a fixed one, the
+    /// release point completes at once.
+    fn release_view(&mut self) -> ReleaseView<'_, Self>
+    where
+        Self: Sized,
+    {
+        ReleaseView {
+            access: self,
+            offered: false,
+        }
     }
 
     /// Adapt this access with composition state for the borrow's duration.
@@ -186,6 +258,24 @@ impl<A: ReceiverAccess + ?Sized> ReceiverAccess for &mut A {
     type Mode = A::Mode;
     fn visit_view<V: ViewVisitor<A::Family>>(&mut self, visitor: V) -> V::Output {
         (**self).visit_view(visitor)
+    }
+    fn release_point(&mut self) -> ReleasePoint<'_> {
+        (**self).release_point()
+    }
+}
+
+/// The future of [`ReceiverAccess::release_view`].
+#[derive(Debug)]
+#[must_use = "futures do nothing unless polled"]
+pub struct ReleaseView<'a, A> {
+    access: &'a mut A,
+    offered: bool,
+}
+impl<A: ReceiverAccess> Future for ReleaseView<'_, A> {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        this.access.release_point().poll(&mut this.offered, cx)
     }
 }
 
@@ -275,5 +365,9 @@ impl<F: ReceiverFamily, M: Mode> ReceiverAccess for ReceiverSlot<'_, F, M> {
             // from it are borrowed mutably for each visit.
             Some(view) => unsafe { view.apply(visitor) },
         }
+    }
+    fn release_point(&mut self) -> ReleasePoint<'_> {
+        // SAFETY: as in `visit_view`.
+        unsafe { &*self.cell }.release_point()
     }
 }

@@ -230,3 +230,19 @@ impl WakeCount {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+/// Polls its branch with a waker of its own, and only after that waker
+/// fired, as executors such as `FuturesUnordered` do.
+pub async fn only_when_woken<T>(branch: impl Future<Output = T>) -> T {
+    let (wakes, waker) = WakeCount::new();
+    let mut branch = pin!(branch);
+    let mut seen = None;
+    poll_fn(|_| {
+        if seen == Some(wakes.get()) {
+            return Poll::Pending;
+        }
+        seen = Some(wakes.get());
+        branch.as_mut().poll(&mut Context::from_waker(&waker))
+    })
+    .await
+}

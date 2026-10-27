@@ -2,8 +2,8 @@
 use bytes::BufMut;
 use futures_core::Stream;
 use nitori_call::{
-    Call, CallPoll, Compose, Direct, Receiver, ReceiverAccess, ReceiverFamily, ReceiverSlot, Start,
-    ViewLoan, call, capability, direct_receiver,
+    Call, CallPoll, Compose, Direct, Lend, Receiver, ReceiverAccess, ReceiverFamily, ReceiverSlot,
+    Start, ViewLoan, call, capability, direct_receiver,
 };
 use std::{
     collections::VecDeque,
@@ -182,7 +182,7 @@ fn a_primitive_operation_is_a_root_and_names_its_future() {
         &mut destination
     )));
     let result = call.as_mut().poll_with(
-        Some(pin!(Pin::new(&mut input).view())),
+        Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
         &mut Context::from_waker(Waker::noop()),
     );
     assert!(matches!(result, CallPoll::Ready(ControlFlow::Break(Ok(2)))));
@@ -350,7 +350,7 @@ fn the_attribute_chooses_the_module() {
         b"new"
     )));
     let result = call.as_mut().poll_with(
-        Some(pin!(Pin::new(&mut sink).view())),
+        Some(Lend::Fixed(pin!(Pin::new(&mut sink).view()))),
         &mut Context::from_waker(Waker::noop()),
     );
     assert!(matches!(result, CallPoll::Ready(ControlFlow::Break(3))));
@@ -414,12 +414,13 @@ where
     let mut items = Vec::new();
     loop {
         match call.as_mut().poll_with(
-            Some(pin!(Pin::new(&mut *input).view())),
+            Some(Lend::Fixed(pin!(Pin::new(&mut *input).view()))),
             &mut Context::from_waker(Waker::noop()),
         ) {
             CallPoll::Ready(ControlFlow::Continue(item)) => items.push(item),
             CallPoll::Ready(ControlFlow::Break(result)) => return (items, result),
             CallPoll::Pending => panic!("memory input does not wait"),
+            CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
             CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
         }
     }
@@ -620,7 +621,7 @@ fn a_one_off_operation_is_a_local_function() {
     let mut input = b"q".as_slice();
     let mut call = pin!(Call::<Direct<&[u8]>, _>::new(FirstByte::new()));
     let result = call.as_mut().poll_with(
-        Some(pin!(Pin::new(&mut input).view())),
+        Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
         &mut Context::from_waker(Waker::noop()),
     );
     assert!(matches!(result, CallPoll::Ready(ControlFlow::Break(b'q'))));
@@ -748,7 +749,7 @@ fn arguments_may_depend_on_the_family() {
     // Built directly, the operation names its family.
     let mut call = pin!(Call::<Direct<Vec<u16>>, _>::new(AppendTwice::new(&3)));
     let result = call.as_mut().poll_return_with(
-        Some(pin!(Pin::new(&mut items).view())),
+        Some(Lend::Fixed(pin!(Pin::new(&mut items).view()))),
         &mut Context::from_waker(Waker::noop()),
     );
     assert_eq!(result, CallPoll::Ready(5));

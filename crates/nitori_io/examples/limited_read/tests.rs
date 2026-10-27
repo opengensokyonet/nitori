@@ -1,6 +1,6 @@
 use super::*;
 use bytes::BufMut;
-use nitori_call::{Call, CallPoll, Direct, Receiver, family_receiver};
+use nitori_call::{Call, CallPoll, Direct, Lend, Receiver, family_receiver};
 use std::{
     convert::Infallible,
     pin::{Pin, pin},
@@ -42,7 +42,7 @@ fn poll<'data>(
     host: &mut Delayed<'data>,
 ) -> CallPoll<Result<[u8; 2], ReadArrayError<Infallible>>> {
     call.poll_return_with(
-        Some(pin!(Pin::new(host).view())),
+        Some(Lend::Fixed(pin!(Pin::new(host).view()))),
         &mut Context::from_waker(Waker::noop()),
     )
 }

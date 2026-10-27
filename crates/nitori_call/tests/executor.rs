@@ -5,7 +5,7 @@ mod support;
 
 use bytes::BufMut;
 use nitori_call::{
-    Call, CallPoll, Direct, DynCall, Receiver, ReceiverAccess, call, direct_receiver,
+    Call, CallPoll, Direct, DynCall, Lend, Receiver, ReceiverAccess, call, direct_receiver,
 };
 use std::{
     cell::{Cell, RefCell, RefMut},
@@ -190,6 +190,7 @@ impl Future for Executor<'_> {
             {
                 CallPoll::Ready(result) => this.results[index] = Some(result),
                 CallPoll::Pending => {}
+                CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
                 CallPoll::NeedsView => {
                     // The executor serves the request itself: drop any wake
                     // that an executor inside the operation passed on.
@@ -210,12 +211,14 @@ impl Future for Executor<'_> {
                 for index in this.asking.drain(..) {
                     let (call, waker) = &mut this.calls[index];
                     this.polled.push((index, true));
-                    let poll = call
-                        .as_mut()
-                        .poll_return_with(Some(view.as_mut()), &mut Context::from_waker(waker));
+                    let poll = call.as_mut().poll_return_with(
+                        Some(Lend::Fixed(view.as_mut())),
+                        &mut Context::from_waker(waker),
+                    );
                     match poll {
                         CallPoll::Ready(result) => this.results[index] = Some(result),
                         CallPoll::Pending => {}
+                        CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
                         CallPoll::NeedsView => unreachable!(),
                     }
                 }

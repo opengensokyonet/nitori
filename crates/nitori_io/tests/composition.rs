@@ -1,7 +1,7 @@
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 #![allow(clippy::multiple_bound_locations)] // pin-project-lite generated projection bounds
 use bytes::BufMut;
-use nitori_call::{Call, CallPoll, Compose, Receiver, ReceiverAccess, ReceiverFamily, call};
+use nitori_call::{Call, CallPoll, Compose, Lend, Receiver, ReceiverAccess, ReceiverFamily, call};
 use nitori_io::{Read, calls::ReadArrayExt as _};
 use std::{
     cell::Cell,
@@ -197,7 +197,7 @@ where
         + for<'s> nitori_call::Start<'s, nitori_call::ReceiverSlot<'s, Delayed<'data>>>,
 {
     call.poll_with(
-        Some(pin!(Pin::new(host).view())),
+        Some(Lend::Fixed(pin!(Pin::new(host).view()))),
         &mut Context::from_waker(Waker::noop()),
     )
 }
@@ -258,7 +258,10 @@ fn explicit_view_executes_without_reconstruction() {
         Tagged::new()
     ));
     assert!(matches!(
-        call.poll_return_with(Some(view.as_mut()), &mut Context::from_waker(Waker::noop())),
+        call.poll_return_with(
+            Some(Lend::Fixed(view.as_mut())),
+            &mut Context::from_waker(Waker::noop())
+        ),
         CallPoll::Ready(Ok([b'a', b'b']))
     ));
 }

@@ -6,7 +6,7 @@
     coroutine_trait,
     stmt_expr_attributes
 )]
-use nitori_call::{Call, CallPoll, ReceiverAccess, call};
+use nitori_call::{Call, CallPoll, Lend, ReceiverAccess, call};
 use std::{
     ops::{ControlFlow, Coroutine, CoroutineState},
     pin::{Pin, pin},
@@ -39,7 +39,7 @@ fn a_coroutine_inside_an_operation_is_untouched() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut poll = || {
         let view = pin!(nitori_call::DirectView(Pin::new(&mut host)));
-        call.as_mut().poll_with(Some(view), &mut cx)
+        call.as_mut().poll_with(Some(Lend::Fixed(view)), &mut cx)
     };
     assert_eq!(poll(), CallPoll::Ready(ControlFlow::Continue(11)));
     assert_eq!(poll(), CallPoll::Ready(ControlFlow::Break(20)));

@@ -1,7 +1,7 @@
 #![cfg(any(feature = "tokio", feature = "futures"))]
 #![feature(impl_trait_in_assoc_type)]
 use bytes::BufMut;
-use nitori_call::{Call, CallPoll, Receiver, ReceiverAccess, call};
+use nitori_call::{Call, CallPoll, Lend, Receiver, ReceiverAccess, call};
 use nitori_io::{Read, bridge::ReadAccess};
 use std::{
     io,
@@ -50,10 +50,10 @@ where
     let mut call = pin!(Call::<Trickle, _>::new(operation));
     for _ in 0..100 {
         let view = pin!(Pin::new(&mut *host).view());
-        if let CallPoll::Ready(output) = call
-            .as_mut()
-            .poll_return_with(Some(view), &mut Context::from_waker(Waker::noop()))
-        {
+        if let CallPoll::Ready(output) = call.as_mut().poll_return_with(
+            Some(Lend::Fixed(view)),
+            &mut Context::from_waker(Waker::noop()),
+        ) {
             return output;
         }
     }

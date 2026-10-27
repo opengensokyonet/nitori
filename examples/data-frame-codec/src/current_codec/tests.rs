@@ -1,7 +1,7 @@
 use super::*;
 use bytes::{BufMut, Bytes};
 use futures_core::Stream;
-use nitori_call::{Call, CallPoll, Receiver};
+use nitori_call::{Call, CallPoll, Lend, Receiver};
 use nitori_io::calls::WriteAll;
 use std::{
     convert::Infallible,
@@ -135,7 +135,7 @@ fn data_frame_yields_without_reading_ahead_and_keeps_next_frame() {
     let mut call = pin!(Call::new(ForwardFrame::new()));
     let poll = |call: Pin<&mut Call<Source, ForwardFrame>>, source: &mut Source| {
         call.poll_with(
-            Some(pin!(Pin::new(source).view())),
+            Some(Lend::Fixed(pin!(Pin::new(source).view()))),
             &mut Context::from_waker(Waker::noop()),
         )
     };
@@ -196,7 +196,7 @@ fn named_write_preserves_partial_progress_across_pending() {
     let mut call = pin!(Call::new(WriteAll::new(Bytes::from_static(b"abc"))));
     let poll = |call: Pin<&mut Call<Output, WriteAll<Bytes>>>, output: &mut Output| {
         call.poll_return_with(
-            Some(pin!(Pin::new(output).view())),
+            Some(Lend::Fixed(pin!(Pin::new(output).view()))),
             &mut Context::from_waker(Waker::noop()),
         )
     };

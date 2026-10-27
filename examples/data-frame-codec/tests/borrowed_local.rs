@@ -1,7 +1,7 @@
 #![feature(impl_trait_in_assoc_type)]
 
 use bytes::{Buf, Bytes};
-use nitori_call::{Call, CallPoll, Receiver, ReceiverAccess, call};
+use nitori_call::{Call, CallPoll, Lend, Receiver, ReceiverAccess, call};
 use nitori_io::{Write, WriteExt as _};
 use std::convert::Infallible;
 use std::{
@@ -58,7 +58,7 @@ fn named_call_reborrows_local_buf_across_pending() {
     let mut call = pin!(Call::<Output, _>::new(WriteLocalBuffer::new()));
     let mut poll = |output: &mut Output| {
         call.as_mut().poll_return_with(
-            Some(pin!(Pin::new(output).view())),
+            Some(Lend::Fixed(pin!(Pin::new(output).view()))),
             &mut Context::from_waker(Waker::noop()),
         )
     };

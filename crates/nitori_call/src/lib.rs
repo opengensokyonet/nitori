@@ -138,11 +138,11 @@ pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamil
 mod loan;
 pub use loan::{ViewLoan, ViewOperation};
 mod access;
-pub use access::{Access, ReceiverAccess, ReceiverSlot};
+pub use access::{Access, ReceiverAccess, ReceiverSlot, ReleaseView};
 mod compose;
 pub use compose::{Compose, Composed};
 mod call;
-pub use call::{Call, CallPoll, DynCall, Emitter, Operation, Start};
+pub use call::{Call, CallPoll, DynCall, Emitter, Lend, Operation, Start};
 mod child;
 pub use child::Child;
 mod driver;

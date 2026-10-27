@@ -6,8 +6,8 @@ mod support;
 use bytes::BufMut;
 use futures_core::{FusedFuture, FusedStream, Stream};
 use nitori_call::{
-    AcquisitionState, CallExecutor, Operation, ReceiverAccess, ReceiverFamily, ReceiverSlot, Start,
-    call, drive,
+    AcquisitionState, CallExecutor, Lend, Operation, ReceiverAccess, ReceiverFamily, ReceiverSlot,
+    Start, call, drive,
 };
 use std::{
     cell::Cell,
@@ -18,7 +18,7 @@ use std::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use support::{Read, ReadError, poll_once, read_array, read_exact};
+use support::{Read, ReadError, WakeCount, only_when_woken, poll_once, read_array, read_exact};
 use tokio::sync::{Mutex, MutexGuard};
 
 /// Bytes shared behind an async lock, as a connection is shared by streams.
@@ -554,4 +554,119 @@ fn a_pending_acquisition_advanced_while_unneeded_completes_later() {
     drop(holder);
     assert_eq!(poll_once(read.as_mut()), Poll::Ready(b'y'));
     assert_eq!(acquisitions.get(), 1);
+}
+
+/// Reads a byte, computes without needing the pipe, then reads another.
+#[call]
+async fn read_compute_read(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    compute: &dyn Fn(),
+) -> Result<[u8; 2], ReadError<Infallible>> {
+    let [first] = read_array::<1, _>(io).await?;
+    io.release_view().await;
+    compute();
+    let [second] = read_array::<1, _>(io).await?;
+    Ok([first, second])
+}
+
+/// The same, with the release point inside a branch of an executor that
+/// polls it with a waker of its own.
+#[call]
+async fn read_compute_read_in_branch(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    compute: &dyn Fn(),
+) -> Result<[u8; 2], ReadError<Infallible>> {
+    only_when_woken(read_compute_read(io, compute)).await
+}
+
+/// Runs `operation` in one poll with `acquisition` and reports whether the
+/// lock was free during the computation.
+fn lock_free_while_computing<'p, S>(pipe: &'p Mutex<Pipe>, acquisition: S, in_branch: bool) -> bool
+where
+    S: nitori_call::ViewAcquisition<'p, Family = Locked>,
+{
+    pipe.try_lock().unwrap().push(b"ab");
+    let free = Cell::new(None);
+    let compute = || free.set(Some(pipe.try_lock().is_ok()));
+    let (wakes, waker) = WakeCount::new();
+    let mut cx = Context::from_waker(&waker);
+    let result = match in_branch {
+        false => pin!(drive(acquisition, ReadComputeRead::new(&compute))).poll(&mut cx),
+        true => pin!(drive(acquisition, ReadComputeReadInBranch::new(&compute))).poll(&mut cx),
+    };
+    // The computation runs in the same poll: the task is not suspended.
+    assert_eq!(result, Poll::Ready(Ok(*b"ab")));
+    assert_eq!(wakes.get(), 0);
+    free.get().unwrap()
+}
+
+#[test]
+fn a_fixed_view_is_held_through_a_release_point() {
+    let pipe = Mutex::new(Pipe::default());
+    let acquisitions = Cell::new(0);
+    let acquisition = AcquisitionState::<Locked, _, _>::new(|| {
+        acquisitions.set(acquisitions.get() + 1);
+        async { PipeGuard(pipe.lock().await) }
+    });
+    assert!(!lock_free_while_computing(&pipe, acquisition, false));
+    assert_eq!(acquisitions.get(), 1);
+}
+
+#[test]
+fn a_releasable_view_is_released_while_the_operation_computes() {
+    for in_branch in [false, true] {
+        let pipe = Mutex::new(Pipe::default());
+        let acquisitions = Cell::new(0);
+        let acquisition = AcquisitionState::<Locked, _, _>::releasable(|| {
+            acquisitions.set(acquisitions.get() + 1);
+            async { PipeGuard(pipe.lock().await) }
+        });
+        assert!(lock_free_while_computing(&pipe, acquisition, in_branch));
+        assert_eq!(acquisitions.get(), 2);
+    }
+}
+
+/// Releases its views only while `contended` is set, as an acquisition that
+/// knows whether others wait for the lock would.
+struct WhenContended<'a, S> {
+    inner: Pin<Box<S>>,
+    contended: &'a Cell<bool>,
+}
+impl<'view, S: nitori_call::ViewAcquisition<'view>> nitori_call::ViewAcquisition<'view>
+    for WhenContended<'_, S>
+{
+    type Family = S::Family;
+    fn poll_acquire(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Lend<<S::Family as ReceiverFamily>::ReceiverView<'view>>> {
+        self.get_mut().inner.as_mut().poll_acquire(cx)
+    }
+    fn should_release(
+        self: Pin<&mut Self>,
+        _: Pin<&mut <S::Family as ReceiverFamily>::ReceiverView<'view>>,
+    ) -> bool {
+        self.contended.get()
+    }
+}
+
+#[test]
+fn an_acquisition_decides_at_each_release_point() {
+    for contended in [false, true] {
+        let pipe = Mutex::new(Pipe::default());
+        let acquisitions = Cell::new(0);
+        let contended_cell = Cell::new(contended);
+        let acquisition = WhenContended {
+            inner: Box::pin(AcquisitionState::<Locked, _, _>::releasable(|| {
+                acquisitions.set(acquisitions.get() + 1);
+                async { PipeGuard(pipe.lock().await) }
+            })),
+            contended: &contended_cell,
+        };
+        assert_eq!(
+            lock_free_while_computing(&pipe, acquisition, true),
+            contended
+        );
+        assert_eq!(acquisitions.get(), 1 + usize::from(contended));
+    }
 }

@@ -139,14 +139,65 @@ pub enum CallPoll<T> {
     /// wakes the call for this: poll it again with a view, or arrange a
     /// wakeup for when one is available.
     NeedsView,
+    /// The call was lent a releasable view, and its operation reached a
+    /// release point: it does not need the view for a while. Poll the call
+    /// again, without the view to release it or with the same view to keep
+    /// it; either way the release point completes. Nothing else wakes the
+    /// call for this.
+    Releasable,
 }
 impl<T> CallPoll<T> {
-    /// Treat a request for a view as a bug: for callers that always lend one.
+    /// Treat a request for a view as a bug: for callers that always lend a
+    /// fixed one.
     pub(crate) fn lent(self) -> Poll<T> {
         match self {
             CallPoll::Ready(value) => Poll::Ready(value),
             CallPoll::Pending => Poll::Pending,
             CallPoll::NeedsView => unreachable!("a call given a view asked for one"),
+            CallPoll::Releasable => unreachable!("a call given a fixed view offered it back"),
+        }
+    }
+}
+
+/// A view lent to a call, and whether the lender may take it back at a
+/// release point of the operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lend<V> {
+    /// Kept for the whole poll: release points complete at once.
+    Fixed(V),
+    /// The lender may release it where the operation offers it back; the
+    /// call then returns [`CallPoll::Releasable`].
+    Releasable(V),
+}
+impl<V> Lend<V> {
+    pub fn into_inner(self) -> V {
+        match self {
+            Lend::Fixed(view) | Lend::Releasable(view) => view,
+        }
+    }
+    pub fn is_releasable(&self) -> bool {
+        matches!(self, Lend::Releasable(_))
+    }
+    pub fn map<U>(self, f: impl FnOnce(V) -> U) -> Lend<U> {
+        match self {
+            Lend::Fixed(view) => Lend::Fixed(f(view)),
+            Lend::Releasable(view) => Lend::Releasable(f(view)),
+        }
+    }
+    pub fn as_mut(&mut self) -> Lend<&mut V> {
+        match self {
+            Lend::Fixed(view) => Lend::Fixed(view),
+            Lend::Releasable(view) => Lend::Releasable(view),
+        }
+    }
+    pub fn as_pin_mut(self: Pin<&mut Self>) -> Lend<Pin<&mut V>> {
+        // SAFETY: the view is pinned whenever the lend is; it is never moved
+        // out of a pinned lend.
+        unsafe {
+            match self.get_unchecked_mut() {
+                Lend::Fixed(view) => Lend::Fixed(Pin::new_unchecked(view)),
+                Lend::Releasable(view) => Lend::Releasable(Pin::new_unchecked(view)),
+            }
         }
     }
 }
@@ -171,20 +222,28 @@ impl<F: ReceiverFamily> Drop for LendGuard<'_, F> {
 fn lend<'view, F: ReceiverFamily + 'view, T>(
     cell: &ViewCell<F>,
     poisoned: &Cell<bool>,
-    view: Option<Pin<&mut F::ReceiverView<'view>>>,
+    view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
     waker: &Waker,
     poll: impl FnOnce() -> Poll<T>,
 ) -> CallPoll<T> {
     assert!(!poisoned.get(), "call polled after a panic");
+    cell.releasable
+        .set(view.as_ref().is_some_and(Lend::is_releasable));
     // The view and the waker outlive this function, whose guard removes them.
-    cell.view.set(view.map(RawViewLoan::new));
+    cell.view
+        .set(view.map(|view| RawViewLoan::new(view.into_inner())));
     cell.root.set(waker);
     cell.requested.set(false);
     let guard = LendGuard { cell, poisoned };
     let poll = poll();
     drop(guard);
     match poll {
+        // A release point reached in the poll that emits an item is answered
+        // by the next poll like an offer.
         Poll::Ready(value) => CallPoll::Ready(value),
+        // Only lent polls reach release points, and only polls without a
+        // view ask for one.
+        Poll::Pending if cell.release.get() => CallPoll::Releasable,
         Poll::Pending if cell.requested.get() => CallPoll::NeedsView,
         // A branch that asked on an earlier poll still waits for a view.
         Poll::Pending
@@ -474,7 +533,7 @@ where
     /// which the call is done.
     pub fn poll_with<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         cx: &mut Context<'_>,
     ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
     where
@@ -485,7 +544,7 @@ where
 
     fn poll_event<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         discard: bool,
         cx: &mut Context<'_>,
     ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
@@ -507,15 +566,20 @@ where
             panic!("call polled after completion");
         }
         emitted.set_discard(discard);
-        // Once a branch has asked for a view, the operation sees the
-        // intercepting waker, and a view wakes the branches that asked. The
-        // operation is polled with a context of its own either way: a single
-        // path keeps the common case as fast as before, and the caller's
-        // context carries nothing else on stable Rust.
+        // The previous poll ended at a release point; the caller answers by
+        // lending the view again or not.
+        let offered = cell.release.replace(false);
+        cell.kept.set(offered && view.is_some());
+        // Once a branch has asked for a view or offered it back, the
+        // operation sees the intercepting waker, and a view, or the answer to
+        // an offer, wakes the branches that wait for it. The operation is
+        // polled with a context of its own either way: a single path keeps
+        // the common case as fast as before, and the caller's context carries
+        // nothing else on stable Rust.
         let intercepting = cell
             .intercept
             .get()
-            .map(|intercept| intercepting_waker(intercept, cx.waker(), view.is_some()));
+            .map(|intercept| intercepting_waker(intercept, cx.waker(), view.is_some() || offered));
         let waker = intercepting.as_ref().unwrap_or(cx.waker());
         let poll = advance(
             state,
@@ -533,7 +597,7 @@ where
     /// dropped where they are emitted, without suspending the operation.
     pub fn poll_return_with<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         cx: &mut Context<'_>,
     ) -> CallPoll<Output<F, Op>>
     where
@@ -546,6 +610,7 @@ where
             }
             CallPoll::Pending => CallPoll::Pending,
             CallPoll::NeedsView => CallPoll::NeedsView,
+            CallPoll::Releasable => CallPoll::Releasable,
         }
     }
 }
@@ -556,7 +621,7 @@ fn advance<'view, F, Op>(
     cell: &ViewCell<F>,
     emitted: &ItemCell<Yield<F, Op>>,
     poisoned: &Cell<bool>,
-    view: Option<Pin<&mut F::ReceiverView<'view>>>,
+    view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
     cx: &mut Context<'_>,
 ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
 where
@@ -577,12 +642,12 @@ where
     })
 }
 
-/// The intercepting waker of a call, after waking the branches that asked
-/// for a view if one is lent.
+/// The intercepting waker of a call, after waking the branches that wait
+/// if this poll answers them.
 #[cold]
-fn intercepting_waker(intercept: &Arc<Intercept>, caller: &Waker, lent: bool) -> Waker {
+fn intercepting_waker(intercept: &Arc<Intercept>, caller: &Waker, answers: bool) -> Waker {
     intercept.set_caller(caller);
-    if lent {
+    if answers {
         intercept.replay();
     }
     Waker::from(intercept.clone())
@@ -592,14 +657,14 @@ fn intercepting_waker(intercept: &Arc<Intercept>, caller: &Waker, lent: bool) ->
 pub trait DynCall<F: ReceiverFamily, Y, R> {
     fn poll_with<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         cx: &mut Context<'_>,
     ) -> CallPoll<ControlFlow<R, Y>>
     where
         F: 'view;
     fn poll_return_with<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         cx: &mut Context<'_>,
     ) -> CallPoll<R>
     where
@@ -612,7 +677,7 @@ where
 {
     fn poll_with<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         cx: &mut Context<'_>,
     ) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
     where
@@ -622,7 +687,7 @@ where
     }
     fn poll_return_with<'view>(
         self: Pin<&mut Self>,
-        view: Option<Pin<&mut F::ReceiverView<'view>>>,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'view>>>>,
         cx: &mut Context<'_>,
     ) -> CallPoll<Output<F, Op>>
     where

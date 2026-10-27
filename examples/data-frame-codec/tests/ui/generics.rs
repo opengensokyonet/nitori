@@ -2,7 +2,7 @@
 // facade-only
 #![deny(warnings)]
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{Call, CallPoll, Direct, Receiver, ReceiverAccess, ReceiverFamily, call};
+use nitori_call::{Call, CallPoll, Lend, Direct, Receiver, ReceiverAccess, ReceiverFamily, call};
 use std::{future::poll_fn, pin::{Pin, pin}, task::{Context, Poll, Waker}};
 
 trait Number: ReceiverFamily {
@@ -70,7 +70,7 @@ where
     Op: nitori_call::Operation<Direct<usize>> + for<'s> nitori_call::Start<'s, nitori_call::ReceiverSlot<'s, Direct<usize>>>,
 {
     let call = pin!(Call::new(operation));
-    call.poll_return_with(Some(pin!(Pin::new(host).view())), &mut Context::from_waker(Waker::noop()))
+    call.poll_return_with(Some(Lend::Fixed(pin!(Pin::new(host).view()))), &mut Context::from_waker(Waker::noop()))
 }
 fn main() {
     nested::visibility_checks();

@@ -1,6 +1,6 @@
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 #![deny(unsafe_op_in_unsafe_fn)]
-use nitori_call::{Call, CallPoll, Direct, Receiver, ReceiverAccess, ReceiverFamily, call};
+use nitori_call::{Call, CallPoll, Direct, Lend, Receiver, ReceiverAccess, ReceiverFamily, call};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -101,10 +101,11 @@ fn construction_ready_pending_emit_completion_and_drop_allocate_nothing() {
         let mut waits = 0;
         let returned = loop {
             let view = pin!(std::pin::Pin::new(&mut target).view());
-            match call.as_mut().poll_with(Some(view), &mut cx) {
+            match call.as_mut().poll_with(Some(Lend::Fixed(view)), &mut cx) {
                 CallPoll::Pending => waits += 1,
                 CallPoll::Ready(ControlFlow::Continue(_)) => emitted += 1,
                 CallPoll::Ready(ControlFlow::Break(value)) => break value,
+                CallPoll::Releasable => unreachable!("a fixed view is not offered back"),
                 CallPoll::NeedsView => unreachable!("a view is always lent"),
             }
         };
