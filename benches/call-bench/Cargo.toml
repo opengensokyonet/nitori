@@ -8,5 +8,8 @@ license = "Apache-2.0 OR MIT"
 [dependencies]
 bytes.workspace = true
 futures-core.workspace = true
+futures-sink.workspace = true
+futures-util = { workspace = true, features = ["std"] }
 nitori_call.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["codec"] }

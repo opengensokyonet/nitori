@@ -12,7 +12,7 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
-- `benches/call-bench`: framed reads from a Tokio duplex pipe with ordinary async and `nitori_call`, on an exclusive and a `tokio::sync::Mutex`-shared connection. Run `cargo run --release -p nitori-call-bench`; add `trickle` to make the reader wait for nearly every frame, or `sizes` to print the size of each per-frame future.
+- `benches/call-bench`: HTTP responses from a captured header corpus, read and written with ordinary async, tokio-util codecs, and `nitori_call`, each written the way that suits it best: HTTP/2 with HPACK over a Tokio duplex pipe, and HTTP/3 with QPACK over QUIC stream buffers in user space with one task per stream. Field sections use the static table only, with Huffman-coded strings. Shared resources sit behind a fair async, an unfair async, or a blocking mutex. Run `cargo run --release -p nitori-call-bench -- <h2-read|h2-write|h3-recv|h3-send|fields>`; see the crate documentation for the options. `scripts/gen_tables.py` regenerates the static and Huffman tables from the RFC text.
 
 ## Development
 
