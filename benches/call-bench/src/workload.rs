@@ -12,7 +12,7 @@ use crate::{
     fields::{FieldError, Fields, fields_checksum, hpack, qpack},
 };
 use bytes::BufMut;
-use std::sync::Arc;
+use std::{hint::black_box, sync::Arc};
 
 pub struct Message {
     pub fields: Vec<(String, String)>,
@@ -78,19 +78,45 @@ impl Message {
     fn field_strs(&self) -> impl Iterator<Item = (&str, &str)> {
         self.fields.iter().map(|(n, v)| (n.as_str(), v.as_str()))
     }
-    /// What a reader computes from this message's frames.
-    pub fn checksum(&self) -> u64 {
+    /// What a reader doing `work` computes from this message's frames.
+    pub fn checksum(&self, work: Work) -> u64 {
         fields_checksum(
             self.fields
                 .iter()
                 .map(|(n, v)| (n.as_bytes(), v.as_bytes())),
-        ) + data_checksum(&self.body)
+        ) + work.read(&self.body)
     }
 }
 
-/// The checksum of a piece of DATA payload; it adds up over pieces.
-pub fn data_checksum(bytes: &[u8]) -> u64 {
-    byte_sum(bytes) + 3 * bytes.len() as u64
+/// What the application does with each byte of DATA, read or to be written:
+/// this many passes over it. With none it only counts the bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Work {
+    pub passes: usize,
+}
+impl Work {
+    /// One pass, which checks every byte.
+    pub const CHECK: Work = Work { passes: 1 };
+
+    /// Process a piece of DATA that was read and return its checksum, which
+    /// adds up over pieces: the byte count, and the byte sum when there is a
+    /// pass.
+    pub fn read(self, bytes: &[u8]) -> u64 {
+        let mut checksum = 3 * bytes.len() as u64;
+        for pass in 0..self.passes {
+            let sum = black_box(byte_sum(black_box(bytes)));
+            if pass == 0 {
+                checksum += sum;
+            }
+        }
+        checksum
+    }
+    /// Process a piece of DATA before writing it.
+    pub fn write(self, bytes: &[u8]) {
+        for _ in 0..self.passes {
+            black_box(byte_sum(black_box(bytes)));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -266,6 +292,13 @@ impl<'m> Frame<'m> {
         }
     }
 
+    /// Process the payload of DATA with `work` before writing it.
+    pub fn prepare(&self, work: Work) {
+        if let Frame::Data { payload, .. } = *self {
+            work.write(payload);
+        }
+    }
+
     /// Append the whole frame.
     pub fn encode<P: Protocol>(
         &self,
@@ -362,8 +395,8 @@ pub fn encode_all<'m, P: Protocol>(frames: impl Iterator<Item = Frame<'m>>) -> V
     output
 }
 
-pub fn total_checksum<'m>(messages: impl Iterator<Item = &'m Message>) -> u64 {
-    messages.map(Message::checksum).sum()
+pub fn total_checksum<'m>(messages: impl Iterator<Item = &'m Message>, work: Work) -> u64 {
+    messages.map(|message| message.checksum(work)).sum()
 }
 
 #[cfg(test)]

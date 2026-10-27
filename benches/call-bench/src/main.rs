@@ -7,21 +7,38 @@
 //! - `h2-read`, `h2-write`: HTTP/2 over a tokio duplex pipe whose every read
 //!   or write has a fixed cost, like a TCP socket; see [`h2`];
 //! - `h3-recv`, `h3-send`: HTTP/3 over the stream buffers of a QUIC
-//!   connection in user space, one task per stream; see [`h3`];
-//! - `fields`: the cost of encoding and decoding the field sections alone.
+//!   connection in user space, each behind a lock of its own, one task per
+//!   stream; see [`h3`];
+//! - `fields`: the cost of encoding and decoding the field sections alone;
+//! - `mechanism`: the fixed cost of an access through each way, with no work
+//!   behind it; see [`mechanism`].
 //!
 //! Shared resources sit behind a fair async lock (`tokio::sync::Mutex`), an
 //! unfair async lock (`futures_util::lock::Mutex`) or a blocking lock
-//! (`std::sync::Mutex`).
+//! (`std::sync::Mutex`). Every variant does as much as it can with each
+//! acquisition, until nothing more is ready. For each side of a lock the
+//! report counts acquisitions, those that found it held by someone else
+//! (queued), and those after which the value had not changed (empty).
 //!
 //! Run with `--release`, a scenario and optionally:
 //! - `streams=N`: responses in flight (HTTP/2) or streams (HTTP/3), default 8;
 //! - `chunk=N`: the most body bytes per DATA frame, default 16384;
 //! - `passes=N`: copies of the corpus, default 8 (2 with `trickle`);
-//! - `trickle`: yield to the scheduler after each segment or packet, so
-//!   readers wait for nearly every one;
-//! - `contention` (`h2-read`): a probe task locks the shared pipe every
-//!   20 µs; report how long it waited.
+//! - `rate=N`: the source's bytes arrive at N MB/s (10^6 bytes), released
+//!   each millisecond; by default as fast as they are taken (`h2-read`,
+//!   `h3-recv`, `h3-send`);
+//! - `trickle`: yield to the scheduler after each segment or packet received,
+//!   so readers wait for nearly every one;
+//! - `update=N` (`h3-recv`, `h3-send`): bytes a reader consumes before it
+//!   raises its stream's flow control limit, and the most room a waiting
+//!   writer asks for; default 32768, half the window;
+//! - `contention[=N]` (`h2-read`): a control task locks the shared reader
+//!   once for every N bytes fed, default 32768; report how long it waited;
+//! - `work=N`: passes the application makes over every DATA byte after
+//!   reading it or before writing it, default 1; with 0 it only counts the
+//!   bytes;
+//! - `holds`: also measure how long each side holds its locks, which adds
+//!   two clock reads to every acquisition.
 #![feature(impl_trait_in_assoc_type)]
 #![allow(clippy::multiple_bound_locations)]
 mod calls;
@@ -30,18 +47,21 @@ mod common;
 mod fields;
 mod h2;
 mod h3;
+mod mechanism;
 mod tables;
 mod workload;
 
-use common::{LOCK_KINDS, LockKind, Sample};
+use common::{LOCK_KINDS, LockCounts, LockKind, Pace, Sample};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
+use workload::Work;
 
 fn runtimes() -> [(&'static str, Runtime); 2] {
     [
         (
             "current_thread",
             tokio::runtime::Builder::new_current_thread()
+                .enable_time()
                 .build()
                 .unwrap(),
         ),
@@ -49,6 +69,7 @@ fn runtimes() -> [(&'static str, Runtime); 2] {
             "multi_thread(2)",
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
+                .enable_time()
                 .build()
                 .unwrap(),
         ),
@@ -61,6 +82,26 @@ fn lock_name(kind: LockKind) -> &'static str {
         LockKind::Unfair => "futures_util::lock::Mutex (unfair)",
         LockKind::Blocking => "std::sync::Mutex (blocking)",
     }
+}
+
+/// Acquisitions per frame, and the shares queued and, with `empty`, empty.
+/// The other side's acquisitions always deliver, take or do nothing, so its
+/// empty share says nothing.
+fn locks(counts: &LockCounts, frames: f64, empty: bool) -> String {
+    let share = |count: usize| 100.0 * count as f64 / counts.acquired.max(1) as f64;
+    let mut text = format!(
+        "{:6.3} locks/frame ({:4.1}% queued",
+        counts.acquired as f64 / frames,
+        share(counts.queued),
+    );
+    if empty {
+        text += &format!(", {:4.1}% empty", share(counts.empty));
+    }
+    if let Some(held) = counts.held {
+        let mean = held.as_nanos() as f64 / counts.acquired.max(1) as f64;
+        text += &format!(", held {mean:.0} ns each");
+    }
+    text + ")"
 }
 
 fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
@@ -92,15 +133,17 @@ fn report<V: Copy + std::fmt::Debug>(
         let per_frame = |sample: &Sample| sample.elapsed.as_nanos() as f64 / frames;
         let median = &samples[samples.len() / 2];
         print!(
-            "  {:<18} {:8.1} ns/frame ({:7.1}–{:7.1}) {:5.2} GB/s {:6.3} polls/frame {:6.3} locks/frame",
+            "  {:<20} {:8.1} ns/frame ({:7.1}–{:7.1}) {:5.2} GB/s {:6.3} polls/frame",
             format!("{variant:?}"),
             per_frame(median),
             per_frame(&samples[0]),
             per_frame(samples.last().unwrap()),
             bytes as f64 / median.elapsed.as_nanos() as f64,
             median.polls as f64 / frames,
-            median.locks as f64 / frames,
         );
+        if median.locks.acquired > 0 {
+            print!(" {}", locks(&median.locks, frames, true));
+        }
         if median.buffer > 0 {
             print!("  buffer {} B", median.buffer);
         }
@@ -108,8 +151,8 @@ fn report<V: Copy + std::fmt::Debug>(
             let mut waits = median.waits.clone();
             waits.sort();
             print!(
-                "  other side: {} locks, wait p50 {:?} p99 {:?} max {:?}",
-                waits.len(),
+                "  other side: {}, wait p50 {:?} p99 {:?} max {:?}",
+                locks(&median.other, frames, false),
                 percentile(&waits, 0.5),
                 percentile(&waits, 0.99),
                 waits.last().unwrap(),
@@ -194,10 +237,27 @@ fn main() {
     };
     let scenario = arguments.first().map(String::as_str).unwrap_or("h3-recv");
     let trickle = has("trickle");
+    let holds = has("holds");
     let streams = value("streams", 8);
     let chunk = value("chunk", 16 * 1024);
     let passes = value("passes", if trickle { 2 } else { 8 });
+    let update = value("update", h3::WINDOW / 2);
+    let work = Work {
+        passes: value("work", 1),
+    };
+    let pace = match value("rate", 0) {
+        0 => Pace::Unlimited,
+        rate => Pace::Rate(rate as u64 * 1_000_000),
+    };
+    let contention = (has("contention") || arguments.iter().any(|a| a.starts_with("contention=")))
+        .then(|| value("contention", 32 * 1024));
     let messages = workload::messages(passes);
+    if scenario == "mechanism" {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        return mechanism::run(&runtime);
+    }
     if scenario == "fields" {
         return field_costs(&messages[..messages.len() / passes]);
     }
@@ -206,18 +266,32 @@ fn main() {
         .map(|m| 1 + m.body.len().div_ceil(chunk))
         .sum();
     let bytes: usize = messages.iter().map(|m| m.body.len()).sum();
+    let mut options = String::new();
+    if let Pace::Rate(rate) = pace {
+        options += &format!(", {} MB/s", rate / 1_000_000);
+    }
+    if trickle {
+        options += ", trickle";
+    }
+    if work.passes != 1 {
+        options += &format!(", work {}", work.passes);
+    }
+    if scenario.starts_with("h3") {
+        options += &format!(", update {update}");
+    }
+    if let Some(every) = contention {
+        options += &format!(", control lock every {every} bytes");
+    }
     println!(
-        "{scenario}: {} responses, {frames} frames, {bytes} body bytes, {streams} streams, chunk {chunk}{}, {REPEATS} runs each, median (min–max)",
+        "{scenario}: {} responses, {frames} frames, {bytes} body bytes, {streams} streams, chunk {chunk}{options}, {REPEATS} runs each, median (min–max)",
         messages.len(),
-        if trickle { ", trickle" } else { "" },
     );
     for (name, runtime) in &runtimes() {
         println!("\n== {name}");
         match scenario {
             "h2-read" => {
-                let input = h2::Input::new(messages.clone(), streams, chunk, trickle);
-                let contention = has("contention");
-                if !contention {
+                let input = h2::Input::new(messages.clone(), streams, chunk, pace, trickle, work);
+                if contention.is_none() {
                     println!("exclusive");
                     report(&h2::READS, frames, bytes, |variant| {
                         h2::run_read(runtime, variant, input.clone())
@@ -230,36 +304,59 @@ fn main() {
                         .filter(|variant| variant.supports(lock))
                         .collect();
                     report(&variants, frames, bytes, |variant| {
-                        h2::run_shared_read(runtime, variant, lock, input.clone(), contention)
+                        h2::run_shared_read(
+                            runtime,
+                            variant,
+                            lock,
+                            input.clone(),
+                            contention,
+                            holds,
+                        )
                     });
                 }
             }
             "h2-write" => {
-                let input = h2::Input::new(messages.clone(), streams, chunk, trickle);
+                let input = h2::Input::new(messages.clone(), streams, chunk, pace, trickle, work);
                 report(&h2::WRITES, frames, bytes, |variant| {
                     h2::run_write(runtime, variant, input.clone())
                 });
             }
             "h3-recv" => {
-                let input = h3::Input::new(messages.clone(), streams, chunk, trickle);
+                let input = h3::Input::new(
+                    messages.clone(),
+                    streams,
+                    chunk,
+                    pace,
+                    trickle,
+                    update,
+                    work,
+                );
                 for lock in LOCK_KINDS {
                     println!("{}", lock_name(lock));
                     report(&h3::RECVS, frames, bytes, |variant| {
-                        h3::run_recv(runtime, variant, lock, input.clone())
+                        h3::run_recv(runtime, variant, lock, input.clone(), holds)
                     });
                 }
             }
             "h3-send" => {
-                let input = h3::Input::new(messages.clone(), streams, chunk, trickle);
+                let input = h3::Input::new(
+                    messages.clone(),
+                    streams,
+                    chunk,
+                    pace,
+                    trickle,
+                    update,
+                    work,
+                );
                 for lock in LOCK_KINDS {
                     println!("{}", lock_name(lock));
                     report(&h3::SENDS, frames, bytes, |variant| {
-                        h3::run_send(runtime, variant, lock, input.clone())
+                        h3::run_send(runtime, variant, lock, input.clone(), holds)
                     });
                 }
             }
             other => panic!(
-                "unknown scenario {other}; use h2-read, h2-write, h3-recv, h3-send or fields"
+                "unknown scenario {other}; use h2-read, h2-write, h3-recv, h3-send, fields or mechanism"
             ),
         }
     }
@@ -271,15 +368,28 @@ mod tests {
 
     // Each run checks the checksum of what was read or written.
 
-    fn inputs() -> impl Iterator<Item = (usize, usize, bool)> {
-        [(1, 16 * 1024, false), (4, 4096, true), (3, 1000, false)].into_iter()
+    /// Streams, chunk, pace, trickle, update threshold and work.
+    fn inputs() -> impl Iterator<Item = (usize, usize, Pace, bool, usize, Work)> {
+        [
+            (1, 16 * 1024, Pace::Unlimited, false, 32 * 1024, Work::CHECK),
+            (4, 4096, Pace::Unlimited, true, 1, Work { passes: 0 }),
+            (
+                3,
+                1000,
+                Pace::Rate(2_000_000_000),
+                false,
+                60_000,
+                Work { passes: 3 },
+            ),
+        ]
+        .into_iter()
     }
 
     #[test]
     fn h2_variants_carry_every_frame() {
         let messages = workload::messages(1);
-        for (streams, chunk, trickle) in inputs() {
-            let input = h2::Input::new(messages.clone(), streams, chunk, trickle);
+        for (streams, chunk, pace, trickle, _, work) in inputs() {
+            let input = h2::Input::new(messages.clone(), streams, chunk, pace, trickle, work);
             for (_, runtime) in &runtimes() {
                 for variant in h2::READS {
                     h2::run_read(runtime, variant, input.clone());
@@ -289,9 +399,17 @@ mod tests {
                 }
                 for lock in LOCK_KINDS {
                     for variant in h2::SHARED_READS.into_iter().filter(|v| v.supports(lock)) {
-                        let sample =
-                            h2::run_shared_read(runtime, variant, lock, input.clone(), true);
+                        let sample = h2::run_shared_read(
+                            runtime,
+                            variant,
+                            lock,
+                            input.clone(),
+                            Some(16 * 1024),
+                            true,
+                        );
                         assert!(!sample.waits.is_empty(), "{variant:?}");
+                        assert_eq!(sample.other.acquired, sample.waits.len(), "{variant:?}");
+                        assert!(sample.locks.held.is_some(), "{variant:?}");
                     }
                 }
             }
@@ -299,17 +417,66 @@ mod tests {
     }
 
     #[test]
+    fn release_points_give_the_view_back() {
+        let messages = workload::messages(1);
+        let frames: usize = messages
+            .iter()
+            .map(|m| 1 + m.body.len().div_ceil(4096))
+            .sum();
+        let input = h3::Input::new(
+            messages.clone(),
+            2,
+            4096,
+            Pace::Unlimited,
+            false,
+            32 * 1024,
+            Work::CHECK,
+        );
+        for (_, runtime) in &runtimes() {
+            for lock in LOCK_KINDS {
+                // Reading releases before every decode and every DATA piece,
+                // so each frame needs an acquisition of its own; writing
+                // releases before every field section.
+                let read = h3::run_recv(
+                    runtime,
+                    h3::RecvVariant::CallRelease,
+                    lock,
+                    input.clone(),
+                    false,
+                );
+                assert!(read.locks.acquired >= frames, "{lock:?}");
+                let write = h3::run_send(
+                    runtime,
+                    h3::SendVariant::CallRelease,
+                    lock,
+                    input.clone(),
+                    false,
+                );
+                assert!(write.locks.acquired >= messages.len(), "{lock:?}");
+            }
+        }
+    }
+
+    #[test]
     fn h3_variants_carry_every_frame() {
         let messages = workload::messages(1);
-        for (streams, chunk, trickle) in inputs() {
-            let input = h3::Input::new(messages.clone(), streams, chunk, trickle);
+        for (streams, chunk, pace, trickle, update, work) in inputs() {
+            let input = h3::Input::new(
+                messages.clone(),
+                streams,
+                chunk,
+                pace,
+                trickle,
+                update,
+                work,
+            );
             for (_, runtime) in &runtimes() {
                 for lock in LOCK_KINDS {
                     for variant in h3::RECVS {
-                        h3::run_recv(runtime, variant, lock, input.clone());
+                        h3::run_recv(runtime, variant, lock, input.clone(), false);
                     }
                     for variant in h3::SENDS {
-                        h3::run_send(runtime, variant, lock, input.clone());
+                        h3::run_send(runtime, variant, lock, input.clone(), false);
                     }
                 }
             }
