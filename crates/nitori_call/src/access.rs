@@ -1,11 +1,12 @@
 //! Access to the view lent for the current poll.
-use crate::{Compose, Composed, ReceiverFamily, ViewOperation, loan::RawViewLoan};
+use crate::{Compose, Composed, ReceiverFamily, ViewOperation, call::Intercept, loan::RawViewLoan};
 use std::{
-    cell::Cell,
+    cell::{Cell, OnceCell},
     fmt,
     marker::PhantomData,
     pin::Pin,
     ptr,
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -38,6 +39,9 @@ impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
 pub(crate) struct ViewCell<F: ReceiverFamily> {
     pub(crate) view: Cell<Option<RawViewLoan<F>>>,
     pub(crate) requested: Cell<bool>,
+    /// Present once a branch of an intermediate executor has asked for a
+    /// view; it keeps the branches waiting for one.
+    pub(crate) intercept: OnceCell<Arc<Intercept>>,
     pub(crate) root: RootWaker,
 }
 impl<F: ReceiverFamily> ViewCell<F> {
@@ -45,6 +49,7 @@ impl<F: ReceiverFamily> ViewCell<F> {
         Self {
             view: Cell::new(None),
             requested: Cell::new(false),
+            intercept: OnceCell::new(),
             root: RootWaker::new(),
         }
     }
@@ -83,16 +88,22 @@ pub(crate) fn polled_directly(root: *const Waker, cx: &Context<'_>) -> bool {
 /// The right to ask the caller of the current call for a view.
 pub struct ViewRequest<'a> {
     requested: &'a Cell<bool>,
+    intercept: &'a OnceCell<Arc<Intercept>>,
     root: *const Waker,
 }
 impl ViewRequest<'_> {
-    /// Ask for a view. An executor between the call and this point repolls
-    /// only branches whose waker fired, so wake this branch for it; with
-    /// none, the caller, told the call needs a view, polls again.
+    /// Ask for a view. Nothing is woken: the caller, told the call needs a
+    /// view, lends one or arranges a wakeup for when it can. An executor
+    /// between the call and this point repolls only branches whose waker
+    /// fired, so the call keeps this branch's waker and wakes it when it is
+    /// lent a view, right before polling the operation; a list keeps every
+    /// branch that asked.
     fn ask<T>(self, cx: &mut Context<'_>) -> Poll<T> {
         self.requested.set(true);
         if !polled_directly(self.root, cx) {
-            cx.waker().wake_by_ref();
+            self.intercept
+                .get_or_init(|| Arc::new(Intercept::new()))
+                .defer(cx.waker());
         }
         Poll::Pending
     }
@@ -256,6 +267,7 @@ impl<F: ReceiverFamily, M: Mode> ReceiverAccess for ReceiverSlot<'_, F, M> {
             // there is no view either.
             None => visitor.absent(ViewRequest {
                 requested: &cell.requested,
+                intercept: &cell.intercept,
                 root: cell.root.get(),
             }),
             // SAFETY: the call lent this view for its current poll. No other

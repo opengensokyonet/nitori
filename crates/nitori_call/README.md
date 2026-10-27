@@ -320,7 +320,9 @@ An executor that can only acquire views, such as a reader of a connection behind
 operation without a view and acquires one only when the operation asks for it,
 through a `ViewAcquisition` such as `AcquisitionState`, which keeps a pending
 acquisition across polls. The view stays acquired until the end of that poll.
-Waiting for anything else holds nothing. The
+Waiting for anything else holds nothing: on polls where the operation does not
+ask, `Drive` only advances a pending acquisition with `advance_unrequested`,
+and releases a view granted meanwhile at once. The
 [driver tests](tests/driver.rs) implement such a reader, and the
 [executor tests](tests/executor.rs) lend one acquired view to several calls in
 one pass.

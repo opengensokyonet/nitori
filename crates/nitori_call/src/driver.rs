@@ -47,27 +47,6 @@ pub trait ReceiverScope<'view> {
     }
 }
 
-/// Poll `call` to its final value as `poll_call` does, keeping the view for
-/// the rest of the poll once acquired.
-fn poll_return_call<'view, S, C, Y, R>(
-    mut scope: Pin<&mut S>,
-    mut call: Pin<&mut C>,
-    cx: &mut Context<'_>,
-) -> Poll<R>
-where
-    S: ReceiverScope<'view>,
-    C: DynCall<S::Family, Y, R> + ?Sized,
-{
-    match call.as_mut().poll_return_with(None, cx) {
-        CallPoll::Ready(result) => Poll::Ready(result),
-        CallPoll::Pending => Poll::Pending,
-        CallPoll::NeedsView => {
-            let view = ready!(scope.as_mut().poll_view(cx));
-            call.poll_return_with(Some(view), cx).lent()
-        }
-    }
-}
-
 /// Acquires complete views, keeping a pending acquisition across polls. A
 /// new acquisition starts after each delivered view; dropping the source
 /// cancels a pending one.
@@ -77,6 +56,17 @@ pub trait ViewAcquisition<'view> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<<Self::Family as ReceiverFamily>::ReceiverView<'view>>;
+
+    /// Advance a pending acquisition without starting one, on a poll whose
+    /// operation did not ask for a view. An acquisition that completes here
+    /// releases its view at once, so a resource granted while the operation
+    /// waits for something else is not held until its next request; one that
+    /// is still pending keeps its place and may complete in a later
+    /// [`poll_acquire`](Self::poll_acquire). The default does nothing, for
+    /// acquisitions that hold nothing while pending.
+    fn advance_unrequested(self: Pin<&mut Self>, cx: &mut Context<'_>) {
+        let _ = cx;
+    }
 }
 
 pin_project_lite::pin_project! {
@@ -119,11 +109,21 @@ where
         pending.set(None);
         Poll::Ready(view)
     }
+    fn advance_unrequested(self: Pin<&mut Self>, cx: &mut Context<'_>) {
+        let mut pending = self.project().pending.get_pin_mut();
+        if let Some(acquire) = pending.as_mut().as_pin_mut()
+            && acquire.poll(cx).is_ready()
+        {
+            pending.set(None);
+        }
+    }
 }
 
 pin_project_lite::pin_project! {
     /// One poll's scope over an acquisition. The view it acquires is
-    /// released when the scope is dropped at the end of the poll.
+    /// released when the scope is dropped at the end of the poll. On polls
+    /// whose call did not ask for a view, the executor calls
+    /// [`ViewAcquisition::advance_unrequested`] instead.
     pub struct AcquiredScope<'source, 'view, S: ?Sized, F: ReceiverFamily>
     where
         F: 'view,
@@ -345,9 +345,18 @@ where
 {
     type Output = Output<S::Family, Op>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (acquisition, call) = self.project();
-        let scope = pin!(AcquiredScope::<_, S::Family>::new(acquisition));
-        poll_return_call(scope, call, cx)
+        let (acquisition, mut call) = self.project();
+        match call.as_mut().poll_return_with(None, cx) {
+            CallPoll::Ready(result) => Poll::Ready(result),
+            CallPoll::Pending => {
+                acquisition.advance_unrequested(cx);
+                Poll::Pending
+            }
+            CallPoll::NeedsView => {
+                let view = pin!(ready!(acquisition.poll_acquire(cx)));
+                call.poll_return_with(Some(view), cx).lent()
+            }
+        }
     }
 }
 impl<'view, S, Op> Stream for Drive<'view, S, Op>
@@ -357,12 +366,21 @@ where
 {
     type Item = Event<S::Family, Op>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let (acquisition, call) = self.project();
+        let (acquisition, mut call) = self.project();
         if call.is_terminated() {
             return Poll::Ready(None);
         }
-        let scope = pin!(AcquiredScope::<_, S::Family>::new(acquisition));
-        scope.poll_call(call, cx).map(Some)
+        match call.as_mut().poll_with(None, cx) {
+            CallPoll::Ready(event) => Poll::Ready(Some(event)),
+            CallPoll::Pending => {
+                acquisition.advance_unrequested(cx);
+                Poll::Pending
+            }
+            CallPoll::NeedsView => {
+                let view = pin!(ready!(acquisition.poll_acquire(cx)));
+                call.poll_with(Some(view), cx).lent().map(Some)
+            }
+        }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         remaining(self.call.is_terminated())

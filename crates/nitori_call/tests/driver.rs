@@ -485,3 +485,73 @@ fn a_second_resource_is_driven_inside_the_operation() {
     assert_eq!(poll_once(copy.as_mut()), Poll::Ready(Ok(2)));
     assert_eq!(*log.try_lock().unwrap(), b"ok");
 }
+
+/// Reads one byte, using the resource only on polls while `wanted` is set.
+#[call]
+async fn read_when_wanted<A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+    io: &mut A,
+    wanted: &Cell<bool>,
+) -> u8 {
+    let mut byte = [0];
+    poll_fn(|cx| match wanted.get() {
+        false => Poll::Pending,
+        true => io.poll_access(cx, |access, cx| {
+            <A::Family as Read>::poll_read(access.into_pin(), cx, &mut byte.as_mut_slice())
+        }),
+    })
+    .await
+    .unwrap();
+    byte[0]
+}
+
+#[test]
+fn an_acquisition_granted_while_unneeded_is_released() {
+    let pipe = Mutex::new(Pipe::default());
+    let wanted = Cell::new(true);
+    let acquisitions = Cell::new(0);
+    let acquisition = AcquisitionState::<Locked, _, _>::new(|| {
+        acquisitions.set(acquisitions.get() + 1);
+        async { PipeGuard(pipe.lock().await) }
+    });
+    let mut read = pin!(drive(acquisition, ReadWhenWanted::new(&wanted)));
+    let holder = pipe.try_lock().unwrap();
+    // The operation asks while the lock is held: the acquisition queues.
+    assert!(poll_once(read.as_mut()).is_pending());
+    // It stops needing the lock. While the lock stays held, the acquisition
+    // keeps its place.
+    wanted.set(false);
+    assert!(poll_once(read.as_mut()).is_pending());
+    assert_eq!(acquisitions.get(), 1);
+    // The lock is granted to it while the operation waits for something
+    // else, and released by the next poll.
+    drop(holder);
+    assert!(poll_once(read.as_mut()).is_pending());
+    assert!(pipe.try_lock().is_ok());
+    // Asking again acquires anew.
+    wanted.set(true);
+    pipe.try_lock().unwrap().push(b"z");
+    assert_eq!(poll_once(read.as_mut()), Poll::Ready(b'z'));
+    assert_eq!(acquisitions.get(), 2);
+}
+
+#[test]
+fn a_pending_acquisition_advanced_while_unneeded_completes_later() {
+    let pipe = Mutex::new(Pipe::default());
+    pipe.try_lock().unwrap().push(b"y");
+    let wanted = Cell::new(true);
+    let acquisitions = Cell::new(0);
+    let acquisition = AcquisitionState::<Locked, _, _>::new(|| {
+        acquisitions.set(acquisitions.get() + 1);
+        async { PipeGuard(pipe.lock().await) }
+    });
+    let mut read = pin!(drive(acquisition, ReadWhenWanted::new(&wanted)));
+    let holder = pipe.try_lock().unwrap();
+    assert!(poll_once(read.as_mut()).is_pending());
+    wanted.set(false);
+    assert!(poll_once(read.as_mut()).is_pending());
+    // Wanted again before the lock is free: the same acquisition completes.
+    wanted.set(true);
+    drop(holder);
+    assert_eq!(poll_once(read.as_mut()), Poll::Ready(b'y'));
+    assert_eq!(acquisitions.get(), 1);
+}

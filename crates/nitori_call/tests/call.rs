@@ -15,7 +15,8 @@ use std::{
     ops::ControlFlow,
     pin::{Pin, pin},
     rc::Rc,
-    task::{Context, Poll, Waker},
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Wake, Waker},
 };
 use support::*;
 
@@ -617,7 +618,7 @@ async fn read_record_in_branch(
 }
 
 #[test]
-fn a_request_from_a_branch_wakes_the_branch() {
+fn a_branch_that_asks_is_polled_when_a_view_is_lent() {
     let mut input = b"\x02ok".as_slice();
     let mut output = Vec::new();
     let mut call = pin!(Call::<Memory, _>::new(ReadRecordInBranch::new(&mut output)));
@@ -666,4 +667,225 @@ fn an_item_from_a_branch_wakes_the_branch() {
             ControlFlow::Break(2)
         ]
     );
+}
+
+/// Polls each branch only after its waker fired. A branch's waker queues the
+/// branch and wakes the executor's own waker, and a branch that woke itself
+/// while polled makes the executor wake its waker before returning, as
+/// `FuturesUnordered` does.
+async fn branches<'a, T>(mut branches: Vec<Pin<Box<dyn Future<Output = T> + 'a>>>) -> Vec<T> {
+    struct Branch {
+        index: usize,
+        queue: Arc<Mutex<Vec<usize>>>,
+        parent: Arc<Mutex<Option<Waker>>>,
+    }
+    impl Wake for Branch {
+        fn wake(self: Arc<Self>) {
+            let mut queue = self.queue.lock().unwrap();
+            if !queue.contains(&self.index) {
+                queue.push(self.index);
+            }
+            drop(queue);
+            if let Some(parent) = &*self.parent.lock().unwrap() {
+                parent.wake_by_ref();
+            }
+        }
+    }
+    let queue = Arc::new(Mutex::new((0..branches.len()).collect::<Vec<_>>()));
+    let parent = Arc::new(Mutex::new(None::<Waker>));
+    let wakers: Vec<Waker> = (0..branches.len())
+        .map(|index| {
+            Waker::from(Arc::new(Branch {
+                index,
+                queue: queue.clone(),
+                parent: parent.clone(),
+            }))
+        })
+        .collect();
+    let mut finished = vec![false; branches.len()];
+    let mut results = Vec::new();
+    poll_fn(|cx| {
+        *parent.lock().unwrap() = Some(cx.waker().clone());
+        let ready = std::mem::take(&mut *queue.lock().unwrap());
+        for index in ready {
+            if finished[index] {
+                continue;
+            }
+            let poll = branches[index]
+                .as_mut()
+                .poll(&mut Context::from_waker(&wakers[index]));
+            if let Poll::Ready(result) = poll {
+                finished[index] = true;
+                results.push(result);
+            }
+        }
+        if finished.iter().all(|finished| *finished) {
+            return Poll::Ready(std::mem::take(&mut results));
+        }
+        if !queue.lock().unwrap().is_empty() {
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Opens once; waiting for it needs no resource.
+#[derive(Default)]
+struct Gate {
+    open: Cell<bool>,
+    waiter: RefCell<Option<Waker>>,
+}
+impl Gate {
+    async fn wait(&self) {
+        poll_fn(|cx| match self.open.get() {
+            true => Poll::Ready(()),
+            false => {
+                *self.waiter.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
+    }
+    fn open(&self) {
+        self.open.set(true);
+        if let Some(waiter) = self.waiter.take() {
+            waiter.wake();
+        }
+    }
+}
+
+/// Each branch waits for its gate, then reads one byte.
+#[call]
+async fn read_after_gates<A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+    io: &mut A,
+    gates: &[Gate],
+) -> Vec<u8> {
+    let io = RefCell::new(io);
+    let io = &io;
+    let reads = gates
+        .iter()
+        .map(|gate| {
+            Box::pin(async move {
+                gate.wait().await;
+                let mut byte = [0];
+                poll_fn(|cx| {
+                    io.borrow_mut().poll_access(cx, |access, cx| {
+                        <A::Family as Read>::poll_read(
+                            access.into_pin(),
+                            cx,
+                            &mut byte.as_mut_slice(),
+                        )
+                    })
+                })
+                .await
+                .unwrap();
+                byte[0]
+            }) as Pin<Box<dyn Future<Output = u8>>>
+        })
+        .collect();
+    branches(reads).await
+}
+
+#[test]
+fn branches_asking_on_different_polls_are_all_woken_when_a_view_is_lent() {
+    let mut input = b"abc".as_slice();
+    let gates: [Gate; 3] = Default::default();
+    let (wakes, waker) = WakeCount::new();
+    let mut cx = Context::from_waker(&waker);
+    let mut call = pin!(Call::<Memory, _>::new(ReadAfterGates::new(&gates)));
+    let without_view = |call: Pin<&mut Call<Memory, ReadAfterGates>>| {
+        call.poll_return_with(None, &mut Context::from_waker(&waker))
+    };
+    assert_eq!(without_view(call.as_mut()), CallPoll::Pending);
+    // Each gate wakes the task once; the branch it opens then asks for a
+    // view, which wakes nothing while the view is being acquired.
+    gates[0].open();
+    assert_eq!(wakes.get(), 1);
+    assert_eq!(without_view(call.as_mut()), CallPoll::NeedsView);
+    gates[1].open();
+    assert_eq!(wakes.get(), 2);
+    assert_eq!(without_view(call.as_mut()), CallPoll::NeedsView);
+    // The first branch's request is still waiting.
+    assert_eq!(without_view(call.as_mut()), CallPoll::NeedsView);
+    assert_eq!(wakes.get(), 2);
+    // A view wakes both branches, which are then polled with it. The
+    // executor wakes the call's waker for them, which does not reach the
+    // task.
+    let view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut().poll_return_with(Some(view), &mut cx),
+        CallPoll::Pending
+    );
+    assert_eq!(wakes.get(), 2);
+    // Other wakes still do.
+    gates[2].open();
+    assert_eq!(wakes.get(), 3);
+    assert_eq!(without_view(call.as_mut()), CallPoll::NeedsView);
+    let view = pin!(Pin::new(&mut input).view());
+    assert_eq!(
+        call.as_mut().poll_return_with(Some(view), &mut cx),
+        CallPoll::Ready(b"abc".to_vec())
+    );
+    assert_eq!(wakes.get(), 3);
+}
+
+/// Polls its future with a waker of its own, forwarding wakes, on every poll.
+struct Substitute<F>(F);
+impl<F: Future> Future for Substitute<F> {
+    type Output = F::Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        struct Forward(Waker);
+        impl Wake for Forward {
+            fn wake(self: Arc<Self>) {
+                self.0.wake_by_ref();
+            }
+        }
+        let waker = Waker::from(Arc::new(Forward(cx.waker().clone())));
+        // SAFETY: the future is a pinned field, never moved.
+        unsafe { self.map_unchecked_mut(|this| &mut this.0) }.poll(&mut Context::from_waker(&waker))
+    }
+}
+
+#[call]
+async fn read_record_substituted(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    output: &mut Vec<u8>,
+) -> Record {
+    Substitute(read_record(io, output)).await
+}
+
+#[test]
+fn a_wrapper_that_substitutes_the_waker_is_not_woken_by_requests() {
+    let mut feed = Feed::new(b"\x02");
+    let (wakes, waker) = WakeCount::new();
+    let mut cx = Context::from_waker(&waker);
+    let mut output = Vec::new();
+    {
+        let mut call = pin!(Call::new(ReadRecordSubstituted::new(&mut output)));
+        let mut lend = |mut call: Pin<&mut Call<Direct<Feed>, ReadRecordSubstituted>>,
+                        feed: &mut Feed| {
+            match call.as_mut().poll_return_with(None, &mut cx) {
+                CallPoll::NeedsView => {
+                    call.poll_return_with(Some(pin!(Pin::new(feed).view())), &mut cx)
+                }
+                poll => poll,
+            }
+        };
+        // The first view wakes the wrapper's waker, which the wrapper sent to
+        // the task before the call intercepted.
+        assert_eq!(lend(call.as_mut(), &mut feed), CallPoll::Pending);
+        assert_eq!(wakes.get(), 1);
+        // Polls without new data ask for a view again but wake nothing.
+        for _ in 0..3 {
+            assert_eq!(lend(call.as_mut(), &mut feed), CallPoll::Pending);
+        }
+        assert_eq!(wakes.get(), 1);
+        feed.data.extend(*b"ok");
+        feed.waker.take().unwrap().wake();
+        assert_eq!(wakes.get(), 2);
+        assert_eq!(lend(call.as_mut(), &mut feed), CallPoll::Ready(Ok(2)));
+        assert_eq!(wakes.get(), 2);
+    }
+    assert_eq!(output, b"ok");
 }

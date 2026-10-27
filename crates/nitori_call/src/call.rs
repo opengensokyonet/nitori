@@ -14,7 +14,8 @@ use std::{
     ops::ControlFlow,
     pin::Pin,
     ptr,
-    task::{Context, Poll, Waker},
+    sync::{Arc, Mutex, PoisonError},
+    task::{Context, Poll, Wake, Waker},
 };
 
 /// What an operation produces over family `F`, independent of the access it
@@ -133,9 +134,10 @@ impl Emitter<'_, Infallible> {
 pub enum CallPoll<T> {
     Ready(T),
     Pending,
-    /// The call was polled without a view and its operation asked for one.
-    /// Nothing else wakes the call for this: poll it again with a view, or
-    /// arrange a wakeup for when one is available.
+    /// The call was polled without a view, and its operation asked for one
+    /// in this poll or an earlier one that had none either. Nothing else
+    /// wakes the call for this: poll it again with a view, or arrange a
+    /// wakeup for when one is available.
     NeedsView,
 }
 impl<T> CallPoll<T> {
@@ -184,7 +186,104 @@ fn lend<'view, F: ReceiverFamily + 'view, T>(
     match poll {
         Poll::Ready(value) => CallPoll::Ready(value),
         Poll::Pending if cell.requested.get() => CallPoll::NeedsView,
+        // A branch that asked on an earlier poll still waits for a view.
+        Poll::Pending
+            if cell
+                .intercept
+                .get()
+                .is_some_and(|intercept| intercept.waiting()) =>
+        {
+            CallPoll::NeedsView
+        }
         Poll::Pending => CallPoll::Pending,
+    }
+}
+
+/// The branches of intermediate executors that asked a call for a view, and
+/// the waker its operation sees once one has.
+///
+/// A branch that asks is not woken then: the call keeps its waker and wakes
+/// it when the call is lent a view, right before polling the operation. The
+/// executor then wakes the waker it was polled with; for this call that is
+/// the intercepting waker, which drops wakes caused by that replay, since
+/// the operation is polled next, and passes other wakes to the caller.
+pub(crate) struct Intercept {
+    caller: Mutex<Option<Waker>>,
+    branches: Mutex<Vec<Waker>>,
+}
+
+thread_local! {
+    /// The interception state of the call whose branches this thread is
+    /// waking before polling its operation; null otherwise.
+    static REPLAYING: Cell<*const Intercept> = const { Cell::new(ptr::null()) };
+}
+
+impl Intercept {
+    pub(crate) fn new() -> Self {
+        Self {
+            caller: Mutex::new(None),
+            branches: Mutex::new(Vec::new()),
+        }
+    }
+    /// Keep the waker of a branch that asked for a view. Every branch that
+    /// asked is kept until the call is lent a view.
+    pub(crate) fn defer(&self, branch: &Waker) {
+        let mut branches = self.branches.lock().unwrap_or_else(PoisonError::into_inner);
+        if !branches.iter().any(|kept| kept.will_wake(branch)) {
+            branches.push(branch.clone());
+        }
+    }
+    fn waiting(&self) -> bool {
+        !self
+            .branches
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
+    }
+    /// Wake the branches that asked for a view. The wakes this causes
+    /// synchronously at this call's intercepting waker are dropped; wakes
+    /// reaching other calls are not.
+    fn replay(self: &Arc<Self>) {
+        let branches =
+            mem::take(&mut *self.branches.lock().unwrap_or_else(PoisonError::into_inner));
+        if branches.is_empty() {
+            return;
+        }
+        struct Restore(*const Intercept);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                REPLAYING.set(self.0);
+            }
+        }
+        let _restore = Restore(REPLAYING.replace(Arc::as_ptr(self)));
+        for branch in branches {
+            branch.wake();
+        }
+    }
+    fn set_caller(&self, waker: &Waker) {
+        let mut caller = self.caller.lock().unwrap_or_else(PoisonError::into_inner);
+        if !caller
+            .as_ref()
+            .is_some_and(|caller| caller.will_wake(waker))
+        {
+            *caller = Some(waker.clone());
+        }
+    }
+    fn wake_caller(&self) {
+        let caller = self.caller.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(caller) = &*caller {
+            caller.wake_by_ref();
+        }
+    }
+}
+impl Wake for Intercept {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        if !ptr::eq(REPLAYING.get(), Arc::as_ptr(self)) {
+            self.wake_caller();
+        }
     }
 }
 
@@ -408,18 +507,24 @@ where
             panic!("call polled after completion");
         }
         emitted.set_discard(discard);
-        let poll = lend(cell, poisoned, view, cx.waker(), || {
-            let start = |operation: Op| {
-                // SAFETY: the call is pinned, so the cells keep their address,
-                // and the future holding the slot and the emitter is dropped
-                // before them. `Op: for<'s> Start` keeps the operation from
-                // relying on the 'static brand chosen for storage.
-                let slot = unsafe { ReceiverSlot::<'static, F>::new(cell) };
-                operation.start(slot, Emitter::new(emitted))
-            };
-            // SAFETY: the state is a field of the pinned call.
-            unsafe { poll_events(state, emitted, start, cx) }
-        });
+        // Once a branch has asked for a view, the operation sees the
+        // intercepting waker, and a view wakes the branches that asked. The
+        // operation is polled with a context of its own either way: a single
+        // path keeps the common case as fast as before, and the caller's
+        // context carries nothing else on stable Rust.
+        let intercepting = cell
+            .intercept
+            .get()
+            .map(|intercept| intercepting_waker(intercept, cx.waker(), view.is_some()));
+        let waker = intercepting.as_ref().unwrap_or(cx.waker());
+        let poll = advance(
+            state,
+            cell,
+            emitted,
+            poisoned,
+            view,
+            &mut Context::from_waker(waker),
+        );
         this.finished = matches!(poll, CallPoll::Ready(ControlFlow::Break(_)));
         poll
     }
@@ -443,6 +548,44 @@ where
             CallPoll::NeedsView => CallPoll::NeedsView,
         }
     }
+}
+
+/// Advance a call's operation by one event with this poll's view.
+fn advance<'view, F, Op>(
+    state: &mut CallState<F, Op>,
+    cell: &ViewCell<F>,
+    emitted: &ItemCell<Yield<F, Op>>,
+    poisoned: &Cell<bool>,
+    view: Option<Pin<&mut F::ReceiverView<'view>>>,
+    cx: &mut Context<'_>,
+) -> CallPoll<ControlFlow<Output<F, Op>, Yield<F, Op>>>
+where
+    F: ReceiverFamily + 'view,
+    Op: Operation<F> + for<'s> Start<'s, ReceiverSlot<'s, F>>,
+{
+    lend(cell, poisoned, view, cx.waker(), || {
+        let start = |operation: Op| {
+            // SAFETY: the call is pinned, so the cells keep their address, and
+            // the future holding the slot and the emitter is dropped before
+            // them. `Op: for<'s> Start` keeps the operation from relying on
+            // the 'static brand chosen for storage.
+            let slot = unsafe { ReceiverSlot::<'static, F>::new(cell) };
+            operation.start(slot, Emitter::new(emitted))
+        };
+        // SAFETY: the state is a field of the pinned call.
+        unsafe { poll_events(state, emitted, start, cx) }
+    })
+}
+
+/// The intercepting waker of a call, after waking the branches that asked
+/// for a view if one is lent.
+#[cold]
+fn intercepting_waker(intercept: &Arc<Intercept>, caller: &Waker, lent: bool) -> Waker {
+    intercept.set_caller(caller);
+    if lent {
+        intercept.replay();
+    }
+    Waker::from(intercept.clone())
 }
 
 /// The dyn-compatible interface of [`Call`], for storing calls of different types.
