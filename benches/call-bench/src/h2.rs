@@ -93,7 +93,7 @@ impl Consume for BufferedPipe {
     where
         Self: 'visit,
     {
-        ByteSource::poll_consume(host.get_mut().0.as_mut().get_mut(), cx, maximum, visit)
+        ByteSource::poll_consume(host.get_pin_mut().get_mut(), cx, maximum, visit)
     }
 }
 impl Take for BufferedPipe {
@@ -164,7 +164,7 @@ impl Write for PipeWriter {
     where
         Self: 'visit,
     {
-        ByteSink::poll_write(host.get_mut().0.as_mut().get_mut(), cx, input)
+        ByteSink::poll_write(host.get_pin_mut().get_mut(), cx, input)
     }
 }
 impl Flush for PipeWriter {
@@ -175,7 +175,7 @@ impl Flush for PipeWriter {
     where
         Self: 'visit,
     {
-        ByteSink::poll_flush(host.get_mut().0.as_mut().get_mut(), cx)
+        ByteSink::poll_flush(host.get_pin_mut().get_mut(), cx)
     }
 }
 

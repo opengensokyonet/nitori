@@ -427,15 +427,20 @@ impl<E> From<ReadArrayError<E>> for ReadBeError<E> {
     }
 }
 
-/// Sealed implementation detail selecting a concrete array for each number.
+/// Sealed implementation detail selecting a concrete array for each number,
+/// shared by the endian reads and writes.
 /// Implemented for integers (including pointer-sized integers), f32, and f64.
 pub trait EndianValue: private::Sealed + Sized {
     #[doc(hidden)]
-    type Bytes: AsMut<[u8]> + Default;
+    type Bytes: AsRef<[u8]> + AsMut<[u8]> + Default;
     #[doc(hidden)]
     fn from_le(bytes: Self::Bytes) -> Self;
     #[doc(hidden)]
     fn from_be(bytes: Self::Bytes) -> Self;
+    #[doc(hidden)]
+    fn to_le(self) -> Self::Bytes;
+    #[doc(hidden)]
+    fn to_be(self) -> Self::Bytes;
 }
 mod private {
     pub trait Sealed {}
@@ -450,6 +455,12 @@ macro_rules! endian_impl {
             }
             fn from_be(bytes: Self::Bytes) -> Self {
                 <$number>::from_be_bytes(bytes)
+            }
+            fn to_le(self) -> Self::Bytes {
+                self.to_le_bytes()
+            }
+            fn to_be(self) -> Self::Bytes {
+                self.to_be_bytes()
             }
         }
     )*};

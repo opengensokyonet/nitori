@@ -75,6 +75,17 @@ where
         std::future::poll_fn(move |cx| self.as_mut().poll_next(cx))
     }
 
+    /// The next event, without the end of the stream: an item, or the final
+    /// value. Waiting for it after the final value panics.
+    pub fn next_event(
+        mut self: Pin<&mut Self>,
+    ) -> impl Future<Output = ControlFlow<Output<A, Op>, Yield<A, Op>>> {
+        std::future::poll_fn(move |cx| {
+            assert!(!self.finished, "`next_event` after the final value");
+            self.as_mut().poll_event(false, cx)
+        })
+    }
+
     fn poll_event(
         self: Pin<&mut Self>,
         discard: bool,

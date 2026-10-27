@@ -25,7 +25,7 @@ macro_rules! memory_read {
         impl Read for Direct<$ty> {
             type Error = Infallible;
             fn poll_read<'visit, O: BufMut + ?Sized>(host: Pin<&mut Self::ReceiverView<'visit>>, _: &mut Context<'_>, out: &mut O) -> Poll<Result<usize, Self::Error>>  where Self: 'visit {
- let this = host.get_mut().0.as_mut();
+ let this = host.get_pin_mut();
                 Poll::Ready(Ok(read_buffer(this.get_mut(), out)))
             }
         }
@@ -37,7 +37,7 @@ macro_rules! memory_write {
         impl Write for Direct<$ty> {
             type Error = Infallible;
             fn poll_write<'visit, I: Buf + ?Sized>(host: Pin<&mut Self::ReceiverView<'visit>>, _: &mut Context<'_>, input: &mut I) -> Poll<Result<usize, Self::Error>>  where Self: 'visit {
- let this = host.get_mut().0.as_mut();
+ let this = host.get_pin_mut();
                 Poll::Ready(Ok(write_buffer(this.get_mut(), input)))
             }
         }
@@ -54,7 +54,7 @@ impl Write for Direct<VecDeque<u8>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let count = input.remaining();
         let sink = this.get_mut();
         while input.has_remaining() {
@@ -76,7 +76,7 @@ impl<T: AsRef<[u8]> + Unpin> Read for Direct<Cursor<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Poll::Ready(Ok(read_buffer(this.get_mut(), out)))
     }
 }
@@ -93,7 +93,7 @@ where
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let count = std::io::Write::write(this.get_mut(), input.chunk())?;
         input.advance(count);
         Poll::Ready(Ok(count))
@@ -109,7 +109,7 @@ impl<'a> ReadChunk for Direct<&'a [u8]> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let source = this.get_mut();
         if source.is_empty() {
             return Poll::Ready(Ok(None));
@@ -124,7 +124,7 @@ macro_rules! split_chunk {
         impl ReadChunk for Direct<$ty> {
             type Chunk = $ty;
             fn poll_read_chunk<'visit>(host: Pin<&mut Self::ReceiverView<'visit>>, _: &mut Context<'_>, maximum: NonZeroUsize) -> Poll<Result<Option<Self::Chunk>, Self::Error>>  where Self: 'visit {
- let this = host.get_mut().0.as_mut();
+ let this = host.get_pin_mut();
                 let source = this.get_mut();
                 let count = maximum.get().min(source.len());
                 Poll::Ready(Ok((count != 0).then(|| source.split_to(count))))

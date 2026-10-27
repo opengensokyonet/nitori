@@ -534,6 +534,7 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
             GenericParam::Lifetime(_) => {}
         }
     }
+    check_supertrait_paths(&item)?;
     let mut operations = Vec::new();
     for member in &item.items {
         let TraitItem::Fn(method) = member else {
@@ -1190,6 +1191,16 @@ fn family_bounds(
             {
                 return Ok(constraint.bounds.clone());
             }
+            if let GenericArgument::AssocType(assoc) = argument
+                && assoc.ident == "Family"
+            {
+                return Err(Error::new(
+                    assoc.span(),
+                    "operations are defined for every family with the capabilities they \
+                     use: bound the family by a trait, as in `ReceiverAccess<Family: Read>`, \
+                     not by `Family = ..`",
+                ));
+            }
         }
         return Ok(Punctuated::new());
     }
@@ -1470,6 +1481,67 @@ impl VisitMut for AccessAsSelf<'_> {
         }
         visit_mut::visit_type_mut(self, ty);
     }
+}
+
+/// Rejects `Self::Name` in poll methods when `Name` is not declared by the
+/// capability trait itself: generated items name the trait explicitly, so a
+/// supertrait's associated type must be written `<Self as Supertrait>::Name`.
+fn check_supertrait_paths(item: &ItemTrait) -> Result<()> {
+    struct Find<'a> {
+        own: Vec<&'a Ident>,
+        found: Option<(Span, Ident)>,
+    }
+    impl<'ast> Visit<'ast> for Find<'_> {
+        fn visit_type_path(&mut self, path: &'ast syn::TypePath) {
+            let segments = &path.path.segments;
+            if path.qself.is_none()
+                && self.found.is_none()
+                && segments.len() >= 2
+                && segments[0].ident == "Self"
+                && segments[1].ident != "ReceiverView"
+                && !self.own.contains(&&segments[1].ident)
+            {
+                self.found = Some((path.span(), segments[1].ident.clone()));
+            }
+            visit::visit_type_path(self, path);
+        }
+    }
+    let own = item
+        .items
+        .iter()
+        .filter_map(|member| match member {
+            TraitItem::Type(ty) => Some(&ty.ident),
+            _ => None,
+        })
+        .collect();
+    let mut find = Find { own, found: None };
+    for member in &item.items {
+        if let TraitItem::Fn(method) = member {
+            find.visit_signature(&method.sig);
+        }
+    }
+    let Some((span, name)) = find.found else {
+        return Ok(());
+    };
+    let supertraits: Vec<String> = item
+        .supertraits
+        .iter()
+        .filter_map(|bound| match bound {
+            TypeParamBound::Trait(bound) => bound.path.segments.last(),
+            _ => None,
+        })
+        .map(|segment| segment.ident.to_string())
+        .filter(|name| name != "ReceiverFamily")
+        .collect();
+    let example = supertraits.first().map_or("Supertrait", String::as_str);
+    Err(Error::new(
+        span,
+        format!(
+            "`{name}` is not declared by `{}`; name the supertrait that declares it, as in \
+             `<Self as {example}>::{name}`",
+            item.ident
+        ),
+    ))
 }
 
 /// Replaces `Self` and `Self::Name` with the family of the current context.

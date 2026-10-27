@@ -54,7 +54,7 @@ impl Counter for Direct<u8> {
     where
         Self: 'v,
     {
-        let mut target = view.get_mut().0.as_mut();
+        let mut target = view.get_pin_mut();
         *target += 1;
         *target
     }

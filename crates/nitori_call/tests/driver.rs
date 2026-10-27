@@ -6,8 +6,8 @@ mod support;
 use bytes::BufMut;
 use futures_core::{FusedFuture, FusedStream, Stream};
 use nitori_call::{
-    AcquisitionState, CallExecutor, Lend, Operation, ReceiverAccess, ReceiverFamily, ReceiverSlot,
-    Start, call, drive,
+    AcquisitionState, CallExecutor, Lend, Operation, ReceiverAccess, ReceiverFamily, RootOperation,
+    call, drive,
 };
 use std::{
     cell::Cell,
@@ -78,10 +78,10 @@ impl<'p> CallExecutor for Reader<'p> {
         = impl Future<Output = <Op as Operation<Locked>>::Output> + Stream<Item = Event<Op>>
     where
         Self: 'a,
-        Op: Operation<Locked> + for<'s> Start<'s, ReceiverSlot<'s, Locked>> + 'a;
+        Op: RootOperation<Locked> + 'a;
     fn execute<'a, Op>(self: Pin<&'a mut Self>, operation: Op) -> Self::Execution<'a, Op>
     where
-        Op: Operation<Locked> + for<'s> Start<'s, ReceiverSlot<'s, Locked>> + 'a,
+        Op: RootOperation<Locked> + 'a,
     {
         let Reader { pipe, acquisitions } = *self.get_mut();
         let acquisition = AcquisitionState::<Locked, _, _>::new(move || {

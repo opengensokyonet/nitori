@@ -66,7 +66,7 @@ impl<T: io::Read> Read for Direct<Std<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         read_into(destination, |buffer| {
             Poll::Ready(this.get_mut().inner.read(buffer))
         })
@@ -82,7 +82,7 @@ impl<T: io::Write> Write for Direct<Std<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let count = this.get_mut().inner.write(input.chunk())?;
         input.advance(count);
         Poll::Ready(Ok(count))
@@ -136,7 +136,7 @@ impl<T: tokio::io::AsyncRead> Read for Direct<Tokio<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         read_into(destination, |buffer| {
             let mut buffer = tokio::io::ReadBuf::new(buffer);
             ready!(this.project().inner.poll_read(cx, &mut buffer))?;
@@ -155,7 +155,7 @@ impl<T: tokio::io::AsyncWrite> Write for Direct<Tokio<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let count = ready!(this.project().inner.poll_write(cx, input.chunk()))?;
         input.advance(count);
         Poll::Ready(Ok(count))
@@ -209,7 +209,7 @@ impl<T: futures_io::AsyncRead> Read for Direct<Futures<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         read_into(destination, |buffer| {
             this.project().inner.poll_read(cx, buffer)
         })
@@ -226,7 +226,7 @@ impl<T: futures_io::AsyncWrite> Write for Direct<Futures<T>> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let count = ready!(this.project().inner.poll_write(cx, input.chunk()))?;
         input.advance(count);
         Poll::Ready(Ok(count))

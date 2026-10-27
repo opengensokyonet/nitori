@@ -38,7 +38,7 @@ impl Read for Direct<&[u8]> {
     where
         Self: 'visit,
     {
-        let source = host.get_mut().0.as_mut().get_mut();
+        let source = host.get_pin_mut().get_mut();
         let count = source.len().min(destination.remaining_mut());
         destination.put_slice(&source[..count]);
         *source = &source[count..];
@@ -62,7 +62,7 @@ impl Read for Direct<Feed> {
     where
         Self: 'visit,
     {
-        let feed = host.get_mut().0.as_mut().get_mut();
+        let feed = host.get_pin_mut().get_mut();
         if feed.data.is_empty() && destination.has_remaining_mut() {
             feed.waker = Some(cx.waker().clone());
             return Poll::Pending;
@@ -332,7 +332,7 @@ impl Clear for Direct<Vec<u8>> {
     where
         Self: 'visit,
     {
-        host.get_mut().0.as_mut().get_mut().clear();
+        host.get_pin_mut().get_mut().clear();
         Poll::Ready(())
     }
 }
@@ -725,7 +725,7 @@ impl Append for Direct<Vec<u16>> {
     where
         Self: 'visit,
     {
-        let items = host.get_mut().0.as_mut().get_mut();
+        let items = host.get_pin_mut().get_mut();
         items.push(*item);
         Poll::Ready(items.len())
     }

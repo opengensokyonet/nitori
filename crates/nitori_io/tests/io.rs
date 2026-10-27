@@ -99,7 +99,7 @@ impl ReadHost for Source {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let this = this.get_mut();
         std::task::ready!(this.ready(cx))?;
         let count = out
@@ -123,7 +123,7 @@ impl ReadHost for ChunkSource {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         if this.0.fail_at.is_some_and(|at| this.0.consumed >= at) {
             return Poll::Ready(Err(io::Error::other("source failure")));
         }
@@ -140,7 +140,7 @@ impl ChunkHost for ChunkSource {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let this = &mut this.get_mut().0;
         std::task::ready!(this.ready(cx))?;
         let count = maximum
@@ -181,7 +181,7 @@ impl WriteHost for Sink {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         let this = this.get_mut();
         if this.fail_at.is_some_and(|at| this.bytes.len() >= at) {
             return Poll::Ready(Err(io::Error::other("sink failure")));
@@ -736,7 +736,7 @@ impl ReadHost for PinnedHost {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Pin::new(this.project().inner).poll_read(cx, destination)
     }
 }
@@ -763,7 +763,7 @@ impl<'a> ReadHost for BorrowedErrorHost<'a> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Poll::Ready(Err(this.0))
     }
 }
@@ -816,7 +816,7 @@ impl<'a> ReadHost for RawHost<'a> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Poll::Ready(this.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
     }
 }
@@ -830,7 +830,7 @@ impl ChunkHost for RawHost<'_> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Poll::Ready(this.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
     }
 }
@@ -844,7 +844,7 @@ impl<'a> WriteHost for RawHost<'a> {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Poll::Ready(this.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
     }
 }

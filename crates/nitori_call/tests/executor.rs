@@ -45,7 +45,7 @@ impl Read for Direct<Pipe> {
     where
         Self: 'visit,
     {
-        let pipe = host.get_mut().0.as_mut().get_mut();
+        let pipe = host.get_pin_mut().get_mut();
         if pipe.data.is_empty() && destination.has_remaining_mut() {
             pipe.readers.push(cx.waker().clone());
             return Poll::Pending;

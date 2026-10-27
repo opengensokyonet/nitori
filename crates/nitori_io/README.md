@@ -20,12 +20,13 @@ together with their errors. Import the generated extension traits to call them:
 `ReadExt`, `ReadChunkExt`, `WriteExt` and `calls::{Name}Ext` on receiver accesses
 inside operations, and `ReadHostExt`, `ReadChunkHostExt`, `WriteHostExt` and
 `calls::{Name}HostExt` on executors such as memory buffers and bridges.
+`use nitori_io::prelude::*` imports all of them anonymously, together with the
+capabilities.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::Read;
-use nitori_io::calls::{ReadArrayExt as _, ReadExactError, ReadExactExt as _};
+use nitori_io::{calls::ReadExactError, prelude::*};
 
 #[call(sync)]
 async fn header<A: ReceiverAccess<Family: Read>>(
@@ -61,6 +62,8 @@ may stay borrowed across Pending.
 | `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<F::Error>>` |
 | `ReadLe::<T>::new()` | `Result<T, ReadLeError<F::Error>>` |
 | `ReadBe::<T>::new()` | `Result<T, ReadBeError<F::Error>>` |
+| `WriteArray::<LENGTH>::new(bytes)` | `Result<(), WriteArrayError<F::Error>>` |
+| `WriteLe::new(value)`, `WriteBe::new(value)` | `Result<(), WriteLeError<F::Error>>`, `Result<(), WriteBeError<F::Error>>` |
 
 The derived operations are also functions, such as `calls::read_exact(io,
 destination, length)`, for use inside other operations.
@@ -152,6 +155,39 @@ let Poll::Ready(Ok(Some(chunk))) = Pin::new(&mut io)
 else { panic!("synchronous memory IO completes immediately") };
 assert_eq!(chunk, &b"hel"[..]);
 assert_eq!(io.into_inner().into_inner().position(), 3);
+```
+
+`adapters::ReadLimit(n)` and `adapters::WriteLimit(n)` are byte budgets for
+`io.compose(..)` inside an operation. The composed access reads or accepts at
+most `n` more bytes; past the budget a read reports EOF and a write accepts
+nothing, which `write_all` reports as zero progress; the composed access
+answers there without polling the parent. The budget survives Pending and cancellation, and `into_state` returns
+what remains. A read budget offers `Read` and `ReadChunk`, a write budget
+`Write`:
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{adapters::WriteLimit, calls::WriteAllError, prelude::*};
+
+/// Write `payload` only if it fits in `room` bytes; report what is left.
+#[call(sync)]
+async fn write_bounded<A: ReceiverAccess<Family: Write>>(
+    io: &mut A,
+    payload: &[u8],
+    room: usize,
+) -> (usize, Result<usize, WriteAllError<<A::Family as Write>::Error>>) {
+    let mut bounded = io.compose(WriteLimit(room));
+    let result = bounded.write_all(payload).await.result;
+    (bounded.into_state().0, result)
+}
+
+fn main() {
+    let mut output = Vec::new();
+    let (left, result) = output.sync_write_bounded_unpin(b"abc", 2);
+    assert_eq!((left, output.as_slice()), (0, &b"ab"[..]));
+    assert_eq!(result.unwrap_err().completed(), 2);
+}
 ```
 
 ## Progress, errors, and cancellation

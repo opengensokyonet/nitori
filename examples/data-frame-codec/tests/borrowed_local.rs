@@ -24,7 +24,7 @@ impl Write for Output {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut().get_mut();
+        let this = host.get_pin_mut().get_mut();
         if !this.waited {
             this.waited = true;
             cx.waker().wake_by_ref();

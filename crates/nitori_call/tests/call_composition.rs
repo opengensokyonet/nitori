@@ -105,7 +105,7 @@ impl Counter for Direct<usize> {
     where
         Self: 'v,
     {
-        let mut total = view.get_mut().0.as_mut();
+        let mut total = view.get_pin_mut();
         *total += amount;
         *total
     }

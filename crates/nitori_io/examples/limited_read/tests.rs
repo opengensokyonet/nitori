@@ -22,7 +22,7 @@ impl Read for Delayed<'_> {
     where
         Self: 'v,
     {
-        let this = host.get_mut().0.as_mut().get_mut();
+        let this = host.get_pin_mut().get_mut();
         if !this.waiting {
             this.waiting = true;
             cx.waker().wake_by_ref();

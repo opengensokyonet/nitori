@@ -68,7 +68,7 @@ impl ReadChunk for Memory {
     where
         Self: 'visit,
     {
-        let mut this = host.get_mut().0.as_mut();
+        let mut this = host.get_pin_mut();
         this.polls.set(this.polls.get() + 1);
         if this.wait {
             this.wait = false;
@@ -121,7 +121,7 @@ impl ReadChunk for PinnedMemory {
     where
         Self: 'visit,
     {
-        let this = host.get_mut().0.as_mut();
+        let this = host.get_pin_mut();
         Pin::new(&mut *this.inner.borrow_mut()).poll_read_chunk(cx, maximum)
     }
 }
@@ -222,7 +222,7 @@ impl Counter for Direct<usize> {
     where
         Self: 'v,
     {
-        let mut target = view.get_mut().0.as_mut();
+        let mut target = view.get_pin_mut();
         *target += 1;
         *target
     }

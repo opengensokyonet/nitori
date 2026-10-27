@@ -3,7 +3,8 @@
 //! that `executor.operation(..).await` works whether the executor can lend a
 //! view at once or must acquire one.
 use crate::{
-    Call, CallPoll, DynCall, Lend, Operation, Receiver, ReceiverFamily, ReceiverSlot, Start,
+    Call, CallPoll, DynCall, Lend, Operation, Receiver, ReceiverFamily, ReceiverSlot,
+    RootOperation, Start,
     call::{InPlace, remaining},
 };
 use futures_core::{FusedFuture, FusedStream, Stream};
@@ -246,10 +247,10 @@ pub trait CallExecutor {
         + Stream<Item = Event<Self::Family, Op>>
     where
         Self: 'a,
-        Op: Operation<Self::Family> + for<'s> Start<'s, ReceiverSlot<'s, Self::Family>> + 'a;
+        Op: RootOperation<Self::Family> + 'a;
     fn execute<'a, Op>(self: Pin<&'a mut Self>, operation: Op) -> Self::Execution<'a, Op>
     where
-        Op: Operation<Self::Family> + for<'s> Start<'s, ReceiverSlot<'s, Self::Family>> + 'a;
+        Op: RootOperation<Self::Family> + 'a;
 }
 impl<R: Receiver + ?Sized> CallExecutor for R {
     type Family = R::Family;
@@ -257,10 +258,10 @@ impl<R: Receiver + ?Sized> CallExecutor for R {
         = BoundCall<'a, R, Op>
     where
         Self: 'a,
-        Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>> + 'a;
+        Op: RootOperation<R::Family> + 'a;
     fn execute<'a, Op>(self: Pin<&'a mut Self>, operation: Op) -> BoundCall<'a, R, Op>
     where
-        Op: Operation<R::Family> + for<'s> Start<'s, ReceiverSlot<'s, R::Family>> + 'a,
+        Op: RootOperation<R::Family> + 'a,
     {
         BoundCall {
             host: self,

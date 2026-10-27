@@ -1,14 +1,8 @@
 //! A length-prefixed record cannot let its child parser consume the next record.
 #![feature(impl_trait_in_assoc_type)]
 
-mod limit;
-
-use limit::ReadLimit;
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{
-    Read,
-    calls::{ReadArrayError, ReadArrayExt as _},
-};
+use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
 
 // This parser can be reused with either an unrestricted or a limited receiver.
 #[call(sync)]

@@ -16,6 +16,7 @@ mod impls;
 pub mod calls;
 pub mod error;
 pub mod helpers;
+pub mod prelude;
 
 /// Fill a caller-selected buffer, advancing it by the returned byte count.
 ///

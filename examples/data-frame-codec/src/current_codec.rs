@@ -1,8 +1,8 @@
 //! DATA frame parsing built from nitori_io operations.
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
-    Read, ReadChunk,
-    calls::{ReadBeError, ReadBeExt as _, ReadChunksExactError, ReadChunksExactExt as _},
+    calls::{ReadBeError, ReadChunksExactError},
+    prelude::*,
 };
 use snafu::{ResultExt, Snafu};
 use std::{num::NonZeroUsize, ops::ControlFlow, pin::pin};
@@ -44,10 +44,10 @@ pub async fn read_data_frame<A: ReceiverAccess<Family: ReadChunk>>(
     let length = io.read_varint().await.context(HeaderSnafu)?;
     let length = usize::try_from(length).context(LengthSnafu)?;
     let mut chunks = pin!(io.read_chunks_exact(length, chunk_size));
-    while let Some(event) = chunks.as_mut().next().await {
-        match event {
+    loop {
+        match chunks.as_mut().next_event().await {
             ControlFlow::Continue(chunk) => yield chunk,
-            ControlFlow::Break(result) => result.context(PayloadSnafu)?,
+            ControlFlow::Break(result) => break result.context(PayloadSnafu)?,
         }
     }
     Ok(length)

@@ -32,7 +32,7 @@ the caller decides how long it stays acquired:
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{Write, calls::{WriteAllError, WriteAllExt as _}};
+use nitori_io::{calls::WriteAllError, prelude::*};
 use std::future::Future;
 
 #[call(sync)]
@@ -61,7 +61,7 @@ memory slice or an asynchronous IO bridge.
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{Read, calls::{ReadArrayExt as _, ReadExactError, ReadExactExt as _}};
+use nitori_io::{calls::ReadExactError, prelude::*};
 
 #[call(sync)]
 async fn read_record<A: ReceiverAccess<Family: Read>>(
@@ -175,12 +175,14 @@ or waking. An execution may switch between the two between polls.
 
 Inside an operation, the method of an emitting operation returns a `Child`,
 which is the same pair of future and stream on the parent's access; await it to
-keep only the final value, or pin it and call `next` to handle the items:
+keep only the final value, or pin it and call `next_event` to handle the
+items. `next_event` gives each item, then the final value; as a `Stream`,
+through `next`, the child also ends with `None` afterwards:
 
 ```rust
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{ReadChunk, Read, calls::{ReadChunksError, ReadChunksExt as _}};
+use nitori_io::{calls::ReadChunksError, prelude::*};
 use std::{num::NonZeroUsize, ops::ControlFlow, pin::pin};
 
 #[call(yields = usize)]
@@ -190,8 +192,8 @@ async fn count_chunks<A: ReceiverAccess<Family: ReadChunk>>(
 ) -> Result<usize, ReadChunksError<<A::Family as Read>::Error>> {
     let mut chunks = pin!(io.read_chunks(length, NonZeroUsize::new(4).unwrap()));
     let mut count = 0;
-    while let Some(event) = chunks.as_mut().next().await {
-        match event {
+    loop {
+        match chunks.as_mut().next_event().await {
             ControlFlow::Continue(chunk) => {
                 count += 1;
                 yield bytes::Buf::remaining(&chunk);
@@ -199,7 +201,6 @@ async fn count_chunks<A: ReceiverAccess<Family: ReadChunk>>(
             ControlFlow::Break(result) => return result.map(|_| count),
         }
     }
-    unreachable!("the final value ends the stream")
 }
 # fn main() {}
 ```
@@ -222,17 +223,17 @@ Crates that only store, await or stream executions need no features.
 Suppose a record contains a one-byte length followed by a two-byte word. If a
 malformed record declares only one payload byte, an unrestricted word parser
 would consume the next record's length as its second byte. Instead, adapt the
-access with a byte budget: `ReadLimit` implements `Compose<F>` and produces a
-view that still implements `nitori_io::Read` but returns EOF at the record
-boundary. The [complete example](../nitori_io/examples/limited_read/main.rs)
-uses this [adapter](../nitori_io/examples/limited_read/limit.rs):
+access with a byte budget: `nitori_io::adapters::ReadLimit` implements
+`Compose<F>` and produces a view that still implements `nitori_io::Read` but
+returns EOF at the record boundary. Its
+[implementation](../nitori_io/src/adapters.rs) shows how to write such an
+adapter; the [complete example](../nitori_io/examples/limited_read/main.rs)
+also tests it across Pending and cancellation:
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-# mod limit { include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../nitori_io/examples/limited_read/limit.rs")); }
-use limit::ReadLimit;
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{Read, calls::{ReadArrayError, ReadArrayExt as _}};
+use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
 
 #[call(sync)]
 async fn read_word<A: ReceiverAccess<Family: Read>>(
@@ -285,7 +286,7 @@ use std::{future::poll_fn, task::Poll};
 async fn increment(io: &mut impl ReceiverAccess<Family = Direct<usize>>) -> usize {
     poll_fn(|cx| {
         io.poll_access(cx, |access, _| {
-            let mut value = access.into_pin().get_mut().0.as_mut();
+            let mut value = access.into_pin().get_pin_mut();
             *value += 1;
             Poll::Ready(*value)
         })
@@ -337,7 +338,7 @@ poll:
 ```rust
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{Read, calls::{ReadArrayExt as _, ReadExactError, ReadExactExt as _}};
+use nitori_io::{calls::ReadExactError, prelude::*};
 use std::{ops::ControlFlow, pin::pin};
 
 /// Length-prefixed records, until an empty one.

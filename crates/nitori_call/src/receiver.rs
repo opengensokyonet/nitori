@@ -31,6 +31,12 @@ impl<T: ?Sized> ReceiverFamily for Direct<T> {
     where
         Self: 'visit;
 }
+impl<'visit, T: ?Sized> DirectView<'visit, T> {
+    /// The pinned resource, for capability implementations on [`Direct`].
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
+        self.get_mut().0.as_mut()
+    }
+}
 impl<T: ?Sized> Receiver for DirectView<'_, T> {
     type Family = Direct<T>;
     fn view<'visit>(self: Pin<&'visit mut Self>) -> DirectView<'visit, T>
@@ -102,6 +108,12 @@ direct_receiver!(impl [T] for std::cell::Cell<T>);
 /// A pinned resource borrow that keeps the resource's canonical family.
 #[derive(Debug)]
 pub struct BorrowedReceiver<'visit, H: Receiver + ?Sized>(pub Pin<&'visit mut H>);
+impl<'visit, H: Receiver + ?Sized> BorrowedReceiver<'visit, H> {
+    /// The pinned resource, for capability implementations on its family.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut H> {
+        self.get_mut().0.as_mut()
+    }
+}
 impl<H: Receiver + ?Sized> Receiver for BorrowedReceiver<'_, H> {
     type Family = H::Family;
     fn view<'visit>(
