@@ -86,6 +86,7 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-util",
  "nitori_call_macros",
  "nitori_io",
  "pin-project-lite",

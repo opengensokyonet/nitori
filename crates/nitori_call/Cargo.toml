@@ -12,8 +12,20 @@ nitori_call_macros.workspace = true
 
 [features]
 bytes = ["dep:bytes"]
+# Run operations on values behind `tokio::sync::Mutex`; needs nightly.
+tokio-sync = ["dep:tokio", "tokio/sync"]
+# Run operations on values behind `futures::lock::Mutex`.
+futures-lock = ["dep:futures-util", "futures-util/std"]
 
 [dependencies.bytes]
+workspace = true
+optional = true
+
+[dependencies.tokio]
+workspace = true
+optional = true
+
+[dependencies.futures-util]
 workspace = true
 optional = true
 
@@ -21,3 +33,4 @@ optional = true
 bytes.workspace = true
 nitori_io.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+futures-util = { workspace = true, features = ["std"] }

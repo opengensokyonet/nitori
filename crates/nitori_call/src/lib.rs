@@ -132,6 +132,7 @@
 //! assert_send(Call::<Direct<Vec<u8>>, _>::new(Hold));
 //! ```
 #![deny(unsafe_op_in_unsafe_fn)]
+#![cfg_attr(feature = "tokio-sync", feature(impl_trait_in_assoc_type))]
 
 mod receiver;
 pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamily};
@@ -147,9 +148,11 @@ mod child;
 pub use child::Child;
 mod driver;
 pub use driver::{
-    AcquiredScope, AcquisitionState, BoundCall, CallExecutor, Drive, ReceiverScope,
-    ViewAcquisition, drive,
+    AcquiredScope, AcquisitionState, BoundCall, CallExecutor, Composing, Drive, ReceiverScope,
+    ViewAcquisition, drive, drive_composed,
 };
+mod lock;
+pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 
 /// Generate an operation and its conveniences from an async function taking a
 /// receiver access first.

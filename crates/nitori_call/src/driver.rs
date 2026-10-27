@@ -3,7 +3,7 @@
 //! that `executor.operation(..).await` works whether the executor can lend a
 //! view at once or must acquire one.
 use crate::{
-    Call, CallPoll, DynCall, Lend, Operation, Receiver, ReceiverFamily, ReceiverSlot,
+    Call, CallPoll, Compose, DynCall, Lend, Operation, Receiver, ReceiverFamily, ReceiverSlot,
     RootOperation, Start,
     call::{InPlace, remaining},
 };
@@ -360,47 +360,136 @@ where
     }
 }
 
+mod lend {
+    //! How `Drive` lends what its acquisition delivered. Unnameable outside
+    //! this crate: the two ways are lending it as it is and composing it.
+    use crate::{CallPoll, Lend, ReceiverFamily};
+    use std::{pin::Pin, task::Context};
+
+    /// Polls a call with one lent view.
+    pub trait PollWith<F: ReceiverFamily> {
+        type Output;
+        fn poll_with<'v>(
+            &mut self,
+            view: Option<Lend<Pin<&mut F::ReceiverView<'v>>>>,
+            cx: &mut Context<'_>,
+        ) -> CallPoll<Self::Output>
+        where
+            F: 'v;
+    }
+
+    /// Lends an acquired view to a call, as it is or as a view derived from
+    /// it for the duration of the lend.
+    pub trait Lender<F: ReceiverFamily> {
+        type Family: ReceiverFamily;
+        fn lend<'p, P: PollWith<Self::Family>>(
+            self: Pin<&mut Self>,
+            view: Lend<Pin<&mut F::ReceiverView<'p>>>,
+            call: &mut P,
+            cx: &mut Context<'_>,
+        ) -> CallPoll<P::Output>
+        where
+            F: 'p;
+    }
+
+    /// Lend the acquired view itself.
+    #[derive(Debug, Default)]
+    pub struct AsAcquired;
+    impl<F: ReceiverFamily> Lender<F> for AsAcquired {
+        type Family = F;
+        fn lend<'p, P: PollWith<F>>(
+            self: Pin<&mut Self>,
+            view: Lend<Pin<&mut F::ReceiverView<'p>>>,
+            call: &mut P,
+            cx: &mut Context<'_>,
+        ) -> CallPoll<P::Output>
+        where
+            F: 'p,
+        {
+            call.poll_with(Some(view), cx)
+        }
+    }
+}
+use lend::{AsAcquired, Lender, PollWith};
+
+/// Lends a view composed from the acquired one, with the state of a
+/// [`Compose`]; see [`drive_composed`].
+#[derive(Debug)]
+pub struct Composing<S> {
+    state: S,
+}
+impl<F: ReceiverFamily, S: Compose<F>> Lender<F> for Composing<S> {
+    type Family = S::Family;
+    fn lend<'p, P: PollWith<S::Family>>(
+        self: Pin<&mut Self>,
+        view: Lend<Pin<&mut F::ReceiverView<'p>>>,
+        call: &mut P,
+        cx: &mut Context<'_>,
+    ) -> CallPoll<P::Output>
+    where
+        F: 'p,
+    {
+        // SAFETY: the state is structurally pinned and never moved out.
+        let state = unsafe { self.map_unchecked_mut(|this| &mut this.state) };
+        let releasable = view.is_releasable();
+        // The composed view borrows the acquired one for this lend only.
+        let composed = pin!(state.compose(view.into_inner()));
+        let composed = match releasable {
+            true => Lend::Releasable(composed),
+            false => Lend::Fixed(composed),
+        };
+        call.poll_with(Some(composed), cx)
+    }
+}
+
 /// An operation run with views from an acquisition, acquiring one only on
 /// polls whose operation asks for it and releasing it at the end of each, or
 /// at a release point of the operation when the view is releasable and the
-/// acquisition chooses to.
-pub struct Drive<'view, S, Op>
+/// acquisition chooses to. Built by [`drive`], which lends the acquired views
+/// themselves, or by [`drive_composed`], which composes each first.
+pub struct Drive<'view, S, Op, L = AsAcquired>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
     acquisition: InPlace<S>,
-    call: Call<S::Family, Op>,
+    lender: InPlace<L>,
+    call: Call<L::Family, Op>,
     view: PhantomData<&'view ()>,
 }
 // SAFETY: a shared reference only reads whether the call has finished.
-unsafe impl<'view, S, Op> Sync for Drive<'view, S, Op>
+unsafe impl<'view, S, Op, L> Sync for Drive<'view, S, Op, L>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
 }
-impl<'view, S, Op> Drive<'view, S, Op>
+impl<'view, S, Op, L> Drive<'view, S, Op, L>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
-    fn project(self: Pin<&mut Self>) -> (Pin<&mut S>, Pin<&mut Call<S::Family, Op>>) {
-        // SAFETY: the acquisition and the call are structurally pinned and
-        // never moved out.
+    fn project(self: Pin<&mut Self>) -> Parts<'_, S, L, Call<L::Family, Op>> {
+        // SAFETY: the acquisition, the lender and the call are structurally
+        // pinned and never moved out.
         let this = unsafe { self.get_unchecked_mut() };
         unsafe {
             (
                 Pin::new_unchecked(this.acquisition.get_mut()),
+                Pin::new_unchecked(this.lender.get_mut()),
                 Pin::new_unchecked(&mut this.call),
             )
         }
     }
 }
-impl<'view, S, Op> fmt::Debug for Drive<'view, S, Op>
+impl<'view, S, Op, L> fmt::Debug for Drive<'view, S, Op, L>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Drive")
@@ -408,74 +497,109 @@ where
             .finish_non_exhaustive()
     }
 }
-impl<'view, S, Op> Future for Drive<'view, S, Op>
-where
-    S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
-{
-    type Output = Output<S::Family, Op>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (acquisition, mut call) = self.project();
-        poll_acquiring(acquisition, cx, |view, cx| {
-            call.as_mut().poll_return_with(view, cx)
-        })
+
+/// The pinned acquisition, lender and call of a `Drive`.
+type Parts<'a, S, L, C> = (Pin<&'a mut S>, Pin<&'a mut L>, Pin<&'a mut C>);
+
+/// Polls a call to its final value, dropping emitted items.
+struct ReturnOf<'c, F: ReceiverFamily, Op: RootOperation<F>>(Pin<&'c mut Call<F, Op>>);
+impl<F: ReceiverFamily, Op: RootOperation<F>> PollWith<F> for ReturnOf<'_, F, Op> {
+    type Output = Output<F, Op>;
+    fn poll_with<'v>(
+        &mut self,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'v>>>>,
+        cx: &mut Context<'_>,
+    ) -> CallPoll<Self::Output>
+    where
+        F: 'v,
+    {
+        self.0.as_mut().poll_return_with(view, cx)
     }
 }
-impl<'view, S, Op> Stream for Drive<'view, S, Op>
+/// Polls a call for its next event.
+struct EventOf<'c, F: ReceiverFamily, Op: RootOperation<F>>(Pin<&'c mut Call<F, Op>>);
+impl<F: ReceiverFamily, Op: RootOperation<F>> PollWith<F> for EventOf<'_, F, Op> {
+    type Output = Event<F, Op>;
+    fn poll_with<'v>(
+        &mut self,
+        view: Option<Lend<Pin<&mut F::ReceiverView<'v>>>>,
+        cx: &mut Context<'_>,
+    ) -> CallPoll<Self::Output>
+    where
+        F: 'v,
+    {
+        self.0.as_mut().poll_with(view, cx)
+    }
+}
+
+impl<'view, S, Op, L> Future for Drive<'view, S, Op, L>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
-    type Item = Event<S::Family, Op>;
+    type Output = Output<L::Family, Op>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let (acquisition, lender, call) = self.project();
+        poll_acquiring(acquisition, lender, &mut ReturnOf(call), cx)
+    }
+}
+impl<'view, S, Op, L> Stream for Drive<'view, S, Op, L>
+where
+    S: ViewAcquisition<'view>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
+{
+    type Item = Event<L::Family, Op>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let (acquisition, mut call) = self.project();
+        let (acquisition, lender, call) = self.project();
         if call.is_terminated() {
             return Poll::Ready(None);
         }
-        poll_acquiring(acquisition, cx, |view, cx| {
-            call.as_mut().poll_with(view, cx)
-        })
-        .map(Some)
+        poll_acquiring(acquisition, lender, &mut EventOf(call), cx).map(Some)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         remaining(self.call.is_terminated())
     }
 }
-impl<'view, S, Op> FusedFuture for Drive<'view, S, Op>
+impl<'view, S, Op, L> FusedFuture for Drive<'view, S, Op, L>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
     fn is_terminated(&self) -> bool {
         self.call.is_terminated()
     }
 }
-impl<'view, S, Op> FusedStream for Drive<'view, S, Op>
+impl<'view, S, Op, L> FusedStream for Drive<'view, S, Op, L>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    L: Lender<S::Family>,
+    Op: RootOperation<L::Family>,
 {
     fn is_terminated(&self) -> bool {
         self.call.is_terminated()
     }
 }
 
-/// Poll a call with views from `acquisition`: first without one, then with
-/// one acquired when the operation asks, and without it again when it is
-/// released at a release point. A view is released at the end of the poll.
-fn poll_acquiring<'view, S, T>(
+/// Poll a call with views from `acquisition`, lent through `lender`: first
+/// without one, then with one acquired when the operation asks, and without
+/// it again when it is released at a release point. A view is released at
+/// the end of the poll.
+fn poll_acquiring<'view, S, L, P>(
     mut acquisition: Pin<&mut S>,
+    mut lender: Pin<&mut L>,
+    call: &mut P,
     cx: &mut Context<'_>,
-    mut poll: impl FnMut(
-        Option<Lend<Pin<&mut ViewOf<'view, S::Family>>>>,
-        &mut Context<'_>,
-    ) -> CallPoll<T>,
-) -> Poll<T>
+) -> Poll<P::Output>
 where
     S: ViewAcquisition<'view>,
+    L: Lender<S::Family>,
+    P: PollWith<L::Family>,
 {
     let mut held = pin!(None::<Lend<ViewOf<'view, S::Family>>>);
-    let mut event = poll(None, cx);
+    let mut event = call.poll_with(None, cx);
     loop {
         match event {
             CallPoll::Ready(value) => return Poll::Ready(value),
@@ -498,7 +622,10 @@ where
                 }
             }
         }
-        event = poll(held.as_mut().as_pin_mut().map(Lend::as_pin_mut), cx);
+        event = match held.as_mut().as_pin_mut().map(Lend::as_pin_mut) {
+            None => call.poll_with(None, cx),
+            Some(view) => lender.as_mut().lend(view, call, cx),
+        };
     }
 }
 
@@ -506,10 +633,37 @@ where
 pub fn drive<'view, S, Op>(acquisition: S, operation: Op) -> Drive<'view, S, Op>
 where
     S: ViewAcquisition<'view>,
-    Op: Operation<S::Family> + for<'s> Start<'s, ReceiverSlot<'s, S::Family>>,
+    Op: RootOperation<S::Family>,
 {
     Drive {
         acquisition: InPlace::new(acquisition),
+        lender: InPlace::new(AsAcquired),
+        call: Call::new(operation),
+        view: PhantomData,
+    }
+}
+
+/// Run `operation` with views from `acquisition`, each composed by `state`
+/// first: the operation runs on the composed family, and the composed view
+/// borrows the acquired one while it is lent. A releasable acquired view
+/// makes the composed view releasable.
+///
+/// With [`Guarded`](crate::Guarded) the composed view is the view of the
+/// value behind a lock guard; other states can reach a part of the value,
+/// such as one stream of a connection.
+pub fn drive_composed<'view, S, C, Op>(
+    acquisition: S,
+    state: C,
+    operation: Op,
+) -> Drive<'view, S, Op, Composing<C>>
+where
+    S: ViewAcquisition<'view>,
+    C: Compose<S::Family>,
+    Op: RootOperation<C::Family>,
+{
+    Drive {
+        acquisition: InPlace::new(acquisition),
+        lender: InPlace::new(Composing { state }),
         call: Call::new(operation),
         view: PhantomData,
     }

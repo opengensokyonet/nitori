@@ -363,13 +363,12 @@ async fn collect_records<A: ReceiverAccess<Family: Read>>(
     records: &mut Vec<Vec<u8>>,
 ) -> Result<(), ReadExactError<<A::Family as Read>::Error>> {
     let mut items = pin!(io.read_records());
-    while let Some(event) = items.as_mut().next().await {
-        match event {
+    loop {
+        match items.as_mut().next_event().await {
             ControlFlow::Continue(record) => records.push(record),
             ControlFlow::Break(result) => return result,
         }
     }
-    unreachable!("the final value ends the stream")
 }
 
 fn main() {
@@ -391,6 +390,41 @@ continues the operation at once without the view and acquires a new one at the
 next access; the task is not suspended, so others can take the resource while
 the operation computes on another thread. With a fixed view, as from every
 `Receiver`, or without one, a release point completes at once.
+
+`drive_composed(acquisition, state, operation)` composes each acquired view
+with a `Compose` state before lending it, so the operation runs on the composed
+family; the composed view borrows the acquired one while it is lent, and is
+releasable when the acquired view is. `drive` lends the acquired views as they
+are.
+
+Locks are executors built this way. `Lock` describes a lock whose guard is
+acquired by a future, `Locked<L>` is the family whose view is that guard, and
+`LockAcquisition` locks on demand and delivers releasable guards. `Guarded`
+composes a guard into the view of the value behind it, so `&Mutex<T>` runs
+operations on `T`'s own family, with all of its capabilities, locking only on
+polls that use `T` and releasing the lock at the end of each and at release
+points:
+
+```rust
+use nitori_io::prelude::*;
+use std::sync::Mutex;
+
+fn main() {
+    let output = Mutex::new(Vec::new());
+    assert_eq!((&output).sync_write_all_unpin(&b"PING"[..]).result.unwrap(), 4);
+    assert_eq!(*output.lock().unwrap(), b"PING");
+}
+```
+
+`&std::sync::Mutex<T>` is an executor whenever `T` is an `Unpin` receiver;
+it blocks the polling thread while another thread holds the lock and panics
+when the lock is poisoned. The `tokio-sync` feature adds
+`&tokio::sync::Mutex<T>`, which needs nightly for its lock future, and the
+`futures-lock` feature adds `&futures::lock::Mutex<T>`. Other lock types
+implement `Lock` and use `drive_composed` in an executor of their own. A state
+other than `Guarded` reaches a part of the locked value, such as one stream of
+a connection; when that part is gone, its view reports it, as in the
+[lock tests](tests/locks.rs).
 
 An operation that needs two resources behind separate locks has two choices.
 A family whose view holds both guards acquires them together, in a fixed
