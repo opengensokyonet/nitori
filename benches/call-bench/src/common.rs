@@ -5,11 +5,13 @@ use crate::{
     workload::{FrameHeader, Kind, Protocol, Work},
 };
 use bytes::{Buf, BytesMut};
+use futures_core::Stream;
+use futures_util::{TryStreamExt as _, stream};
 use std::{
     future::{Future, poll_fn},
     io,
     ops::{Deref, DerefMut},
-    pin::Pin,
+    pin::{Pin, pin},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     task::{Context, Poll, ready},
     time::{Duration, Instant},
@@ -188,33 +190,12 @@ where
     }
 }
 
-/// Visit `length` bytes, failing at the end of the source.
-async fn consume_exact<S: PollConsume + ?Sized>(
-    source: &mut S,
-    length: usize,
-    mut visit: impl FnMut(&[u8]),
-) -> io::Result<()> {
-    let mut remaining = length;
-    while remaining > 0 {
-        let count = poll_fn(|cx| source.poll_consume(cx, remaining, &mut visit)).await?;
-        if count == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        remaining -= count;
-    }
-    Ok(())
-}
-
-/// Read one frame with ordinary async and return its checksum, or `None` at
-/// the end of the source. A field section is copied into `block` and decoded
-/// into `fields`; DATA is taken out of the source without copying and
-/// processed with `work` after the source is released.
+/// Read one frame's header with ordinary async, and return its kind and a
+/// stream of its payload in pieces taken out of the source without copying,
+/// or `None` at the end of the source.
 pub async fn plain_read_frame<P: Protocol, S: PollConsume + ?Sized>(
     source: &mut S,
-    block: &mut Vec<u8>,
-    fields: &mut Fields,
-    work: Work,
-) -> io::Result<Option<u64>> {
+) -> io::Result<Option<(Kind, impl Stream<Item = io::Result<BytesMut>>)>> {
     let mut header = [0u8; 16];
     let mut filled = 0;
     loop {
@@ -238,23 +219,47 @@ pub async fn plain_read_frame<P: Protocol, S: PollConsume + ?Sized>(
         filled += count;
     }
     let FrameHeader { kind, length } = P::parse_header(&header[..filled]);
+    let payload = stream::try_unfold((source, length), async |(source, remaining)| {
+        if remaining == 0 {
+            return Ok(None);
+        }
+        let piece = poll_fn(|cx| source.poll_take(cx, remaining)).await?;
+        if piece.is_empty() {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        let left = remaining - piece.len();
+        Ok(Some((piece, (source, left))))
+    });
+    Ok(Some((kind, payload)))
+}
+
+/// Read one frame with ordinary async and return its checksum, or `None` at
+/// the end of the source. A field section is copied into `block` and decoded
+/// into `fields`; each piece of DATA is processed with `work` as it arrives,
+/// after the source is released.
+pub async fn plain_frame_checksum<P: Protocol, S: PollConsume + ?Sized>(
+    source: &mut S,
+    block: &mut Vec<u8>,
+    fields: &mut Fields,
+    work: Work,
+) -> io::Result<Option<u64>> {
+    let Some((kind, payload)) = plain_read_frame::<P, S>(source).await? else {
+        return Ok(None);
+    };
+    let mut payload = pin!(payload);
     Ok(Some(match kind {
         Kind::Headers => {
             block.clear();
-            consume_exact(source, length, |bytes| block.extend_from_slice(bytes)).await?;
+            while let Some(piece) = payload.try_next().await? {
+                block.extend_from_slice(&piece);
+            }
             P::decode_fields(block, fields)
                 .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
             fields.checksum()
         }
         Kind::Data => {
             let mut checksum = 0;
-            let mut remaining = length;
-            while remaining > 0 {
-                let piece = poll_fn(|cx| source.poll_take(cx, remaining)).await?;
-                if piece.is_empty() {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
-                }
-                remaining -= piece.len();
+            while let Some(piece) = payload.try_next().await? {
                 checksum += work.read(&piece);
             }
             checksum

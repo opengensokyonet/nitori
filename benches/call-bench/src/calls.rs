@@ -2,9 +2,9 @@
 //! that acquires a lock on the polls whose operations need the resource.
 //!
 //! The operations mark a release point before each computation that does not
-//! need the resource: decoding a field section, visiting a piece of DATA
-//! taken out of the source, and encoding a field section. Whether the
-//! executor releases the view there is its [`Release`] policy.
+//! need the resource: processing a frame once its payload has been taken out
+//! of the source, and encoding a field section. Whether the executor releases
+//! the view there is its [`Release`] policy.
 use crate::{
     common::{ByteSink, ByteSource, Held, Lock, LockStats, PollLock},
     fields::Fields,
@@ -21,7 +21,7 @@ use std::{
     io,
     marker::PhantomData,
     ops::ControlFlow,
-    pin::Pin,
+    pin::{Pin, pin},
     sync::Arc,
     task::{Context, Poll, ready},
 };
@@ -76,35 +76,14 @@ pub trait Flush: ReceiverFamily {
         Self: 'visit;
 }
 
-#[call]
-async fn consume_exact<F: FnMut(&[u8])>(
-    io: &mut impl ReceiverAccess<Family: Consume>,
-    length: usize,
-    visit: &mut F,
-) -> io::Result<()> {
-    let mut remaining = length;
-    while remaining > 0 {
-        let count = io.consume(remaining, &mut *visit).await?;
-        if count == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        remaining -= count;
-    }
-    Ok(())
-}
-
-/// Read one frame and return its checksum, or `None` at the end of the
-/// source. A field section is copied into `block` and decoded into `fields`;
-/// DATA is taken out of the source and processed with `work` after a release
-/// point.
-#[call]
+/// Read one frame and yield its payload in pieces taken out of the source
+/// without copying; the final value is the frame's kind, or `None` at the end
+/// of the source.
+#[call(yields = BytesMut)]
 async fn read_frame<P: Protocol>(
     io: &mut impl ReceiverAccess<Family: Consume + Take>,
     _protocol: P,
-    block: &mut Vec<u8>,
-    fields: &mut Fields,
-    work: Work,
-) -> io::Result<Option<u64>> {
+) -> io::Result<Option<Kind>> {
     let mut header = [0u8; 16];
     let mut filled = 0;
     loop {
@@ -127,36 +106,21 @@ async fn read_frame<P: Protocol>(
         filled += count;
     }
     let FrameHeader { kind, length } = P::parse_header(&header[..filled]);
-    Ok(Some(match kind {
-        Kind::Headers => {
-            block.clear();
-            consume_exact(io, length, &mut |bytes: &[u8]| {
-                block.extend_from_slice(bytes)
-            })
-            .await?;
-            io.release_view().await;
-            P::decode_fields(block, fields)
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-            fields.checksum()
+    let mut remaining = length;
+    while remaining > 0 {
+        let piece = io.take(remaining).await?;
+        if piece.is_empty() {
+            return Err(io::ErrorKind::UnexpectedEof.into());
         }
-        Kind::Data => {
-            let mut checksum = 0;
-            let mut remaining = length;
-            while remaining > 0 {
-                let piece = io.take(remaining).await?;
-                if piece.is_empty() {
-                    return Err(io::ErrorKind::UnexpectedEof.into());
-                }
-                remaining -= piece.len();
-                io.release_view().await;
-                checksum += work.read(&piece);
-            }
-            checksum
-        }
-    }))
+        remaining -= piece.len();
+        yield piece;
+    }
+    Ok(Some(kind))
 }
 
-/// Read every frame and return the total checksum.
+/// Read every frame and return the total checksum. The pieces of a frame are
+/// kept until it ends; then, after a release point, a field section is copied
+/// into `block` and decoded into `fields`, and DATA is processed with `work`.
 #[call]
 pub async fn read_all<P: Protocol>(
     io: &mut impl ReceiverAccess<Family: Consume + Take>,
@@ -165,15 +129,42 @@ pub async fn read_all<P: Protocol>(
     fields: &mut Fields,
     work: Work,
 ) -> io::Result<u64> {
-    let mut total = 0;
-    while let Some(checksum) = read_frame(io, protocol, block, fields, work).await? {
-        total += checksum;
+    let (mut total, mut pieces) = (0, Vec::new());
+    loop {
+        // The frame borrows the access until it ends.
+        let kind = {
+            let mut frame = pin!(io.read_frame(protocol));
+            loop {
+                match frame.as_mut().next_event().await {
+                    ControlFlow::Continue(piece) => pieces.push(piece),
+                    ControlFlow::Break(kind) => break kind?,
+                }
+            }
+        };
+        let Some(kind) = kind else {
+            return Ok(total);
+        };
+        io.release_view().await;
+        total += match kind {
+            Kind::Headers => {
+                block.clear();
+                for piece in pieces.drain(..) {
+                    block.extend_from_slice(&piece);
+                }
+                P::decode_fields(block, fields)
+                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+                fields.checksum()
+            }
+            Kind::Data => pieces.drain(..).map(|piece| work.read(&piece)).sum(),
+        };
     }
-    Ok(total)
 }
 
 #[call]
-async fn write_all(io: &mut impl ReceiverAccess<Family: Write>, input: &[u8]) -> io::Result<()> {
+pub async fn write_all(
+    io: &mut impl ReceiverAccess<Family: Write>,
+    input: &[u8],
+) -> io::Result<()> {
     let mut input = input;
     while input.has_remaining() {
         io.write(&mut input).await?;
@@ -189,7 +180,6 @@ async fn write_frame<P: Protocol>(
     _protocol: P,
     frame: Frame<'_>,
     fields: &mut Vec<u8>,
-    header: &mut Vec<u8>,
     work: Work,
 ) -> io::Result<()> {
     match frame {
@@ -200,8 +190,10 @@ async fn write_frame<P: Protocol>(
         }
         Frame::Data { .. } => {}
     }
-    let (header, payload) = frame.parts::<P>(fields, header);
-    write_all(io, header).await?;
+    let (header, payload) = frame.parts::<P>(fields);
+    for piece in header {
+        write_all(io, &piece).await?;
+    }
     write_all(io, payload).await
 }
 
@@ -213,9 +205,9 @@ pub async fn write_frames<'m, P: Protocol, I: Iterator<Item = Frame<'m>>>(
     frames: I,
     work: Work,
 ) -> io::Result<()> {
-    let (mut fields, mut header) = (Vec::new(), Vec::new());
+    let mut fields = Vec::new();
     for frame in frames {
-        write_frame(io, protocol, frame, &mut fields, &mut header, work).await?;
+        write_frame(io, protocol, frame, &mut fields, work).await?;
     }
     Ok(())
 }
@@ -233,9 +225,9 @@ pub async fn write_slot<P: Protocol>(
     chunk: usize,
     work: Work,
 ) -> io::Result<()> {
-    let (mut fields, mut header) = (Vec::new(), Vec::new());
+    let mut fields = Vec::new();
     for frame in slot_frames(&messages, slot, streams, chunk) {
-        write_frame(io, protocol, frame, &mut fields, &mut header, work).await?;
+        write_frame(io, protocol, frame, &mut fields, work).await?;
     }
     Ok(())
 }

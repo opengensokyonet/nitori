@@ -23,7 +23,7 @@ use crate::{
     codec::{FrameDecoder, FrameEncoder, Item, Processor},
     common::{
         ByteSink, ByteSource, Counters, Lock, LockKind, LockPerLeaf, Pace, Pacer, PerLock,
-        PollLock, Progress, Sample, TimedLock, counted, plain_read_frame, plain_write_all,
+        PollLock, Progress, Sample, TimedLock, counted, plain_frame_checksum, plain_write_all,
         with_lock, woken,
     },
     fields::Fields,
@@ -113,7 +113,7 @@ impl Input {
 }
 
 /// Spawn one task per stream and add up what they return.
-async fn per_stream<F>(streams: usize, task: impl Fn(usize) -> F) -> u64
+pub async fn per_stream<F>(streams: usize, task: impl Fn(usize) -> F) -> u64
 where
     F: Future<Output = u64> + Send + 'static,
 {
@@ -183,22 +183,54 @@ impl ByteSource for RecvStream {
     }
 }
 pub struct RecvConn<L> {
-    streams: Vec<L>,
+    pub streams: Vec<L>,
     limits: Vec<Arc<AtomicUsize>>,
     waker: Arc<AtomicWaker>,
 }
 
-/// Deliver every stream's bytes, closing each stream with its last packet.
+/// The streams of a connection that receives, each allowed a window.
+pub fn recv_conn<L: Lock<Value = RecvStream>>(streams: usize, update: usize) -> Arc<RecvConn<L>> {
+    let waker = Arc::new(AtomicWaker::new());
+    let limits: Vec<_> = (0..streams)
+        .map(|_| Arc::new(AtomicUsize::new(WINDOW)))
+        .collect();
+    let streams = limits
+        .iter()
+        .map(|limit| {
+            L::new(RecvStream {
+                buffer: BytesMut::with_capacity(WINDOW),
+                closed: false,
+                reader: None,
+                delivered: 0,
+                consumed: 0,
+                unreported: 0,
+                update,
+                limit: limit.clone(),
+                connection: waker.clone(),
+            })
+        })
+        .collect();
+    Arc::new(RecvConn {
+        streams,
+        limits,
+        waker,
+    })
+}
+
+/// Deliver the bytes of each stream, `bytes[index]`, at `pace`, closing each
+/// stream with its last packet; with `trickle`, yield after each packet.
 /// Returns the waits for the stream locks.
-async fn deliver<L: Lock<Value = RecvStream>>(
+pub async fn deliver<L: Lock<Value = RecvStream>>(
     conn: Arc<RecvConn<L>>,
-    input: Input,
+    bytes: Arc<Vec<Vec<u8>>>,
+    pace: Pace,
+    trickle: bool,
     counters: Arc<Counters>,
 ) -> Vec<Duration> {
-    let streams = input.streams;
+    let streams = bytes.len();
     let mut offsets = vec![0; streams];
     let mut closed = vec![false; streams];
-    let mut pacer = Pacer::new(input.pace);
+    let mut pacer = Pacer::new(pace);
     let mut waits = Vec::new();
     let mut next = 0;
     loop {
@@ -213,7 +245,7 @@ async fn deliver<L: Lock<Value = RecvStream>>(
                         continue;
                     }
                     open = true;
-                    let left = input.bytes[index].len() - offsets[index];
+                    let left = bytes[index].len() - offsets[index];
                     let room = conn.limits[index].load(Ordering::Acquire) - offsets[index];
                     if left == 0 || room > 0 {
                         return Poll::Ready(Some((index, left.min(room).min(PACKET))));
@@ -232,7 +264,7 @@ async fn deliver<L: Lock<Value = RecvStream>>(
         };
         next = index + 1;
         pacer.admit(count).await;
-        let data = &input.bytes[index];
+        let data = &bytes[index];
         let end = offsets[index] + count == data.len();
         let mut attempt = TimedLock::new(&conn.streams[index], &counters.other);
         poll_fn(|cx| {
@@ -248,7 +280,7 @@ async fn deliver<L: Lock<Value = RecvStream>>(
         .await;
         offsets[index] += count;
         closed[index] = end;
-        if input.trickle {
+        if trickle {
             tokio::task::yield_now().await;
         }
     }
@@ -285,7 +317,7 @@ async fn receive<L: Lock<Value = RecvStream>>(
             let mut source = LockPerLeaf::new(stream, &counters.locks);
             let mut total = 0;
             while let Some(checksum) =
-                plain_read_frame::<Http3, _>(&mut source, &mut block, &mut fields, work)
+                plain_frame_checksum::<Http3, _>(&mut source, &mut block, &mut fields, work)
                     .await
                     .unwrap()
             {
@@ -367,35 +399,17 @@ impl PerLock<RecvStream> for RunRecv<'_> {
         } = self;
         let (expected, work) = (input.checksum, input.work);
         runtime.block_on(async move {
-            let waker = Arc::new(AtomicWaker::new());
-            let limits: Vec<_> = (0..input.streams)
-                .map(|_| Arc::new(AtomicUsize::new(WINDOW)))
-                .collect();
-            let streams = limits
-                .iter()
-                .map(|limit| {
-                    L::new(RecvStream {
-                        buffer: BytesMut::with_capacity(WINDOW),
-                        closed: false,
-                        reader: None,
-                        delivered: 0,
-                        consumed: 0,
-                        unreported: 0,
-                        update: input.update,
-                        limit: limit.clone(),
-                        connection: waker.clone(),
-                    })
-                })
-                .collect();
-            let conn = Arc::new(RecvConn {
-                streams,
-                limits,
-                waker,
-            });
+            let conn = recv_conn::<L>(input.streams, input.update);
             let counters = Arc::new(Counters::new(holds));
             let start = Instant::now();
             // Joined below; it ends after closing every stream.
-            let deliverer = tokio::spawn(deliver(conn.clone(), input.clone(), counters.clone()));
+            let deliverer = tokio::spawn(deliver(
+                conn.clone(),
+                input.bytes.clone(),
+                input.pace,
+                input.trickle,
+                counters.clone(),
+            ));
             let checksum = per_stream(input.streams, |index| {
                 let (conn, counters) = (conn.clone(), counters.clone());
                 async move {
@@ -515,24 +529,100 @@ impl ByteSink for SendStream {
     }
 }
 pub struct SendConn<L> {
-    streams: Vec<L>,
+    pub streams: Vec<L>,
     states: Vec<Arc<SendState>>,
     waker: Arc<AtomicWaker>,
 }
 
-/// Take packets at the input's pace from the streams that have bytes, in
-/// turn, until every stream is closed and empty, checking each stream's
-/// frames after unlocking. Returns the frame checksum and the waits for the
-/// stream locks.
-async fn drain<L: Lock<Value = SendStream>>(
+/// The streams of a connection that sends, each with a buffer of
+/// [`WINDOW`] bytes.
+pub fn send_conn<L: Lock<Value = SendStream>>(streams: usize, update: usize) -> Arc<SendConn<L>> {
+    let waker = Arc::new(AtomicWaker::new());
+    let states: Vec<_> = (0..streams)
+        .map(|_| Arc::new(SendState::default()))
+        .collect();
+    let streams = states
+        .iter()
+        .map(|state| {
+            L::new(SendStream {
+                buffer: BytesMut::with_capacity(WINDOW),
+                writer: None,
+                wanted: 0,
+                update,
+                closed: false,
+                moved: 0,
+                state: state.clone(),
+                connection: waker.clone(),
+            })
+        })
+        .collect();
+    Arc::new(SendConn {
+        streams,
+        states,
+        waker,
+    })
+}
+
+/// Close a stream once everything is written.
+pub async fn close<L: Lock<Value = SendStream>>(stream: &L, counters: &Counters) {
+    let mut attempt = PollLock::new(stream, &counters.locks);
+    poll_fn(|cx| {
+        ready!(attempt.poll_lock(cx)).close();
+        Poll::Ready(())
+    })
+    .await
+}
+
+/// What the connection task does with the bytes it takes from the streams.
+pub trait Check {
+    /// Bytes taken from stream `index`, after unlocking it.
+    fn take(&mut self, index: usize, packet: &[u8]);
+    /// The checksum of everything taken, once every stream has ended.
+    fn finish(self) -> u64;
+}
+
+/// Decodes the frames of each stream and processes them.
+struct FrameCheck {
+    received: Vec<BytesMut>,
+    decoders: Vec<FrameDecoder<Http3>>,
+    processor: Processor<Http3>,
+}
+impl FrameCheck {
+    fn new(streams: usize) -> Self {
+        Self {
+            received: (0..streams).map(|_| BytesMut::new()).collect(),
+            decoders: (0..streams).map(|_| Default::default()).collect(),
+            processor: Processor::new(Work::CHECK),
+        }
+    }
+}
+impl Check for FrameCheck {
+    fn take(&mut self, index: usize, packet: &[u8]) {
+        let received = &mut self.received[index];
+        received.extend_from_slice(packet);
+        while let Some(item) = self.decoders[index].decode(received).unwrap() {
+            self.processor.add(item);
+        }
+    }
+    fn finish(self) -> u64 {
+        assert!(
+            self.received.iter().all(BytesMut::is_empty),
+            "incomplete frame"
+        );
+        self.processor.checksum
+    }
+}
+
+/// Take packets at `pace` from the streams that have bytes, in turn, until
+/// every stream is closed and empty, passing them to `check` after
+/// unlocking. Returns its checksum and the waits for the stream locks.
+pub async fn drain<L: Lock<Value = SendStream>, C: Check>(
     conn: Arc<SendConn<L>>,
     pace: Pace,
     counters: Arc<Counters>,
+    mut check: C,
 ) -> (u64, Vec<Duration>) {
     let streams = conn.streams.len();
-    let mut received: Vec<BytesMut> = (0..streams).map(|_| BytesMut::new()).collect();
-    let mut decoders: Vec<FrameDecoder<Http3>> = (0..streams).map(|_| Default::default()).collect();
-    let mut processor = Processor::<Http3>::new(Work::CHECK);
     let mut pacer = Pacer::new(pace);
     let mut packet = Vec::with_capacity(PACKET);
     let mut waits = Vec::new();
@@ -560,8 +650,7 @@ async fn drain<L: Lock<Value = SendStream>>(
         })
         .await;
         let Some(index) = found else {
-            assert!(received.iter().all(BytesMut::is_empty), "incomplete frame");
-            return (processor.checksum, waits);
+            return (check.finish(), waits);
         };
         next = index + 1;
         let mut attempt = TimedLock::new(&conn.streams[index], &counters.other);
@@ -580,10 +669,7 @@ async fn drain<L: Lock<Value = SendStream>>(
             Poll::Ready(count)
         })
         .await;
-        received[index].extend_from_slice(&packet);
-        while let Some(item) = decoders[index].decode(&mut received[index]).unwrap() {
-            processor.add(item);
-        }
+        check.take(index, &packet);
         pacer.admit(count).await;
     }
 }
@@ -621,19 +707,21 @@ struct Staged<'m> {
     size: usize,
 }
 impl<'m> Staged<'m> {
-    fn push(&mut self, frame: Frame<'m>, fields: &mut Vec<u8>, header: &mut Vec<u8>, work: Work) {
+    fn push(&mut self, frame: Frame<'m>, fields: &mut Vec<u8>, work: Work) {
         frame.prepare(work);
         let body = match frame {
             Frame::Data { payload, .. } => payload,
             Frame::Headers { .. } => &[],
         };
-        let (header, payload) = frame.parts::<Http3>(fields, header);
-        let mut encoded = header.len();
-        self.encoded.extend_from_slice(header);
+        let (header, payload) = frame.parts::<Http3>(fields);
+        let start = self.encoded.len();
+        for piece in header {
+            self.encoded.extend_from_slice(&piece);
+        }
         if body.is_empty() {
-            encoded += payload.len();
             self.encoded.extend_from_slice(payload);
         }
+        let encoded = self.encoded.len() - start;
         assert!(
             encoded + body.len() <= WINDOW,
             "a whole frame must fit in the stream buffer"
@@ -656,8 +744,8 @@ impl<'m> Staged<'m> {
 }
 
 /// An `AsyncWrite` of one stream that locks on each write.
-struct StreamWriter<'p, L: Lock> {
-    attempt: PollLock<'p, L>,
+pub struct StreamWriter<'p, L: Lock> {
+    pub attempt: PollLock<'p, L>,
 }
 impl<L: Lock<Value = SendStream>> AsyncWrite for StreamWriter<'_, L> {
     fn poll_write(
@@ -684,14 +772,16 @@ async fn send<L: Lock<Value = SendStream>>(
     input: &Input,
 ) {
     let frames = slot_frames(&input.messages, index, input.streams, input.chunk);
-    let (mut fields, mut header) = (Vec::<u8>::new(), Vec::<u8>::new());
+    let mut fields = Vec::new();
     match variant {
         SendVariant::PlainLockPerLeaf => {
             let mut sink = LockPerLeaf::new(stream, &counters.locks);
             for frame in frames {
                 frame.prepare(input.work);
-                let (header, payload) = frame.parts::<Http3>(&mut fields, &mut header);
-                plain_write_all(&mut sink, header).await.unwrap();
+                let (header, payload) = frame.parts::<Http3>(&mut fields);
+                for piece in header {
+                    plain_write_all(&mut sink, &piece).await.unwrap();
+                }
                 plain_write_all(&mut sink, payload).await.unwrap();
             }
         }
@@ -725,7 +815,7 @@ async fn send<L: Lock<Value = SendStream>>(
             loop {
                 while staged.size < WINDOW {
                     let Some(frame) = frames.next() else { break };
-                    staged.push(frame, &mut fields, &mut header, input.work);
+                    staged.push(frame, &mut fields, input.work);
                 }
                 if staged.frames.is_empty() {
                     break;
@@ -795,34 +885,16 @@ impl PerLock<SendStream> for RunSend<'_> {
         } = self;
         let expected = input.written;
         runtime.block_on(async move {
-            let waker = Arc::new(AtomicWaker::new());
-            let states: Vec<_> = (0..input.streams)
-                .map(|_| Arc::new(SendState::default()))
-                .collect();
-            let streams = states
-                .iter()
-                .map(|state| {
-                    L::new(SendStream {
-                        buffer: BytesMut::with_capacity(WINDOW),
-                        writer: None,
-                        wanted: 0,
-                        update: input.update,
-                        closed: false,
-                        moved: 0,
-                        state: state.clone(),
-                        connection: waker.clone(),
-                    })
-                })
-                .collect();
-            let conn = Arc::new(SendConn {
-                streams,
-                states,
-                waker,
-            });
+            let conn = send_conn::<L>(input.streams, input.update);
             let counters = Arc::new(Counters::new(holds));
             let start = Instant::now();
             // Joined below; it ends once every stream is closed and empty.
-            let drainer = tokio::spawn(drain(conn.clone(), input.pace, counters.clone()));
+            let drainer = tokio::spawn(drain(
+                conn.clone(),
+                input.pace,
+                counters.clone(),
+                FrameCheck::new(input.streams),
+            ));
             per_stream(input.streams, |index| {
                 let (conn, counters, input) = (conn.clone(), counters.clone(), input.clone());
                 async move {
@@ -832,12 +904,7 @@ impl PerLock<SendStream> for RunSend<'_> {
                         send(variant, stream, index, &counters, &input),
                     )
                     .await;
-                    let mut attempt = PollLock::new(stream, &counters.locks);
-                    poll_fn(|cx| {
-                        ready!(attempt.poll_lock(cx)).close();
-                        Poll::Ready(())
-                    })
-                    .await;
+                    close(stream, &counters).await;
                     0
                 }
             })

@@ -139,8 +139,39 @@ pub trait Protocol: Copy + Default + Send + Sync + 'static {
     /// Parse a complete frame header.
     fn parse_header(header: &[u8]) -> FrameHeader;
     fn write_header(header: FrameHeader, stream: u32, end_stream: bool, output: &mut impl BufMut);
+    /// The frame header in the pieces that a writer writes one after
+    /// another.
+    fn header_pieces(
+        header: FrameHeader,
+        stream: u32,
+        end_stream: bool,
+    ) -> impl Iterator<Item = Piece> + use<Self>;
     fn encode_fields<'a>(fields: impl Iterator<Item = (&'a str, &'a str)>, output: &mut Vec<u8>);
     fn decode_fields(input: &[u8], fields: &mut Fields) -> Result<(), FieldError>;
+}
+
+/// A piece of a frame header, on the stack.
+#[derive(Clone, Copy)]
+pub struct Piece {
+    bytes: [u8; 9],
+    length: usize,
+}
+impl Piece {
+    fn new(write: impl FnOnce(&mut &mut [u8])) -> Self {
+        let mut bytes = [0; 9];
+        let length = {
+            let mut rest = &mut bytes[..];
+            write(&mut rest);
+            9 - rest.len()
+        };
+        Self { bytes, length }
+    }
+}
+impl std::ops::Deref for Piece {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
 }
 
 /// HTTP/2 frames: a 9-byte header of a 24-bit length, a type, flags and a
@@ -170,6 +201,16 @@ impl Protocol for Http2 {
         output.put_u8(kind);
         output.put_u8(flags | if end_stream { 0x1 } else { 0 });
         output.put_u32(stream);
+    }
+    /// The whole header at once.
+    fn header_pieces(
+        header: FrameHeader,
+        stream: u32,
+        end_stream: bool,
+    ) -> impl Iterator<Item = Piece> + use<> {
+        std::iter::once(Piece::new(|output| {
+            Self::write_header(header, stream, end_stream, output)
+        }))
     }
     fn encode_fields<'a>(fields: impl Iterator<Item = (&'a str, &'a str)>, output: &mut Vec<u8>) {
         hpack::encode(fields, output)
@@ -231,6 +272,16 @@ impl Protocol for Http3 {
         );
         write_varint(header.length as u64, output);
     }
+    /// The type, then the length.
+    fn header_pieces(header: FrameHeader, _: u32, _: bool) -> impl Iterator<Item = Piece> + use<> {
+        let kind = match header.kind {
+            Kind::Data => 0x0,
+            Kind::Headers => 0x1,
+        };
+        [kind, header.length as u64]
+            .into_iter()
+            .map(|value| Piece::new(|output| write_varint(value, output)))
+    }
     fn encode_fields<'a>(fields: impl Iterator<Item = (&'a str, &'a str)>, output: &mut Vec<u8>) {
         qpack::encode(fields, output)
     }
@@ -254,18 +305,16 @@ pub enum Frame<'m> {
 }
 
 impl<'m> Frame<'m> {
-    /// The frame header and payload, encoding the field section into
-    /// `fields` and the header into `header`. The payload of DATA is the
-    /// message body itself.
+    /// The pieces of the frame header and the payload, encoding the field
+    /// section into `fields`: it must be encoded before its length is known.
+    /// The payload of DATA is the message body itself.
     pub fn parts<'s, P: Protocol>(
         &self,
         fields: &'s mut Vec<u8>,
-        header: &'s mut Vec<u8>,
-    ) -> (&'s [u8], &'s [u8])
+    ) -> (impl Iterator<Item = Piece> + use<P>, &'s [u8])
     where
         'm: 's,
     {
-        header.clear();
         match *self {
             Frame::Headers { stream, message } => {
                 fields.clear();
@@ -274,8 +323,10 @@ impl<'m> Frame<'m> {
                     kind: Kind::Headers,
                     length: fields.len(),
                 };
-                P::write_header(frame, stream, message.body.is_empty(), header);
-                (header, fields)
+                (
+                    P::header_pieces(frame, stream, message.body.is_empty()),
+                    fields,
+                )
             }
             Frame::Data {
                 stream,
@@ -286,8 +337,7 @@ impl<'m> Frame<'m> {
                     kind: Kind::Data,
                     length: payload.len(),
                 };
-                P::write_header(frame, stream, end_stream, header);
-                (header, payload)
+                (P::header_pieces(frame, stream, end_stream), payload)
             }
         }
     }
@@ -300,14 +350,11 @@ impl<'m> Frame<'m> {
     }
 
     /// Append the whole frame.
-    pub fn encode<P: Protocol>(
-        &self,
-        fields: &mut Vec<u8>,
-        header: &mut Vec<u8>,
-        output: &mut impl BufMut,
-    ) {
-        let (header, payload) = self.parts::<P>(fields, header);
-        output.put_slice(header);
+    pub fn encode<P: Protocol>(&self, fields: &mut Vec<u8>, output: &mut impl BufMut) {
+        let (header, payload) = self.parts::<P>(fields);
+        for piece in header {
+            output.put_slice(&piece);
+        }
         output.put_slice(payload);
     }
 }
@@ -387,10 +434,10 @@ pub fn slot_frames(
 
 /// Encode frames into bytes.
 pub fn encode_all<'m, P: Protocol>(frames: impl Iterator<Item = Frame<'m>>) -> Vec<u8> {
-    let (mut fields, mut header) = (Vec::new(), Vec::new());
+    let mut fields = Vec::new();
     let mut output = Vec::new();
     for frame in frames {
-        frame.encode::<P>(&mut fields, &mut header, &mut output);
+        frame.encode::<P>(&mut fields, &mut output);
     }
     output
 }

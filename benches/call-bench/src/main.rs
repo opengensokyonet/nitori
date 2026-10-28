@@ -9,6 +9,9 @@
 //! - `h3-recv`, `h3-send`: HTTP/3 over the stream buffers of a QUIC
 //!   connection in user space, each behind a lock of its own, one task per
 //!   stream; see [`h3`];
+//! - `qpack-encoder-recv`, `qpack-encoder-send`: QPACK encoder stream
+//!   instructions over the same stream buffers, one encoder stream per
+//!   connection; see [`encoder_stream`];
 //! - `fields`: the cost of encoding and decoding the field sections alone;
 //! - `mechanism`: the fixed cost of an access through each way, with no work
 //!   behind it; see [`mechanism`].
@@ -21,29 +24,33 @@
 //! (queued), and those after which the value had not changed (empty).
 //!
 //! Run with `--release`, a scenario and optionally:
-//! - `streams=N`: responses in flight (HTTP/2) or streams (HTTP/3), default 8;
+//! - `streams=N`: responses in flight (HTTP/2), streams (HTTP/3) or
+//!   connections (`qpack-encoder-*`), default 8;
 //! - `chunk=N`: the most body bytes per DATA frame, default 16384;
 //! - `passes=N`: copies of the corpus, default 8 (2 with `trickle`);
 //! - `rate=N`: the source's bytes arrive at N MB/s (10^6 bytes), released
 //!   each millisecond; by default as fast as they are taken (`h2-read`,
-//!   `h3-recv`, `h3-send`);
+//!   `h3-recv`, `h3-send`, `qpack-encoder-*`);
 //! - `trickle`: yield to the scheduler after each segment or packet received,
 //!   so readers wait for nearly every one;
-//! - `update=N` (`h3-recv`, `h3-send`): bytes a reader consumes before it
-//!   raises its stream's flow control limit, and the most room a waiting
+//! - `update=N` (`h3-*`, `qpack-encoder-*`): bytes a reader consumes before
+//!   it raises its stream's flow control limit, and the most room a waiting
 //!   writer asks for; default 32768, half the window;
 //! - `contention[=N]` (`h2-read`): a control task locks the shared reader
 //!   once for every N bytes fed, default 32768; report how long it waited;
+//! - `capacity=N` (`qpack-encoder-*`): the dynamic table capacity, default
+//!   4096;
 //! - `work=N`: passes the application makes over every DATA byte after
 //!   reading it or before writing it, default 1; with 0 it only counts the
 //!   bytes;
 //! - `holds`: also measure how long each side holds its locks, which adds
 //!   two clock reads to every acquisition.
-#![feature(impl_trait_in_assoc_type)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 #![allow(clippy::multiple_bound_locations)]
 mod calls;
 mod codec;
 mod common;
+mod encoder_stream;
 mod fields;
 mod h2;
 mod h3;
@@ -84,14 +91,14 @@ fn lock_name(kind: LockKind) -> &'static str {
     }
 }
 
-/// Acquisitions per frame, and the shares queued and, with `empty`, empty.
-/// The other side's acquisitions always deliver, take or do nothing, so its
-/// empty share says nothing.
-fn locks(counts: &LockCounts, frames: f64, empty: bool) -> String {
+/// Acquisitions per unit of work, and the shares queued and, with `empty`,
+/// empty. The other side's acquisitions always deliver, take or do nothing,
+/// so its empty share says nothing.
+fn locks(counts: &LockCounts, units: f64, unit: &str, empty: bool) -> String {
     let share = |count: usize| 100.0 * count as f64 / counts.acquired.max(1) as f64;
     let mut text = format!(
-        "{:6.3} locks/frame ({:4.1}% queued",
-        counts.acquired as f64 / frames,
+        "{:6.3} locks/{unit} ({:4.1}% queued",
+        counts.acquired as f64 / units,
         share(counts.queued),
     );
     if empty {
@@ -111,10 +118,11 @@ fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
 /// Rounds after one warm-up run of each variant.
 const REPEATS: usize = 9;
 
-/// Run every variant, then print the median per variant.
+/// Run every variant, then print the median per variant, per unit of work:
+/// a frame, or an instruction.
 fn report<V: Copy + std::fmt::Debug>(
     variants: &[V],
-    frames: usize,
+    (units, unit): (usize, &str),
     bytes: usize,
     mut run: impl FnMut(V) -> Sample,
 ) {
@@ -127,22 +135,22 @@ fn report<V: Copy + std::fmt::Debug>(
             samples[index].push(run(variant));
         }
     }
-    let frames = frames as f64;
+    let units = units as f64;
     for (variant, samples) in variants.iter().zip(&mut samples) {
         samples.sort_by_key(|sample| sample.elapsed);
-        let per_frame = |sample: &Sample| sample.elapsed.as_nanos() as f64 / frames;
+        let per_unit = |sample: &Sample| sample.elapsed.as_nanos() as f64 / units;
         let median = &samples[samples.len() / 2];
         print!(
-            "  {:<20} {:8.1} ns/frame ({:7.1}–{:7.1}) {:5.2} GB/s {:6.3} polls/frame",
+            "  {:<20} {:8.1} ns/{unit} ({:7.1}–{:7.1}) {:5.2} GB/s {:6.3} polls/{unit}",
             format!("{variant:?}"),
-            per_frame(median),
-            per_frame(&samples[0]),
-            per_frame(samples.last().unwrap()),
+            per_unit(median),
+            per_unit(&samples[0]),
+            per_unit(samples.last().unwrap()),
             bytes as f64 / median.elapsed.as_nanos() as f64,
-            median.polls as f64 / frames,
+            median.polls as f64 / units,
         );
         if median.locks.acquired > 0 {
-            print!(" {}", locks(&median.locks, frames, true));
+            print!(" {}", locks(&median.locks, units, unit, true));
         }
         if median.buffer > 0 {
             print!("  buffer {} B", median.buffer);
@@ -152,7 +160,7 @@ fn report<V: Copy + std::fmt::Debug>(
             waits.sort();
             print!(
                 "  other side: {}, wait p50 {:?} p99 {:?} max {:?}",
-                locks(&median.other, frames, false),
+                locks(&median.other, units, unit, false),
                 percentile(&waits, 0.5),
                 percentile(&waits, 0.99),
                 waits.last().unwrap(),
@@ -226,6 +234,61 @@ fn field_costs(messages: &[workload::Message]) {
     }
 }
 
+/// Receive or send the QPACK encoder stream of each connection.
+fn qpack_encoder(send: bool, input: encoder_stream::Input, holds: bool) {
+    let mut options = String::new();
+    if let Pace::Rate(rate) = input.pace {
+        options += &format!(", {} MB/s", rate / 1_000_000);
+    }
+    if input.trickle {
+        options += ", trickle";
+    }
+    let scenario = if send {
+        "qpack-encoder-send"
+    } else {
+        "qpack-encoder-recv"
+    };
+    println!(
+        "{scenario}: {} instructions, {} bytes, {} connections, capacity {}, update {}{options}, {REPEATS} runs each, median (min–max)",
+        input.instructions,
+        input.size(),
+        input.streams,
+        input.capacity,
+        input.update,
+    );
+    if send {
+        let mut best = Duration::MAX;
+        for _ in 0..REPEATS {
+            let start = Instant::now();
+            for slot in 0..input.streams {
+                let sections = input.messages.iter().skip(slot).step_by(input.streams);
+                std::hint::black_box(encoder_stream::encode(sections, input.capacity));
+            }
+            best = best.min(start.elapsed());
+        }
+        println!(
+            "choosing and encoding the instructions alone, into one buffer: {:.1} ns/instruction (best of {REPEATS})",
+            best.as_nanos() as f64 / input.instructions as f64,
+        );
+    }
+    for (name, runtime) in &runtimes() {
+        println!("\n== {name}");
+        for lock in LOCK_KINDS {
+            println!("{}", lock_name(lock));
+            let units = (input.instructions, "instruction");
+            if send {
+                report(&encoder_stream::SENDS, units, input.size(), |variant| {
+                    encoder_stream::run_send(runtime, variant, lock, input.clone(), holds)
+                });
+            } else {
+                report(&encoder_stream::RECVS, units, input.size(), |variant| {
+                    encoder_stream::run_recv(runtime, variant, lock, input.clone(), holds)
+                });
+            }
+        }
+    }
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let has = |name: &str| arguments.iter().any(|argument| argument == name);
@@ -242,6 +305,7 @@ fn main() {
     let chunk = value("chunk", 16 * 1024);
     let passes = value("passes", if trickle { 2 } else { 8 });
     let update = value("update", h3::WINDOW / 2);
+    let capacity = value("capacity", 4096);
     let work = Work {
         passes: value("work", 1),
     };
@@ -260,6 +324,15 @@ fn main() {
     }
     if scenario == "fields" {
         return field_costs(&messages[..messages.len() / passes]);
+    }
+    if let Some(side) = scenario.strip_prefix("qpack-encoder-") {
+        let send = match side {
+            "recv" => false,
+            "send" => true,
+            other => panic!("unknown side {other}; use qpack-encoder-recv or qpack-encoder-send"),
+        };
+        let input = encoder_stream::Input::new(messages, streams, pace, trickle, update, capacity);
+        return qpack_encoder(send, input, holds);
     }
     let frames: usize = messages
         .iter()
@@ -293,7 +366,7 @@ fn main() {
                 let input = h2::Input::new(messages.clone(), streams, chunk, pace, trickle, work);
                 if contention.is_none() {
                     println!("exclusive");
-                    report(&h2::READS, frames, bytes, |variant| {
+                    report(&h2::READS, (frames, "frame"), bytes, |variant| {
                         h2::run_read(runtime, variant, input.clone())
                     });
                 }
@@ -303,7 +376,7 @@ fn main() {
                         .into_iter()
                         .filter(|variant| variant.supports(lock))
                         .collect();
-                    report(&variants, frames, bytes, |variant| {
+                    report(&variants, (frames, "frame"), bytes, |variant| {
                         h2::run_shared_read(
                             runtime,
                             variant,
@@ -317,7 +390,7 @@ fn main() {
             }
             "h2-write" => {
                 let input = h2::Input::new(messages.clone(), streams, chunk, pace, trickle, work);
-                report(&h2::WRITES, frames, bytes, |variant| {
+                report(&h2::WRITES, (frames, "frame"), bytes, |variant| {
                     h2::run_write(runtime, variant, input.clone())
                 });
             }
@@ -333,7 +406,7 @@ fn main() {
                 );
                 for lock in LOCK_KINDS {
                     println!("{}", lock_name(lock));
-                    report(&h3::RECVS, frames, bytes, |variant| {
+                    report(&h3::RECVS, (frames, "frame"), bytes, |variant| {
                         h3::run_recv(runtime, variant, lock, input.clone(), holds)
                     });
                 }
@@ -350,13 +423,13 @@ fn main() {
                 );
                 for lock in LOCK_KINDS {
                     println!("{}", lock_name(lock));
-                    report(&h3::SENDS, frames, bytes, |variant| {
+                    report(&h3::SENDS, (frames, "frame"), bytes, |variant| {
                         h3::run_send(runtime, variant, lock, input.clone(), holds)
                     });
                 }
             }
             other => panic!(
-                "unknown scenario {other}; use h2-read, h2-write, h3-recv, h3-send, fields or mechanism"
+                "unknown scenario {other}; use h2-read, h2-write, h3-recv, h3-send, qpack-encoder-recv, qpack-encoder-send, fields or mechanism"
             ),
         }
     }
@@ -434,8 +507,8 @@ mod tests {
         );
         for (_, runtime) in &runtimes() {
             for lock in LOCK_KINDS {
-                // Reading releases before every decode and every DATA piece,
-                // so each frame needs an acquisition of its own; writing
+                // Reading releases before processing every frame, so each
+                // frame needs an acquisition of its own; writing
                 // releases before every field section.
                 let read = h3::run_recv(
                     runtime,
@@ -453,6 +526,33 @@ mod tests {
                     false,
                 );
                 assert!(write.locks.acquired >= messages.len(), "{lock:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn qpack_encoder_variants_apply_every_instruction() {
+        let messages = workload::messages(1);
+        for (streams, _, pace, trickle, update, _) in inputs() {
+            for capacity in [4096, 256] {
+                let input = encoder_stream::Input::new(
+                    messages.clone(),
+                    streams,
+                    pace,
+                    trickle,
+                    update,
+                    capacity,
+                );
+                for (_, runtime) in &runtimes() {
+                    for lock in LOCK_KINDS {
+                        for variant in encoder_stream::RECVS {
+                            encoder_stream::run_recv(runtime, variant, lock, input.clone(), false);
+                        }
+                        for variant in encoder_stream::SENDS {
+                            encoder_stream::run_send(runtime, variant, lock, input.clone(), false);
+                        }
+                    }
+                }
             }
         }
     }

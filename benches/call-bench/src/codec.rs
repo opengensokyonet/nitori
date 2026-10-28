@@ -134,14 +134,12 @@ impl<P: Protocol> Processor<P> {
 /// Encodes frames, field sections included, into the codec's buffer.
 pub struct FrameEncoder<P> {
     fields: Vec<u8>,
-    header: Vec<u8>,
     protocol: PhantomData<P>,
 }
 impl<P> Default for FrameEncoder<P> {
     fn default() -> Self {
         Self {
             fields: Vec::new(),
-            header: Vec::new(),
             protocol: PhantomData,
         }
     }
@@ -149,10 +147,7 @@ impl<P> Default for FrameEncoder<P> {
 impl<P: Protocol> Encoder<Frame<'_>> for FrameEncoder<P> {
     type Error = io::Error;
     fn encode(&mut self, frame: Frame<'_>, output: &mut BytesMut) -> io::Result<()> {
-        let (header, payload) = frame.parts::<P>(&mut self.fields, &mut self.header);
-        output.reserve(header.len() + payload.len());
-        output.extend_from_slice(header);
-        output.extend_from_slice(payload);
+        frame.encode::<P>(&mut self.fields, output);
         Ok(())
     }
 }

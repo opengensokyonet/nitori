@@ -20,7 +20,7 @@ pub enum FieldError {
 
 // Integers (RFC 7541 Section 5.1, used by both).
 
-fn encode_integer(value: usize, prefix: u8, flags: u8, output: &mut Vec<u8>) {
+pub fn encode_integer(value: usize, prefix: u8, flags: u8, output: &mut Vec<u8>) {
     let limit = (1usize << prefix) - 1;
     if value < limit {
         output.push(flags | value as u8);
@@ -35,7 +35,7 @@ fn encode_integer(value: usize, prefix: u8, flags: u8, output: &mut Vec<u8>) {
     output.push(rest as u8);
 }
 
-fn decode_integer(input: &[u8], position: &mut usize, prefix: u8) -> Result<usize, FieldError> {
+pub fn decode_integer(input: &[u8], position: &mut usize, prefix: u8) -> Result<usize, FieldError> {
     let limit = (1usize << prefix) - 1;
     let first = *input.get(*position).ok_or(FieldError::Truncated)? as usize & limit;
     *position += 1;
@@ -60,7 +60,7 @@ fn decode_integer(input: &[u8], position: &mut usize, prefix: u8) -> Result<usiz
 
 // Huffman (RFC 7541 Section 5.2 and Appendix B).
 
-fn huffman_length(bytes: &[u8]) -> usize {
+pub fn huffman_length(bytes: &[u8]) -> usize {
     let bits: usize = bytes.iter().map(|&b| HUFFMAN[b as usize].1 as usize).sum();
     bits.div_ceil(8)
 }
@@ -80,6 +80,47 @@ fn huffman_encode(bytes: &[u8], output: &mut Vec<u8>) {
     if count > 0 {
         // Pad with the most significant bits of EOS, which are all ones.
         output.push(((pending << (8 - count)) | (0xff >> count)) as u8);
+    }
+}
+
+/// Huffman-codes a string a piece at a time, into whatever room the caller
+/// has.
+pub struct HuffmanEncoder<'a> {
+    input: &'a [u8],
+    pending: u64,
+    count: u32,
+}
+impl<'a> HuffmanEncoder<'a> {
+    pub fn new(input: &'a [u8]) -> Self {
+        Self {
+            input,
+            pending: 0,
+            count: 0,
+        }
+    }
+    /// Fill as much of `output` as there is coded output for; 0 once done.
+    pub fn fill(&mut self, output: &mut [u8]) -> usize {
+        let mut filled = 0;
+        while filled < output.len() {
+            if self.count >= 8 {
+                self.count -= 8;
+                output[filled] = (self.pending >> self.count) as u8;
+                filled += 1;
+            } else if let Some((&byte, rest)) = self.input.split_first() {
+                let (code, length) = HUFFMAN[byte as usize];
+                self.pending = (self.pending << length) | code as u64;
+                self.count += length as u32;
+                self.input = rest;
+            } else if self.count > 0 {
+                // Pad as `huffman_encode` does.
+                output[filled] = ((self.pending << (8 - self.count)) | (0xff >> self.count)) as u8;
+                self.count = 0;
+                filled += 1;
+            } else {
+                break;
+            }
+        }
+        filled
     }
 }
 
@@ -164,32 +205,48 @@ fn huffman_decoder() -> &'static HuffmanDecoder {
     })
 }
 
-fn huffman_decode(input: &[u8], output: &mut Vec<u8>) -> Result<(), FieldError> {
-    let decoder = huffman_decoder();
-    let mut state = 0usize;
-    for &byte in input {
-        for nibble in [byte >> 4, byte & 0x0f] {
-            let step = decoder.steps[state * 16 + nibble as usize];
-            if step.failed {
-                return Err(FieldError::Huffman);
+/// A Huffman-coded string decoded piece by piece.
+#[derive(Default)]
+pub struct Huffman {
+    state: usize,
+}
+impl Huffman {
+    pub fn feed(&mut self, input: &[u8], output: &mut Vec<u8>) -> Result<(), FieldError> {
+        let decoder = huffman_decoder();
+        for &byte in input {
+            for nibble in [byte >> 4, byte & 0x0f] {
+                let step = decoder.steps[self.state * 16 + nibble as usize];
+                if step.failed {
+                    return Err(FieldError::Huffman);
+                }
+                if let Some(symbol) = step.symbol {
+                    output.push(symbol);
+                }
+                self.state = step.next as usize;
             }
-            if let Some(symbol) = step.symbol {
-                output.push(symbol);
-            }
-            state = step.next as usize;
+        }
+        Ok(())
+    }
+    /// Check that the string ended with valid padding.
+    pub fn finish(self) -> Result<(), FieldError> {
+        if huffman_decoder().accepting[self.state] {
+            Ok(())
+        } else {
+            Err(FieldError::Huffman)
         }
     }
-    if decoder.accepting[state] {
-        Ok(())
-    } else {
-        Err(FieldError::Huffman)
-    }
+}
+
+fn huffman_decode(input: &[u8], output: &mut Vec<u8>) -> Result<(), FieldError> {
+    let mut huffman = Huffman::default();
+    huffman.feed(input, output)?;
+    huffman.finish()
 }
 
 // String literals: an H flag, a length with a prefix of `prefix` bits, then
 // the octets, Huffman-coded when that is shorter.
 
-fn encode_string(value: &[u8], prefix: u8, flags: u8, output: &mut Vec<u8>) {
+pub fn encode_string(value: &[u8], prefix: u8, flags: u8, output: &mut Vec<u8>) {
     let coded = huffman_length(value);
     if coded < value.len() {
         encode_integer(coded, prefix, flags | (1 << prefix), output);
@@ -200,7 +257,7 @@ fn encode_string(value: &[u8], prefix: u8, flags: u8, output: &mut Vec<u8>) {
     }
 }
 
-fn decode_string(
+pub fn decode_string(
     input: &[u8],
     position: &mut usize,
     prefix: u8,
@@ -360,6 +417,16 @@ pub mod qpack {
         LOOKUP.get_or_init(|| lookup(&QPACK_STATIC))
     }
 
+    /// The static table index of this exact field, if any.
+    pub fn static_field(name: &str, value: &str) -> Option<usize> {
+        table().exact.get(&(name, value)).copied()
+    }
+
+    /// The static table index of a field with this name, if any.
+    pub fn static_name(name: &str) -> Option<usize> {
+        table().name.get(name).copied()
+    }
+
     /// Encode a field section that refers to no dynamic table entry.
     pub fn encode<'a>(fields: impl Iterator<Item = (&'a str, &'a str)>, output: &mut Vec<u8>) {
         let table = table();
@@ -381,7 +448,7 @@ pub mod qpack {
         }
     }
 
-    fn entry(index: usize) -> Result<(&'static str, &'static str), FieldError> {
+    pub fn entry(index: usize) -> Result<(&'static str, &'static str), FieldError> {
         QPACK_STATIC.get(index).copied().ok_or(FieldError::Index)
     }
 
@@ -461,6 +528,27 @@ mod tests {
             let mut decoded = Vec::new();
             huffman_decode(&encoded, &mut decoded).unwrap();
             assert_eq!(decoded, text.as_bytes());
+        }
+    }
+
+    #[test]
+    fn huffman_encodes_the_same_a_piece_at_a_time() {
+        let input: Vec<u8> = (0..=255)
+            .chain(b"no-cache, private".iter().copied())
+            .collect();
+        let mut whole = Vec::new();
+        huffman_encode(&input, &mut whole);
+        for room in [1, 3, 64] {
+            let (mut encoder, mut pieces, mut piece) =
+                (HuffmanEncoder::new(&input), Vec::new(), vec![0; room]);
+            loop {
+                let filled = encoder.fill(&mut piece);
+                if filled == 0 {
+                    break;
+                }
+                pieces.extend_from_slice(&piece[..filled]);
+            }
+            assert_eq!(pieces, whole, "{room}");
         }
     }
 

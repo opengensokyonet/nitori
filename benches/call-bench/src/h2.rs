@@ -20,8 +20,8 @@ use crate::{
     codec::{FrameDecoder, FrameEncoder, Item, Processor},
     common::{
         ByteSink, ByteSource, Counters, Lock, LockKind, LockPerLeaf, Pace, Pacer, PerLock,
-        PollLock, Progress, Sample, TimedLock, counted, lock, plain_read_frame, plain_write_all,
-        poll_read_into, with_lock, woken,
+        PollLock, Progress, Sample, TimedLock, counted, lock, plain_frame_checksum,
+        plain_write_all, poll_read_into, with_lock, woken,
     },
     fields::Fields,
     workload::{Http2, Message, Work, connection_frames, encode_all, total_checksum},
@@ -269,9 +269,10 @@ async fn control<L: Lock>(
 async fn plain_read_all<S: crate::common::PollConsume + ?Sized>(source: &mut S, work: Work) -> u64 {
     let (mut block, mut fields) = (Vec::new(), Fields::default());
     let mut total = 0;
-    while let Some(checksum) = plain_read_frame::<Http2, _>(source, &mut block, &mut fields, work)
-        .await
-        .unwrap()
+    while let Some(checksum) =
+        plain_frame_checksum::<Http2, _>(source, &mut block, &mut fields, work)
+            .await
+            .unwrap()
     {
         total += checksum;
     }
@@ -427,7 +428,7 @@ impl PerLock<BufferedPipe> for RunShared<'_> {
                     let mut total = 0;
                     loop {
                         let mut pipe = lock(shared, &counters.locks).await;
-                        match plain_read_frame::<Http2, _>(
+                        match plain_frame_checksum::<Http2, _>(
                             &mut *pipe,
                             &mut block,
                             &mut fields,
@@ -555,11 +556,13 @@ pub fn run_write(runtime: &Runtime, variant: WriteVariant, input: Input) -> Samp
             let mut writer = PipeWriter::new(server);
             match variant {
                 WriteVariant::Plain => {
-                    let (mut fields, mut header) = (Vec::new(), Vec::new());
+                    let mut fields = Vec::new();
                     for frame in frames {
                         frame.prepare(work);
-                        let (header, payload) = frame.parts::<Http2>(&mut fields, &mut header);
-                        plain_write_all(&mut writer, header).await.unwrap();
+                        let (header, payload) = frame.parts::<Http2>(&mut fields);
+                        for piece in header {
+                            plain_write_all(&mut writer, &piece).await.unwrap();
+                        }
                         plain_write_all(&mut writer, payload).await.unwrap();
                     }
                     poll_fn(|cx| ByteSink::poll_flush(&mut writer, cx))
