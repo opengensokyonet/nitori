@@ -124,19 +124,22 @@ pub(crate) mod cells {
             // The previous poll ended at a release point; this poll answers
             // by lending the view again or not.
             let offered = self.release.replace(false);
-            let lent = lend.is_some();
+            let (lent, releasable) = match lend {
+                Some(lend) => {
+                    let releasable = lend.is_releasable();
+                    self.view.set(Some(lend.into_inner().into_raw()));
+                    self.lender.set(ThreadMark::current());
+                    (true, releasable)
+                }
+                None => (false, false),
+            };
+            self.releasable.set(releasable);
             self.kept.set(offered && lent);
             // Set only here, and cleared when the branches are taken right
             // after, so it is clear whenever the call does not intercept.
             let answered = intercepting && (offered || lent) && self.waiting();
             if answered {
                 self.answered.set(true);
-            }
-            self.releasable
-                .set(lend.as_ref().is_some_and(Lend::is_releasable));
-            if let Some(lend) = lend {
-                self.view.set(Some(lend.into_inner().into_raw()));
-                self.lender.set(ThreadMark::current());
             }
             self.root.set(waker);
             self.requested.set(false);
@@ -151,7 +154,6 @@ pub(crate) mod cells {
         #[inline]
         fn clear(&self) {
             self.view.set(None);
-            self.lender.set(ThreadMark::NONE);
             self.root.clear();
         }
         #[inline]

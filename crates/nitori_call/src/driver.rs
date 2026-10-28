@@ -814,10 +814,11 @@ impl<'view, S: Source<'view>, L: Lender<S::Family>> Acquisitions<'view, L> for S
     fn acquire(
         self: Pin<&mut Self>,
         held: Pin<&mut S::Held>,
-        needed: bool,
+        _needed: bool,
         cx: &mut Context<'_>,
     ) -> bool {
-        needed && !S::holds(&held) && self.fill(held, cx)
+        // The only slot is the one that needs a view.
+        S::holds(&held) || self.fill(held, cx)
     }
     #[inline(always)]
     fn release(self: Pin<&mut Self>, held: Pin<&mut S::Held>, offered: bool) {

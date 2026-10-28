@@ -562,18 +562,25 @@ where
         let intercepting = intercept
             .get()
             .map(|intercept| intercepting_waker(intercept, cx.waker()));
-        let intercepts = intercepting.is_some();
-        let waker = intercepting.as_ref().unwrap_or(cx.waker());
         let guard = LendGuard::<R> { cells, poisoned };
         // Branches wait only once the call intercepts: it starts to after
-        // the first poll in which one asked.
+        // the first poll in which one asked. Lending with that known lets
+        // the common path skip the checks for waiting branches.
         // SAFETY: the lends outlive this function, whose guard clears them.
-        let answered = unsafe { cells.lend(lends, waker, intercepts) };
-        // A view, or the answer to an offer, wakes the branches waiting for
-        // that slot.
-        if answered {
-            replay::<R>(intercept, cells);
-        }
+        let waker = match &intercepting {
+            None => {
+                unsafe { cells.lend(lends, cx.waker(), false) };
+                cx.waker()
+            }
+            Some(waker) => {
+                // A view, or the answer to an offer, wakes the branches
+                // waiting for that slot.
+                if unsafe { cells.lend(lends, waker, true) } {
+                    replay::<R>(intercept, cells);
+                }
+                waker
+            }
+        };
         let start = |operation: Op| {
             // SAFETY: the call is pinned, so the cells keep their address, and
             // the future holding the slots and the emitter is dropped before
@@ -588,7 +595,7 @@ where
             unsafe { step_operation(state, emitted, start, &mut Context::from_waker(waker)) };
         drop(guard);
         // Even a poll that emits an item may leave a branch waiting.
-        if !intercepts && cells.waiting() {
+        if intercepting.is_none() && cells.waiting() {
             intercept.get_or_init(|| Arc::new(Intercept::new()));
         }
         let poll = match poll {

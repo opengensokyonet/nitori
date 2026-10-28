@@ -40,7 +40,8 @@ impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
 /// threads share no state.
 pub struct ViewCell<F: ReceiverFamily> {
     pub(crate) view: Cell<Option<RawViewLoan<F>>>,
-    /// The thread that lent the view: the only one allowed to use it.
+    /// The thread that lent the view: the only one allowed to use it. Read
+    /// only while a view is lent, so it keeps the last lender between polls.
     pub(crate) lender: Cell<ThreadMark>,
     /// Whether the lender may release this poll's view at a release point.
     pub(crate) releasable: Cell<bool>,
@@ -77,17 +78,15 @@ impl<F: ReceiverFamily> ViewCell<F> {
     #[inline]
     pub(crate) fn waiting(&self) -> bool {
         // SAFETY: the branches change only through take and set, and no
-        // reference to them outlives this read.
-        unsafe { &*self.branches.as_ptr() }
-            .as_ref()
-            .is_some_and(|branches| !branches.is_empty())
+        // reference to them outlives this read. The list exists only while
+        // it is not empty.
+        unsafe { &*self.branches.as_ptr() }.is_some()
     }
     /// Move the waiting branches to `out`.
     #[cold]
     pub(crate) fn take_branches(&self, out: &mut Vec<Waker>) {
         if let Some(mut branches) = self.branches.take() {
             out.append(&mut branches);
-            self.branches.set(Some(branches));
         }
     }
     fn release_point(&self) -> ReleasePoint<'_> {
@@ -102,8 +101,8 @@ impl<F: ReceiverFamily> ViewCell<F> {
     }
 }
 
-/// The branches waiting for a slot. Boxed so that an idle cell spends one
-/// word on them, as most never have any.
+/// The branches waiting for a slot: present only while some branch waits, so
+/// that an idle cell spends one word on them, as most never have any.
 #[allow(clippy::box_collection)]
 type Branches = Cell<Option<Box<Vec<Waker>>>>;
 
