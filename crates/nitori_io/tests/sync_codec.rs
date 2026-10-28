@@ -4,7 +4,7 @@ use nitori_call::{CallExecutor, ReceiverAccess, call};
 use nitori_io::PollReadExt as _;
 use nitori_io::{
     Read, Write,
-    calls::{ReadArrayError, ReadArrayExt as _, WriteAllError, WriteAllExt as _, WriteReturn},
+    calls::{ReadArrayError, ReadArrayExt as _, WriteAllError, WriteAllExt as _},
 };
 use std::{
     future::Future,
@@ -22,10 +22,10 @@ async fn header<A: ReceiverAccess<Family: Read>>(
     Ok([tag, rest[0], rest[1]])
 }
 #[call(sync)]
-async fn encode<'input, A: ReceiverAccess<Family: Write>>(
+async fn encode<A: ReceiverAccess<Family: Write>>(
     io: &mut A,
-    input: &'input [u8],
-) -> WriteReturn<&'input [u8], WriteAllError<<A::Family as Write>::Error>> {
+    input: &mut &[u8],
+) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
     io.write_all(input).await
 }
 #[call(sync, yields = [u8; 3])]
@@ -47,12 +47,10 @@ fn memory_codec_reports_natural_incomplete_and_preserves_cursor() {
     assert_eq!(error.completed(), 1);
     assert!(source.is_empty());
     let mut storage = [0; 2];
-    let returned = storage.as_mut_slice().sync_encode_unpin(b"abcd");
-    assert_eq!(returned.input, b"cd");
-    assert!(matches!(
-        returned.result,
-        Err(WriteAllError::WriteZero { .. })
-    ));
+    let mut input = &b"abcd"[..];
+    let result = storage.as_mut_slice().sync_encode_unpin(&mut input);
+    assert_eq!(input, b"cd");
+    assert!(matches!(result, Err(WriteAllError::WriteZero { .. })));
     assert_eq!(storage, *b"ab");
 }
 #[test]

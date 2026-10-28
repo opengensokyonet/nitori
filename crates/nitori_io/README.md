@@ -29,9 +29,9 @@ use nitori_call::{ReceiverAccess, call};
 use nitori_io::{calls::ReadExactError, prelude::*};
 
 #[call(sync)]
-async fn header<A: ReceiverAccess<Family: Read>>(
+async fn header<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 3], ReadExactError<<A::Family as Read>::Error>> {
+) -> Result<[u8; 3], ReadExactError<F::Error>> {
     let [tag] = io.read_array::<1>().await?;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
@@ -58,7 +58,7 @@ may stay borrowed across Pending.
 | `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<F::Error>>` |
 | `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; `Result<usize, ReadChunksError<F::Error>>` |
 | `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; `Result<(), ReadChunksExactError<F::Error>>` |
-| `WriteAll::new(input)` | `WriteReturn<Input, WriteAllError<F::Error>>` |
+| `WriteAll::new(input)` | `Result<(), WriteAllError<F::Error>>` |
 | `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<F::Error>>` |
 | `ReadLe::<T>::new()` | `Result<T, ReadLeError<F::Error>>` |
 | `ReadBe::<T>::new()` | `Result<T, ReadBeError<F::Error>>` |
@@ -172,13 +172,13 @@ use nitori_io::{adapters::WriteLimit, calls::WriteAllError, prelude::*};
 
 /// Write `payload` only if it fits in `room` bytes; report what is left.
 #[call(sync)]
-async fn write_bounded<A: ReceiverAccess<Family: Write>>(
+async fn write_bounded<F: Write, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     payload: &[u8],
     room: usize,
-) -> (usize, Result<usize, WriteAllError<<A::Family as Write>::Error>>) {
+) -> (usize, Result<(), WriteAllError<F::Error>>) {
     let mut bounded = io.compose(WriteLimit(room));
-    let result = bounded.write_all(payload).await.result;
+    let result = bounded.write_all(payload).await;
     (bounded.into_state().0, result)
 }
 
@@ -220,9 +220,9 @@ diagnostics transparently; host variants retain the original source directly.
 Array/numeric failures report progress but do not return the partial array.
 
 `write::Write` borrows its input cursor and advances it by the accepted count.
-`WriteAll` owns its input and completes with a `WriteReturn` containing `input`
-and `result`, on success and on ordinary failure; its errors report total
-accepted bytes and preserve the remaining tail. A nonempty successful zero write is a
+`WriteAll` takes any `Buf` by value; pass `&mut buffer` to keep the cursor,
+which after a failure or cancellation holds the unaccepted tail. Its errors
+report the total accepted bytes. A nonempty successful zero write is a
 `WriteZero` failure. Accepted bytes do not imply flushing or remote delivery.
 
 Derived operations retain progress across Pending. Dropping a call does not

@@ -213,7 +213,6 @@ fn named_write_preserves_partial_progress_across_pending() {
     let CallPoll::Ready(returned) = poll(call.as_mut(), &mut output) else {
         panic!("expected completion")
     };
-    assert_eq!(returned.result.unwrap(), 3);
-    assert!(returned.input.is_empty());
+    returned.unwrap();
     assert_eq!(output.bytes, b"abc");
 }

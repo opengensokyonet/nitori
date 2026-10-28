@@ -14,14 +14,14 @@ use std::{
 };
 
 #[call(sync, yields = usize)]
-async fn write_line<A: ReceiverAccess<Family: Write>>(
+async fn write_line<F: Write, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     line: &[u8],
-) -> Result<usize, WriteAllError<<A::Family as Write>::Error>> {
-    let written = io.write_all(line).await.result?;
-    yield written;
-    io.write_all(b"\n".as_slice()).await.result?;
-    Ok(written + 1)
+) -> Result<usize, WriteAllError<F::Error>> {
+    io.write_all(line).await?;
+    yield line.len();
+    io.write_all(b"\n".as_slice()).await?;
+    Ok(line.len() + 1)
 }
 
 fn main() {

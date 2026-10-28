@@ -6,16 +6,16 @@ use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
 
 // This parser can be reused with either an unrestricted or a limited receiver.
 #[call(sync)]
-async fn read_word<A: ReceiverAccess<Family: Read>>(
+async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 2], ReadArrayError<<A::Family as Read>::Error>> {
+) -> Result<[u8; 2], ReadArrayError<F::Error>> {
     io.read_array::<2>().await
 }
 
 #[call(sync)]
-async fn read_record<A: ReceiverAccess<Family: Read>>(
+async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 2], ReadArrayError<<A::Family as Read>::Error>> {
+) -> Result<[u8; 2], ReadArrayError<F::Error>> {
     let [length] = io.read_array::<1>().await?;
     io.compose(ReadLimit(usize::from(length))).read_word().await
 }

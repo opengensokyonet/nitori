@@ -138,10 +138,10 @@ async fn write_limited<A: ReceiverAccess<Family: Write>>(
     payload: &[u8],
 ) -> (
     usize,
-    Result<usize, WriteAllError<<A::Family as Write>::Error>>,
+    Result<(), WriteAllError<<A::Family as Write>::Error>>,
 ) {
     let mut limited = io.compose(WriteLimit(budget));
-    let result = limited.write_all(payload).await.result;
+    let result = limited.write_all(payload).await;
     (limited.into_state().0, result)
 }
 
@@ -149,7 +149,8 @@ async fn write_limited<A: ReceiverAccess<Family: Write>>(
 fn write_limit_accepts_the_budget_then_nothing() {
     let mut output = Vec::new();
     let (left, result) = output.sync_write_limited_unpin(3, b"ab");
-    assert_eq!((left, result.unwrap()), (1, 2));
+    assert_eq!(left, 1);
+    result.unwrap();
     let (left, result) = output.sync_write_limited_unpin(1, b"cd");
     assert_eq!(left, 0);
     let error = result.unwrap_err();

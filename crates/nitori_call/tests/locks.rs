@@ -24,13 +24,13 @@ async fn write_when_open<A: ReceiverAccess<Family: Write>>(
     io: &mut A,
     open: &Cell<bool>,
     message: &[u8],
-) -> Result<usize, WriteAllError<<A::Family as Write>::Error>> {
+) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
     poll_fn(|_| match open.get() {
         true => Poll::Ready(()),
         false => Poll::Pending,
     })
     .await;
-    io.write_all(message).await.result
+    io.write_all(message).await
 }
 
 /// Writes, computes without the view, and writes again.
@@ -38,20 +38,17 @@ async fn write_when_open<A: ReceiverAccess<Family: Write>>(
 async fn write_compute_write<A: ReceiverAccess<Family: Write>>(
     io: &mut A,
     during: &dyn Fn(),
-) -> Result<usize, WriteAllError<<A::Family as Write>::Error>> {
-    io.write_all(&b"a"[..]).await.result?;
+) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
+    io.write_all(&b"a"[..]).await?;
     io.release_view().await;
     during();
-    io.write_all(&b"b"[..]).await.result
+    io.write_all(&b"b"[..]).await
 }
 
 #[test]
 fn operations_run_on_the_value_behind_a_std_mutex() {
     let output = std::sync::Mutex::new(Vec::new());
-    assert_eq!(
-        (&output).sync_write_all_unpin(&b"hi"[..]).result.unwrap(),
-        2
-    );
+    (&output).sync_write_all_unpin(&b"hi"[..]).unwrap();
     assert_eq!(*output.lock().unwrap(), b"hi");
 }
 
@@ -88,7 +85,7 @@ fn composing_keeps_whether_the_view_is_releasable() {
         Guarded,
         WriteComputeWrite::new(&held)
     ));
-    assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(value)) if value == 1));
+    assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(()))));
     assert_eq!(*output.lock().unwrap(), b"ab");
 }
 
@@ -158,7 +155,7 @@ fn a_composition_reaches_one_part_of_the_locked_value() {
             Poll::Pending => panic!("memory writes complete at once"),
         }
     };
-    assert_eq!(write(1, b"one").unwrap(), 3);
+    write(1, b"one").unwrap();
     connection.lock().unwrap().streams.remove(&2);
     assert_eq!(write(2, b"two").unwrap_err().host_error(), Some(&Closed));
     assert_eq!(connection.lock().unwrap().streams[&1], b"one");
@@ -179,7 +176,7 @@ mod tokio_sync {
         assert!(poll_once(write.as_mut()).is_pending());
         assert!(output.try_lock().is_ok());
         open.set(true);
-        assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(value)) if value == 4));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(()))));
         assert_eq!(*output.try_lock().unwrap(), b"PING");
     }
 
@@ -188,7 +185,7 @@ mod tokio_sync {
         let output = Mutex::new(Vec::new());
         let free = || assert!(output.try_lock().is_ok(), "locked while computing");
         let mut write = pin!((&output).write_compute_write_unpin(&free));
-        assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(value)) if value == 1));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(()))));
         assert_eq!(*output.try_lock().unwrap(), b"ab");
     }
 
@@ -243,7 +240,7 @@ mod futures_lock {
         assert!(poll_once(write.as_mut()).is_pending());
         assert!(output.try_lock().is_some());
         open.set(true);
-        assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(value)) if value == 4));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Ready(Ok(()))));
         assert_eq!(*output.try_lock().unwrap(), b"PING");
     }
 }

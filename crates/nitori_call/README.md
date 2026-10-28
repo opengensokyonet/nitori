@@ -36,13 +36,13 @@ use nitori_io::{calls::WriteAllError, prelude::*};
 use std::future::Future;
 
 #[call(sync)]
-async fn send<A: ReceiverAccess<Family: Write>, Permission: Future<Output = ()>>(
+async fn send<F: Write, A: ReceiverAccess<Family = F>, Permission: Future<Output = ()>>(
     io: &mut A,
     permission: Permission,
     message: &[u8],
-) -> Result<usize, WriteAllError<<A::Family as Write>::Error>> {
+) -> Result<(), WriteAllError<F::Error>> {
     permission.await;
-    io.write_all(message).await.result
+    io.write_all(message).await
 }
 # fn main() {}
 ```
@@ -64,10 +64,10 @@ use nitori_call::{ReceiverAccess, call};
 use nitori_io::{calls::ReadExactError, prelude::*};
 
 #[call(sync)]
-async fn read_record<A: ReceiverAccess<Family: Read>>(
+async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     output: &mut Vec<u8>,
-) -> Result<usize, ReadExactError<<A::Family as Read>::Error>> {
+) -> Result<usize, ReadExactError<F::Error>> {
     let [length] = io.read_array::<1>().await?;
     io.read_exact(output, usize::from(length)).await?;
     Ok(usize::from(length))
@@ -82,10 +82,15 @@ fn main() {
 }
 ```
 
-The first parameter is the access, `&mut impl ReceiverAccess<Family: ..>` or
-`&mut A` with such a bound; the family bound says which capabilities the
-operation needs. Arguments, outputs and items may mention the access only
-through `A::Family`. Crates that define operations enable
+The first parameter is the access, `&mut A` with `A: ReceiverAccess<Family = F>`
+or `&mut impl ReceiverAccess<Family = F>`, where the type parameter `F` is
+bounded by the capabilities the operation needs; the operation is defined for
+every family with those bounds. The output and the items can then write an
+associated type of a capability as `F::Error`; arguments and where clauses
+name it with its trait, as `<F as Write>::Error`. The access can also bound
+its family directly, as `ReceiverAccess<Family: Write>`, and write
+`<A::Family as Write>::Error`. Arguments, outputs and items may mention the
+access only through its family. Crates that define operations enable
 `impl_trait_in_assoc_type`.
 
 `#[call]` keeps the function and generates:
@@ -94,9 +99,10 @@ through `A::Family`. Crates that define operations enable
   arguments as public fields and a `new` constructor; an argument written as a
   pattern, such as `(start, end): (u8, u8)`, is destructured by the function
   and its field is named `argument_N` after its position, counting the access
-  as 0. When an argument's type mentions `A::Family`, the struct takes the
-  family as a last type parameter `Family` and is an operation of that family
-  only. Built directly rather than through the generated methods, it needs
+  as 0. When an argument's type mentions the family, the struct takes the
+  family as a last type parameter, named `F` as in the function, or `Family`
+  when the access bounds its family directly, and is an operation of that
+  family only. Built directly rather than through the generated methods, it needs
   the family named, as in `Call::<F, _>::new(..)`;
 - `ReadRecordExt`, with the method `io.read_record(..)` on receiver accesses
   inside other operations;
@@ -186,10 +192,10 @@ use nitori_io::{calls::ReadChunksError, prelude::*};
 use std::{num::NonZeroUsize, ops::ControlFlow, pin::pin};
 
 #[call(yields = usize)]
-async fn count_chunks<A: ReceiverAccess<Family: ReadChunk>>(
+async fn count_chunks<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     length: usize,
-) -> Result<usize, ReadChunksError<<A::Family as Read>::Error>> {
+) -> Result<usize, ReadChunksError<F::Error>> {
     let mut chunks = pin!(io.read_chunks(length, NonZeroUsize::new(4).unwrap()));
     let mut count = 0;
     loop {
@@ -236,16 +242,16 @@ use nitori_call::{ReceiverAccess, call};
 use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
 
 #[call(sync)]
-async fn read_word<A: ReceiverAccess<Family: Read>>(
+async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 2], ReadArrayError<<A::Family as Read>::Error>> {
+) -> Result<[u8; 2], ReadArrayError<F::Error>> {
     io.read_array::<2>().await
 }
 
 #[call(sync)]
-async fn read_record<A: ReceiverAccess<Family: Read>>(
+async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 2], ReadArrayError<<A::Family as Read>::Error>> {
+) -> Result<[u8; 2], ReadArrayError<F::Error>> {
     let [length] = io.read_array::<1>().await?;
     io.compose(ReadLimit(usize::from(length))).read_word().await
 }
@@ -343,9 +349,9 @@ use std::{ops::ControlFlow, pin::pin};
 
 /// Length-prefixed records, until an empty one.
 #[call(yields = Vec<u8>)]
-async fn read_records<A: ReceiverAccess<Family: Read>>(
+async fn read_records<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<(), ReadExactError<<A::Family as Read>::Error>> {
+) -> Result<(), ReadExactError<F::Error>> {
     loop {
         let [length] = io.read_array::<1>().await?;
         if length == 0 {
@@ -358,10 +364,10 @@ async fn read_records<A: ReceiverAccess<Family: Read>>(
 }
 
 #[call(sync)]
-async fn collect_records<A: ReceiverAccess<Family: Read>>(
+async fn collect_records<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     records: &mut Vec<Vec<u8>>,
-) -> Result<(), ReadExactError<<A::Family as Read>::Error>> {
+) -> Result<(), ReadExactError<F::Error>> {
     let mut items = pin!(io.read_records());
     loop {
         match items.as_mut().next_event().await {
@@ -411,7 +417,7 @@ use std::sync::Mutex;
 
 fn main() {
     let output = Mutex::new(Vec::new());
-    assert_eq!((&output).sync_write_all_unpin(&b"PING"[..]).result.unwrap(), 4);
+    (&output).sync_write_all_unpin(&b"PING"[..]).unwrap();
     assert_eq!(*output.lock().unwrap(), b"PING");
 }
 ```

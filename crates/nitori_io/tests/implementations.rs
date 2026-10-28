@@ -216,7 +216,7 @@ fn operations_extend_actual_resources_and_forwarding_receivers() {
         let Poll::Ready(result) = call.as_mut().poll(&mut cx()) else {
             panic!("ready")
         };
-        assert_eq!(result.result.unwrap(), 4);
+        result.unwrap();
     }
     assert_eq!(output, b"abcd");
 }

@@ -15,9 +15,9 @@ use std::{
 };
 
 #[call(sync)]
-async fn read_pair<A: ReceiverAccess<Family: Read>>(
+async fn read_pair<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<u16, ReadBeError<<A::Family as Read>::Error>> {
+) -> Result<u16, ReadBeError<F::Error>> {
     let first = io.read_be::<u8>().await?;
     let second = io.read_be::<u8>().await?;
     Ok(u16::from(first) + u16::from(second))

@@ -20,9 +20,9 @@ pub enum CodecError<E> {
 }
 
 #[call]
-pub async fn read_varint<A: ReceiverAccess<Family: Read>>(
+pub async fn read_varint<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<u64, ReadBeError<<A::Family as Read>::Error>> {
+) -> Result<u64, ReadBeError<F::Error>> {
     let first = io.read_be::<u8>().await?;
     let length = 1usize << (first >> 6);
     let mut value = u64::from(first & 0x3f);
@@ -32,11 +32,11 @@ pub async fn read_varint<A: ReceiverAccess<Family: Read>>(
     Ok(value)
 }
 
-#[call(sync, yields = <A::Family as ReadChunk>::Chunk)]
-pub async fn read_data_frame<A: ReceiverAccess<Family: ReadChunk>>(
+#[call(sync, yields = F::Chunk)]
+pub async fn read_data_frame<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     chunk_size: NonZeroUsize,
-) -> Result<usize, CodecError<<A::Family as Read>::Error>> {
+) -> Result<usize, CodecError<F::Error>> {
     let frame_type = io.read_varint().await.context(HeaderSnafu)?;
     if frame_type != 0 {
         return WrongTypeSnafu { actual: frame_type }.fail();

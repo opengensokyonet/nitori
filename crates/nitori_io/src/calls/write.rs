@@ -8,32 +8,23 @@ use bytes::Buf;
 use nitori_call::{ReceiverAccess, call};
 use snafu::{IntoError, Snafu};
 
-/// A write completion returns the remaining input even on error.
-#[derive(Debug)]
-pub struct WriteReturn<B, E> {
-    pub input: B,
-    pub result: Result<usize, E>,
-}
-
-/// Accept all input, preserving the unaccepted tail and count on failure.
+/// Accept all of `input`. Pass `&mut buffer` to keep the cursor: after a
+/// failure or cancellation it holds the unaccepted tail.
 #[call(sync)]
-pub async fn write_all<A, B>(
-    io: &mut A,
+pub async fn write_all<F, B>(
+    io: &mut impl ReceiverAccess<Family = F>,
     input: B,
-) -> WriteReturn<B, WriteAllError<<A::Family as WriteHost>::Error>>
+) -> Result<(), WriteAllError<F::Error>>
 where
-    A: ReceiverAccess<Family: WriteHost>,
+    F: WriteHost,
     B: Buf,
 {
     let mut input = input;
     let mut completed = 0;
-    let result = loop {
-        if !input.has_remaining() {
-            break Ok(completed);
-        }
+    while input.has_remaining() {
         let before = input.remaining();
         match io.write(&mut input).await {
-            Ok(0) => break Err(error::WriteZeroSnafu { completed }.build().into()),
+            Ok(0) => return Err(error::WriteZeroSnafu { completed }.build().into()),
             Ok(count) => {
                 assert_eq!(
                     before.checked_sub(input.remaining()),
@@ -43,11 +34,11 @@ where
                 completed += count;
             }
             Err(source) => {
-                break Err(write_all_error::ReceiverSnafu { completed }.into_error(source));
+                return Err(write_all_error::ReceiverSnafu { completed }.into_error(source));
             }
         }
-    };
-    WriteReturn { input, result }
+    }
+    Ok(())
 }
 
 /// Failures that [`write_all`] can produce.
@@ -80,14 +71,14 @@ impl<E> WriteAllError<E> {
 
 /// Write a fixed-size array completely.
 #[call(sync)]
-pub async fn write_array<const LENGTH: usize, A>(
-    io: &mut A,
+pub async fn write_array<const LENGTH: usize, F>(
+    io: &mut impl ReceiverAccess<Family = F>,
     bytes: [u8; LENGTH],
-) -> Result<(), WriteArrayError<<A::Family as WriteHost>::Error>>
+) -> Result<(), WriteArrayError<F::Error>>
 where
-    A: ReceiverAccess<Family: WriteHost>,
+    F: WriteHost,
 {
-    write_all(io, bytes.as_ref()).await.result?;
+    write_all(io, bytes.as_ref()).await?;
     Ok(())
 }
 
@@ -132,15 +123,15 @@ impl<E> From<WriteAllError<E>> for WriteArrayError<E> {
 
 /// Encode a primitive number in little endian and write it completely.
 #[call(sync)]
-pub async fn write_le<T: EndianValue, A>(
-    io: &mut A,
+pub async fn write_le<T: EndianValue, F>(
+    io: &mut impl ReceiverAccess<Family = F>,
     value: T,
-) -> Result<(), WriteLeError<<A::Family as WriteHost>::Error>>
+) -> Result<(), WriteLeError<F::Error>>
 where
-    A: ReceiverAccess<Family: WriteHost>,
+    F: WriteHost,
 {
     let bytes = value.to_le();
-    write_all(io, bytes.as_ref()).await.result?;
+    write_all(io, bytes.as_ref()).await?;
     Ok(())
 }
 
@@ -185,15 +176,15 @@ impl<E> From<WriteAllError<E>> for WriteLeError<E> {
 
 /// Encode a primitive number in big endian and write it completely.
 #[call(sync)]
-pub async fn write_be<T: EndianValue, A>(
-    io: &mut A,
+pub async fn write_be<T: EndianValue, F>(
+    io: &mut impl ReceiverAccess<Family = F>,
     value: T,
-) -> Result<(), WriteBeError<<A::Family as WriteHost>::Error>>
+) -> Result<(), WriteBeError<F::Error>>
 where
-    A: ReceiverAccess<Family: WriteHost>,
+    F: WriteHost,
 {
     let bytes = value.to_be();
-    write_all(io, bytes.as_ref()).await.result?;
+    write_all(io, bytes.as_ref()).await?;
     Ok(())
 }
 

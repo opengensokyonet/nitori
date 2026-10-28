@@ -369,24 +369,25 @@ fn write_ownership_borrowing_and_partial_errors() {
         Pin::new(&mut sink),
         WriteAll::new(&mut input),
     ));
-    let error = result.result.unwrap_err();
+    let error = result.unwrap_err();
     assert_eq!(error.completed(), 2);
     assert!(error.host_error().is_some());
     assert_eq!(input, b"ghij"[..]);
     assert_eq!(sink.bytes, b"abef");
     let mut sink = Sink::new();
     sink.zero = true;
+    let mut input = Bytes::from_static(b"x");
     let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
-        WriteAll::new(Bytes::from_static(b"x")),
+        WriteAll::new(&mut input),
     ));
     assert!(matches!(
-        result.result.unwrap_err(),
+        result.unwrap_err(),
         WriteAllError::WriteZero {
             source: WriteZero { completed: 0 }
         }
     ));
-    assert_eq!(result.input, b"x"[..]);
+    assert_eq!(input, b"x"[..]);
 }
 
 #[test]
@@ -398,7 +399,7 @@ fn segmented_and_unsized_buffers() {
         Pin::new(&mut sink),
         WriteAll::new(input),
     ));
-    assert_eq!(result.result.unwrap(), 5);
+    result.unwrap();
     assert_eq!(sink.bytes, b"abcde");
     let mut source = Source::new(b"abcde");
     let mut left = [0; 2];
@@ -546,15 +547,11 @@ fn zero_composites_are_noops_but_basic_requests_reach_host() {
     );
     let mut sink = Sink::new();
     sink.fail_at = Some(0);
-    assert_eq!(
-        run(CallExecutor::execute(
-            Pin::new(&mut sink),
-            WriteAll::new(&b""[..])
-        ))
-        .result
-        .unwrap(),
-        0
-    );
+    run(CallExecutor::execute(
+        Pin::new(&mut sink),
+        WriteAll::new(&b""[..]),
+    ))
+    .unwrap();
     assert!(
         run(CallExecutor::execute(
             Pin::new(&mut sink),
@@ -782,22 +779,18 @@ fn host_errors_need_neither_error_trait_nor_static_lifetime() {
 #[call]
 async fn borrowed_write<A: ReceiverAccess<Family: WriteHost>>(
     io: &mut A,
-) -> Result<usize, nitori_io::calls::WriteAllError<<A::Family as WriteHost>::Error>> {
+) -> Result<(), nitori_io::calls::WriteAllError<<A::Family as WriteHost>::Error>> {
     let mut input = Bytes::from_static(b"abc");
-    let returned = io.write_all(&mut input).await;
-    returned.result
+    io.write_all(&mut input).await
 }
 #[test]
 fn family_write_borrows_local_input() {
     let mut host = Sink::new();
-    assert_eq!(
-        run(CallExecutor::execute(
-            Pin::new(&mut host),
-            BorrowedWrite::new()
-        ))
-        .unwrap(),
-        3
-    );
+    run(CallExecutor::execute(
+        Pin::new(&mut host),
+        BorrowedWrite::new(),
+    ))
+    .unwrap();
     assert_eq!(host.bytes, b"abc");
 }
 
@@ -893,14 +886,15 @@ fn operation_errors_accept_borrowed_payloads_without_diagnostic_traits() {
     assert_eq!(error.host_error().unwrap().0, message);
     assert_eq!(error.to_string(), "read failed after 0 bytes");
 
+    let mut input = Bytes::from_static(b"x");
     let returned = run(CallExecutor::execute(
         Pin::new(&mut host),
-        WriteAll::new(Bytes::from_static(b"x")),
+        WriteAll::new(&mut input),
     ));
-    let error = returned.result.err().unwrap();
+    let error = returned.err().unwrap();
     assert_eq!(error.host_error().unwrap().0, message);
     assert_eq!(error.to_string(), "write failed after 0 bytes");
-    assert_eq!(returned.input, b"x"[..]);
+    assert_eq!(input, b"x"[..]);
 }
 
 #[test]
@@ -943,7 +937,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
         Pin::new(&mut host),
         WriteAll::new(Bytes::from_static(b"x")),
     ));
-    let error = returned.result.err().unwrap();
+    let error = returned.err().unwrap();
     assert!(matches!(
         error,
         WriteAllError::WriteZero {
@@ -1011,6 +1005,6 @@ fn local_validation_and_zero_length_composites_do_not_request_a_view() {
     let empty = pin!(Call::<F, _>::new(WriteAll::new(&b""[..])));
     assert!(matches!(
         empty.poll_return_with(None, &mut cx),
-        CallPoll::Ready(WriteReturn { result: Ok(0), .. })
+        CallPoll::Ready(Ok(()))
     ));
 }

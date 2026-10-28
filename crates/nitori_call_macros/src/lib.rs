@@ -119,6 +119,9 @@ struct Operation {
     /// The family as a parameter of the struct, when an argument's type
     /// depends on it.
     family_parameter: Option<Ident>,
+    /// The type parameter naming the family, for an access written
+    /// `ReceiverAccess<Family = F>`.
+    family_name: Option<Ident>,
     output: Type,
     /// The item type of an emitter parameter, for operations that emit.
     yield_type: Option<Type>,
@@ -328,7 +331,11 @@ impl Operation {
             Some(family) => (family, Tokens::new()),
             None => {
                 let bounds = self.family_bound_tokens(Place::Inside);
-                (parse_quote!(__F), quote!(__F: #bounds))
+                let family = self
+                    .family_name
+                    .clone()
+                    .unwrap_or_else(|| format_ident!("__F"));
+                (parse_quote!(#family), quote!(#family: #bounds))
             }
         };
         let family_predicates = self.family_predicates(&family, Place::Inside);
@@ -404,13 +411,20 @@ impl Operation {
         let path = self.struct_path();
         let names = self.names();
         let types = self.types(&family, Place::Outside);
-        let output = self.substitute(self.output.clone(), &family, Place::Outside);
+        let arguments = self.arguments_for(Some(&family));
+        // `F::Name` of a named family is resolved by its bounds, which the
+        // family of an executor does not carry; name the output through the
+        // operation instead.
+        let output: Type = if self.family_name.is_some() && self_shorthand(&self.output).is_some() {
+            parse_quote!(<#path<#arguments> as #runtime::Operation<#family>>::Output)
+        } else {
+            self.substitute(self.output.clone(), &family, Place::Outside)
+        };
         let name = &self.name;
         let unpin = format_ident!("{}_unpin", name);
         let lifetimes = &self.lifetimes;
         let parameters = &self.method_generics.params;
         let predicates = self.predicates(&self.method_generics, &family, Place::Outside);
-        let arguments = self.arguments_for(Some(&family));
         let mut methods = quote! {
             fn #name<'__d, #(#lifetimes,)* #parameters>(
                 self: ::core::pin::Pin<&'__d mut Self>,
@@ -628,7 +642,7 @@ fn primitive(
     // The view and the context come first.
     let mut arguments = arguments(inputs, 2)?;
     let lifetimes = name_lifetimes(&mut arguments, &[], Tokens::new());
-    let family_parameter = family_parameter(&arguments, &item.generics)?;
+    let family_parameter = family_parameter(&arguments, &item.generics, None)?;
     let output = poll_output(&signature.output)?;
 
     // The view lifetime and `Self: 'view` belong to the poll, not the operation.
@@ -665,6 +679,7 @@ fn primitive(
         capability: Some(capability.clone()),
         arguments,
         family_parameter,
+        family_name: None,
         output,
         yield_type: None,
         sync,
@@ -796,7 +811,11 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let mut arguments = arguments(inputs, 1)?;
 
     let mut generics = signature.generics.clone();
-    let (access_name, family_bounds) = take_access_bounds(&access.ty, &mut generics)?;
+    let AccessBounds {
+        access: access_name,
+        bounds: family_bounds,
+        family: family_name,
+    } = take_access_bounds(&access.ty, &mut generics)?;
     // Explicit arguments for calling the function from the operation's future.
     let turbofish: Vec<Tokens> = signature
         .generics
@@ -822,6 +841,37 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         ReturnType::Default => parse_quote!(()),
         ReturnType::Type(_, ty) => (**ty).clone(),
     };
+    if let Some(family) = &family_name {
+        let mut replace = NamedFamilyAsSelf { family };
+        replace.visit_type_mut(&mut output);
+        if let Some(item) = &mut yield_type {
+            replace.visit_type_mut(item);
+        }
+        if let Some(clause) = &mut generics.where_clause {
+            for predicate in clause.predicates.iter_mut() {
+                replace.visit_where_predicate_mut(predicate);
+            }
+        }
+        for argument in &mut arguments {
+            replace.visit_type_mut(&mut argument.ty);
+        }
+        // Conveniences name the family as a projection, on which `F::Name`
+        // does not resolve.
+        let rest = &generics.where_clause;
+        let shorthand = arguments
+            .iter()
+            .find_map(|argument| self_shorthand(&argument.ty))
+            .or_else(|| rest.as_ref().and_then(self_shorthand_in));
+        if let Some(span) = shorthand {
+            return Err(Error::new(
+                span,
+                format!(
+                    "in arguments and where clauses, name an associated type of the family \
+                     with its trait, as in `<{family} as Trait>::Name`"
+                ),
+            ));
+        }
+    }
     if let Some(access_name) = &access_name {
         let mut replace = AccessAsSelf {
             access: access_name,
@@ -877,7 +927,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         .collect();
     let lifetimes = name_lifetimes(&mut arguments, &declared, quote!(#generics #output));
     let anonymous = name_impl_traits(&mut arguments);
-    let family_parameter = family_parameter(&arguments, &signature.generics)?;
+    let family_parameter = family_parameter(&arguments, &signature.generics, family_name.as_ref())?;
     let (trait_generics, mut method_generics) = split_generics(generics, &family_bounds);
     method_generics
         .params
@@ -903,6 +953,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         capability: None,
         arguments,
         family_parameter,
+        family_name: family_name.clone(),
         output,
         yield_type,
         sync: options.sync,
@@ -920,26 +971,39 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let names = operation.names();
     let access_family: Type = parse_quote!(<__A as #runtime::ReceiverAccess>::Family);
     let bounds = operation.family_bound_tokens(Place::Inside);
-    let predicates = operation.family_predicates(&access_family, Place::Inside);
+    // A named family is a parameter of the impl, constrained by the access,
+    // so that `F::Name` resolves as in the function.
+    let (start_family, family_impl_parameter, family_equality): (Type, Tokens, Tokens) =
+        match (&family_name, &operation.family_parameter) {
+            (Some(family), None) => (
+                parse_quote!(#family),
+                quote!(#family: #bounds),
+                quote!(__A: #runtime::ReceiverAccess<Family = #family>,),
+            ),
+            (Some(family), Some(_)) => (parse_quote!(#family), Tokens::new(), Tokens::new()),
+            (None, _) => (access_family.clone(), Tokens::new(), Tokens::new()),
+        };
+    let predicates = operation.family_predicates(&start_family, Place::Inside);
     let access_predicate = operation.access_family_predicate(&quote!(__A));
     let mut definition = operation.struct_definition(false);
     let (emitter_type, emitter_argument) = match &operation.yield_type {
         Some(item) => (
-            operation.substitute(item.clone(), &access_family, Place::Inside),
+            operation.substitute(item.clone(), &start_family, Place::Inside),
             quote!(&mut __emitter),
         ),
         None => (parse_quote!(::core::convert::Infallible), Tokens::new()),
     };
     definition.extend(quote! {
-        impl<'__s, #parameters __A> #runtime::Start<'__s, __A> for #struct_name<#arguments>
+        impl<'__s, #parameters __A, #family_impl_parameter> #runtime::Start<'__s, __A> for #struct_name<#arguments>
         where
             __A: #runtime::ReceiverAccess,
             #access_predicate
+            #family_equality
             <__A as #runtime::ReceiverAccess>::Family: #bounds,
             #(#predicates,)*
         {
             type Fut = impl ::core::future::Future<
-                Output = <Self as #runtime::Operation<<__A as #runtime::ReceiverAccess>::Family>>::Output,
+                Output = <Self as #runtime::Operation<#start_family>>::Output,
             >;
             #[allow(unused_mut, unused_variables)]
             fn start(
@@ -1097,14 +1161,89 @@ fn mentions(tokens: Tokens, name: &str) -> bool {
 }
 
 /// Remove the access type from `generics`; return its name, if it has one,
-/// and the family's bounds.
+/// the family's bounds, and the family's type parameter, if it is named.
 ///
 /// Accepted forms: `&mut impl ReceiverAccess<Family: Bounds>`, or `&mut A`
-/// where `A` is bounded by `ReceiverAccess<Family: Bounds>`.
-fn take_access_bounds(
-    ty: &Type,
+/// where `A` is bounded by `ReceiverAccess<Family: Bounds>`; in either,
+/// `Family = F` with `F: Bounds` a type parameter of the function, which is
+/// removed from `generics` as well.
+fn take_access_bounds(ty: &Type, generics: &mut Generics) -> Result<AccessBounds> {
+    let (access, bound) = take_access(ty, generics)?;
+    match bound {
+        FamilyBound::Bounds(bounds) => Ok(AccessBounds {
+            access,
+            bounds,
+            family: None,
+        }),
+        FamilyBound::Named(family) => {
+            let bounds = take_type_parameter(generics, &family).ok_or_else(|| {
+                Error::new(
+                    family.span(),
+                    "the family must be a type parameter of this function, bounded by the \
+                     capabilities the operation uses",
+                )
+            })?;
+            Ok(AccessBounds {
+                access,
+                bounds,
+                family: Some(family),
+            })
+        }
+    }
+}
+
+/// What the access of an operation says.
+struct AccessBounds {
+    /// The access type's name, if it has one.
+    access: Option<Ident>,
+    /// The bounds of the family.
+    bounds: Punctuated<TypeParamBound, Token![+]>,
+    /// The family's type parameter, if it is named.
+    family: Option<Ident>,
+}
+
+/// Remove type parameter `ident` from `generics`; return its bounds, from its
+/// declaration and the where clause.
+fn take_type_parameter(
     generics: &mut Generics,
-) -> Result<(Option<Ident>, Punctuated<TypeParamBound, Token![+]>)> {
+    ident: &Ident,
+) -> Option<Punctuated<TypeParamBound, Token![+]>> {
+    let position = generics
+        .params
+        .iter()
+        .position(|parameter| matches!(parameter, GenericParam::Type(t) if t.ident == *ident))?;
+    let parameters: Vec<GenericParam> = generics.params.iter().cloned().collect();
+    let GenericParam::Type(parameter) = &parameters[position] else {
+        unreachable!()
+    };
+    let mut bounds: Punctuated<TypeParamBound, Token![+]> = parameter.bounds.clone();
+    generics.params = parameters
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| *index != position)
+        .map(|(_, parameter)| parameter)
+        .collect();
+    if let Some(clause) = &mut generics.where_clause {
+        let mut kept = Punctuated::new();
+        for predicate in clause.predicates.iter() {
+            match predicate {
+                WherePredicate::Type(typed) if is_ident(&typed.bounded_ty, ident) => {
+                    bounds.extend(typed.bounds.iter().cloned());
+                }
+                other => kept.push(other.clone()),
+            }
+        }
+        clause.predicates = kept;
+        if clause.predicates.is_empty() {
+            generics.where_clause = None;
+        }
+    }
+    Some(bounds)
+}
+
+/// Remove the access type from `generics`; return its name, if it has one,
+/// and how it bounds its family.
+fn take_access(ty: &Type, generics: &mut Generics) -> Result<(Option<Ident>, FamilyBound)> {
     let Type::Reference(reference) = ty else {
         return Err(Error::new(
             ty.span(),
@@ -1121,44 +1260,12 @@ fn take_access_bounds(
         Type::ImplTrait(bounds) => Ok((None, family_bounds(&bounds.bounds, ty)?)),
         Type::Path(path) if path.qself.is_none() && path.path.get_ident().is_some() => {
             let ident = path.path.get_ident().unwrap().clone();
-            let position = generics
-                .params
-                .iter()
-                .position(
-                    |parameter| matches!(parameter, GenericParam::Type(t) if t.ident == ident),
+            let bounds = take_type_parameter(generics, &ident).ok_or_else(|| {
+                Error::new(
+                    ty.span(),
+                    "the access type must be a parameter of this function",
                 )
-                .ok_or_else(|| {
-                    Error::new(
-                        ty.span(),
-                        "the access type must be a parameter of this function",
-                    )
-                })?;
-            let parameters: Vec<GenericParam> = generics.params.iter().cloned().collect();
-            let GenericParam::Type(parameter) = &parameters[position] else {
-                unreachable!()
-            };
-            let mut bounds: Punctuated<TypeParamBound, Token![+]> = parameter.bounds.clone();
-            generics.params = parameters
-                .into_iter()
-                .enumerate()
-                .filter(|(index, _)| *index != position)
-                .map(|(_, parameter)| parameter)
-                .collect();
-            if let Some(clause) = &mut generics.where_clause {
-                let mut kept = Punctuated::new();
-                for predicate in clause.predicates.iter() {
-                    match predicate {
-                        WherePredicate::Type(typed) if is_ident(&typed.bounded_ty, &ident) => {
-                            bounds.extend(typed.bounds.iter().cloned());
-                        }
-                        other => kept.push(other.clone()),
-                    }
-                }
-                clause.predicates = kept;
-                if clause.predicates.is_empty() {
-                    generics.where_clause = None;
-                }
-            }
+            })?;
             Ok((Some(ident), family_bounds(&bounds, ty)?))
         }
         _ => Err(Error::new(
@@ -1168,10 +1275,18 @@ fn take_access_bounds(
     }
 }
 
+/// How an access bounds its family.
+enum FamilyBound {
+    /// `ReceiverAccess<Family: Bounds>`.
+    Bounds(Punctuated<TypeParamBound, Token![+]>),
+    /// `ReceiverAccess<Family = F>`, naming the family.
+    Named(Ident),
+}
+
 fn family_bounds(
     bounds: &Punctuated<TypeParamBound, Token![+]>,
     span: &Type,
-) -> Result<Punctuated<TypeParamBound, Token![+]>> {
+) -> Result<FamilyBound> {
     for bound in bounds {
         let TypeParamBound::Trait(trait_bound) = bound else {
             continue;
@@ -1183,26 +1298,33 @@ fn family_bounds(
             continue;
         }
         let PathArguments::AngleBracketed(arguments) = &last.arguments else {
-            return Ok(Punctuated::new());
+            return Ok(FamilyBound::Bounds(Punctuated::new()));
         };
         for argument in &arguments.args {
             if let GenericArgument::Constraint(constraint) = argument
                 && constraint.ident == "Family"
             {
-                return Ok(constraint.bounds.clone());
+                return Ok(FamilyBound::Bounds(constraint.bounds.clone()));
             }
             if let GenericArgument::AssocType(assoc) = argument
                 && assoc.ident == "Family"
             {
+                if let Type::Path(path) = &assoc.ty
+                    && path.qself.is_none()
+                    && let Some(family) = path.path.get_ident()
+                {
+                    return Ok(FamilyBound::Named(family.clone()));
+                }
                 return Err(Error::new(
                     assoc.span(),
                     "operations are defined for every family with the capabilities they \
                      use: bound the family by a trait, as in `ReceiverAccess<Family: Read>`, \
-                     not by `Family = ..`",
+                     or name it with a type parameter, as in `ReceiverAccess<Family = F>` \
+                     with `F: Read`",
                 ));
             }
         }
-        return Ok(Punctuated::new());
+        return Ok(FamilyBound::Bounds(Punctuated::new()));
     }
     Err(Error::new(
         span.span(),
@@ -1260,13 +1382,20 @@ fn is_ident(ty: &Type, ident: &Ident) -> bool {
 
 /// The family parameter of an operation whose argument types use `Self`
 /// for the family; such an operation exists for that family only.
-fn family_parameter(arguments: &[Argument], generics: &Generics) -> Result<Option<Ident>> {
+fn family_parameter(
+    arguments: &[Argument],
+    generics: &Generics,
+    named: Option<&Ident>,
+) -> Result<Option<Ident>> {
     let dependent = arguments.iter().any(|argument| {
         let ty = &argument.ty;
         mentions(quote!(#ty), "Self")
     });
     if !dependent {
         return Ok(None);
+    }
+    if let Some(named) = named {
+        return Ok(Some(named.clone()));
     }
     let family = format_ident!("Family");
     if let Some(taken) = generics
@@ -1481,6 +1610,54 @@ impl VisitMut for AccessAsSelf<'_> {
         }
         visit_mut::visit_type_mut(self, ty);
     }
+}
+
+/// Replaces the named family `F`, and `F::Name`, with `Self`.
+struct NamedFamilyAsSelf<'a> {
+    family: &'a Ident,
+}
+impl VisitMut for NamedFamilyAsSelf<'_> {
+    fn visit_type_mut(&mut self, ty: &mut Type) {
+        if let Type::Path(path) = ty
+            && path.qself.is_none()
+            && let Some(first) = path.path.segments.first_mut()
+            && first.ident == *self.family
+            && first.arguments.is_empty()
+        {
+            first.ident = Ident::new("Self", first.ident.span());
+            return;
+        }
+        visit_mut::visit_type_mut(self, ty);
+    }
+}
+
+/// Finds a `Self::Name` path, which names an associated type of the family
+/// without its trait.
+struct SelfShorthand(Option<Span>);
+impl<'ast> Visit<'ast> for SelfShorthand {
+    fn visit_type_path(&mut self, path: &'ast syn::TypePath) {
+        let segments = &path.path.segments;
+        if self.0.is_none()
+            && path.qself.is_none()
+            && segments.len() >= 2
+            && segments[0].ident == "Self"
+        {
+            self.0 = Some(path.span());
+        }
+        visit::visit_type_path(self, path);
+    }
+}
+
+fn self_shorthand(ty: &Type) -> Option<Span> {
+    let mut find = SelfShorthand(None);
+    find.visit_type(ty);
+    find.0
+}
+
+fn self_shorthand_in(clause: &syn::WhereClause) -> Option<Span> {
+    let mut find = SelfShorthand(None);
+    find.visit_where_clause(clause);
+    find.0
 }
 
 /// Rejects `Self::Name` in poll methods when `Name` is not declared by the

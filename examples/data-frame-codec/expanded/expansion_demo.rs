@@ -15,8 +15,8 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-async fn read_pair<A: ReceiverAccess<Family : Read>>(io: &mut A)
-    -> Result<u16, ReadBeError<<A::Family as Read>::Error>> {
+async fn read_pair<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A)
+    -> Result<u16, ReadBeError<F::Error>> {
     let first = io.read_be::<u8>().await?;
     let second = io.read_be::<u8>().await?;
     Ok(u16::from(first) + u16::from(second))
@@ -29,21 +29,21 @@ impl ReadPair<> where  {
     #[allow(clippy :: too_many_arguments)]
     fn new() -> Self { Self {} }
 }
-impl<__F: ::nitori_call::ReceiverFamily + Read> ::nitori_call::Operation<__F>
-    for ReadPair<> where  {
-    type Output = Result<u16, ReadBeError<<__F as Read>::Error>>;
+impl<F: ::nitori_call::ReceiverFamily + Read> ::nitori_call::Operation<F> for
+    ReadPair<> where  {
+    type Output = Result<u16, ReadBeError<F::Error>>;
     type Yield = ::core::convert::Infallible;
 }
-impl<'__s, __A> ::nitori_call::Start<'__s, __A> for ReadPair<> where
+impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read>
+    ::nitori_call::Start<'__s, __A> for ReadPair<> where
     __A: ::nitori_call::ReceiverAccess,
+    __A: ::nitori_call::ReceiverAccess<Family = F>,
     <__A as
     ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
     Read {
     type Fut =
         impl ::core::future::Future<Output =
-        <Self as
-        ::nitori_call::Operation<<__A as
-        ::nitori_call::ReceiverAccess>::Family>>::Output>;
+        <Self as ::nitori_call::Operation<F>>::Output>;
     #[allow(unused_mut, unused_variables)]
     fn start(self, __io: __A,
         __emitter: ::nitori_call::Emitter<'__s, ::core::convert::Infallible>)
@@ -53,7 +53,7 @@ impl<'__s, __A> ::nitori_call::Start<'__s, __A> for ReadPair<> where
             {
             let mut __io = __io;
             let mut __emitter = __emitter;
-            read_pair::<__A>(&mut __io).await
+            read_pair::<F, __A>(&mut __io).await
         }
     }
 }
@@ -89,17 +89,18 @@ trait ReadPairHostExt: ::nitori_call::CallExecutor where
     }
     fn sync_read_pair<'__d>(self: ::core::pin::Pin<&'__d mut Self>)
         ->
-            Result<u16,
-            ReadBeError<<<Self as ::nitori_call::CallExecutor>::Family as
-            Read>::Error>> where ReadPair<>: '__d {
+            <ReadPair<> as
+            ::nitori_call::Operation<<Self as
+            ::nitori_call::CallExecutor>::Family>>::Output where
+        ReadPair<>: '__d {
         ::nitori_call::__private::run_sync(Self::read_pair(self))
     }
     fn sync_read_pair_unpin<'__d>(&'__d mut self)
         ->
-            Result<u16,
-            ReadBeError<<<Self as ::nitori_call::CallExecutor>::Family as
-            Read>::Error>> where Self: ::core::marker::Unpin,
-        ReadPair<>: '__d {
+            <ReadPair<> as
+            ::nitori_call::Operation<<Self as
+            ::nitori_call::CallExecutor>::Family>>::Output where
+        Self: ::core::marker::Unpin, ReadPair<>: '__d {
         ::nitori_call::__private::run_sync(Self::read_pair(::core::pin::Pin::new(self)))
     }
 }

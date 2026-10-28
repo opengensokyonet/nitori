@@ -165,6 +165,26 @@ pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 /// does, the struct takes the family as a last type parameter `Family`. Users
 /// of the macro enable `impl_trait_in_assoc_type`.
 ///
+/// The access may also name its family with a type parameter of the function,
+/// as `A: ReceiverAccess<Family = F>` with `F: Write`, which is how the
+/// operations of `nitori_io` are written; the operation is still defined for
+/// every family with those bounds. The output and the item type
+/// can then write `F::Error`; arguments and where clauses name an associated
+/// type with its trait, as `<F as Write>::Error`. A struct that takes the
+/// family as a parameter names it `F`.
+///
+/// ```
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{Direct, ReceiverAccess, ReceiverFamily, call};
+/// # trait Counter: ReceiverFamily { type Error; }
+/// # impl Counter for Direct<u8> { type Error = (); }
+/// #[call(sync)]
+/// async fn check<F: Counter, A: ReceiverAccess<Family = F>>(io: &mut A) -> Result<(), F::Error> {
+///     Ok(())
+/// }
+/// # fn main() { assert_eq!(0u8.sync_check_unpin(), Ok(())); }
+/// ```
+///
 /// With `yields = Item`, each `yield value` written directly in the function
 /// body emits an item, and the return value is the final value. The crate
 /// enables `yield_expr` as well. `yield` in closures (including coroutines),

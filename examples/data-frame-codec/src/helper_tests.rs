@@ -4,7 +4,7 @@ use futures_core::Stream;
 use nitori_call::{
     CallExecutor, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start, call,
 };
-use nitori_io::calls::{ReadBeError, WriteAllError, WriteAllHostExt as _, WriteReturn};
+use nitori_io::calls::{ReadBeError, WriteAllError, WriteAllHostExt as _};
 use nitori_io::{PollReadExt as _, Read, ReadChunk};
 use std::convert::Infallible;
 use std::{
@@ -340,7 +340,7 @@ fn one_operation_type_has_a_signature_for_each_target() {
 }
 
 #[test]
-fn write_helper_infers_input_generic_and_preserves_owned_result() {
+fn write_helper_infers_input_generic() {
     let mut target = Vec::new();
     let mut cx = Context::from_waker(Waker::noop());
     {
@@ -351,8 +351,7 @@ fn write_helper_infers_input_generic_and_preserves_owned_result() {
         let Poll::Ready(returned) = future.as_mut().poll(&mut cx) else {
             panic!("completion")
         };
-        assert_eq!(returned.result.unwrap(), 3);
-        assert!(returned.input.is_empty());
+        returned.unwrap();
     }
     assert_eq!(target, b"abc");
 }
@@ -413,7 +412,7 @@ async fn write_through_trait_only<
 >(
     target: &mut T,
     input: Bytes,
-) -> WriteReturn<Bytes, WriteAllError<F::Error>> {
+) -> Result<(), WriteAllError<F::Error>> {
     target.write_all_unpin(input).await
 }
 

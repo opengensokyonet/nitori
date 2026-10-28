@@ -10,13 +10,13 @@ use snafu::{IntoError, Snafu};
 
 /// Fill exactly `length` bytes, checking the whole capacity before any IO.
 #[call(sync)]
-pub async fn read_exact<A, B>(
-    io: &mut A,
+pub async fn read_exact<F, B>(
+    io: &mut impl ReceiverAccess<Family = F>,
     destination: &mut B,
     length: usize,
-) -> Result<(), ReadExactError<<A::Family as ReadHost>::Error>>
+) -> Result<(), ReadExactError<F::Error>>
 where
-    A: ReceiverAccess<Family: ReadHost>,
+    F: ReadHost,
     B: BufMut + ?Sized,
 {
     let available = destination.remaining_mut();
@@ -76,13 +76,13 @@ impl<E> From<ReadArrayError<E>> for ReadExactError<E> {
 }
 
 /// Read until `length` bytes have been put into `destination`.
-async fn fill<A, B>(
-    io: &mut A,
+async fn fill<F, B>(
+    io: &mut impl ReceiverAccess<Family = F>,
     mut destination: &mut B,
     length: usize,
-) -> Result<(), ReadArrayError<<A::Family as ReadHost>::Error>>
+) -> Result<(), ReadArrayError<F::Error>>
 where
-    A: ReceiverAccess<Family: ReadHost>,
+    F: ReadHost,
     B: BufMut + ?Sized,
 {
     let mut completed = 0;
@@ -111,12 +111,12 @@ where
 
 /// Append until EOF. A full destination before confirmed EOF is an error.
 #[call(sync)]
-pub async fn read_to_end<A, B>(
-    io: &mut A,
+pub async fn read_to_end<F, B>(
+    io: &mut impl ReceiverAccess<Family = F>,
     destination: &mut B,
-) -> Result<usize, ReadToEndError<<A::Family as ReadHost>::Error>>
+) -> Result<usize, ReadToEndError<F::Error>>
 where
-    A: ReceiverAccess<Family: ReadHost>,
+    F: ReadHost,
     B: BufMut + ?Sized,
 {
     let mut completed = 0usize;
@@ -173,14 +173,14 @@ impl<E> ReadToEndError<E> {
 }
 
 /// Yield chunks until `maximum` bytes or EOF; the final value is the total.
-#[call(sync, yields = <A::Family as ChunkHost>::Chunk)]
-pub async fn read_chunks<A>(
-    io: &mut A,
+#[call(sync, yields = F::Chunk)]
+pub async fn read_chunks<F>(
+    io: &mut impl ReceiverAccess<Family = F>,
     maximum: usize,
     chunk_maximum: NonZeroUsize,
-) -> Result<usize, ReadChunksError<<A::Family as ReadHost>::Error>>
+) -> Result<usize, ReadChunksError<F::Error>>
 where
-    A: ReceiverAccess<Family: ChunkHost>,
+    F: ChunkHost,
 {
     let mut completed = 0;
     while let Some(request) = NonZeroUsize::new((maximum - completed).min(chunk_maximum.get())) {
@@ -219,14 +219,14 @@ impl<E> ReadChunksError<E> {
 }
 
 /// Yield exactly `length` bytes, reporting premature EOF with prior progress.
-#[call(sync, yields = <A::Family as ChunkHost>::Chunk)]
-pub async fn read_chunks_exact<A>(
-    io: &mut A,
+#[call(sync, yields = F::Chunk)]
+pub async fn read_chunks_exact<F>(
+    io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
     chunk_maximum: NonZeroUsize,
-) -> Result<(), ReadChunksExactError<<A::Family as ReadHost>::Error>>
+) -> Result<(), ReadChunksExactError<F::Error>>
 where
-    A: ReceiverAccess<Family: ChunkHost>,
+    F: ChunkHost,
 {
     let mut chunks = pin!(io.read_chunks(length, chunk_maximum));
     loop {
@@ -282,11 +282,11 @@ impl<E> ReadChunksExactError<E> {
 
 /// Read a fixed-size array without selecting a chunk representation.
 #[call(sync)]
-pub async fn read_array<const LENGTH: usize, A>(
-    io: &mut A,
-) -> Result<[u8; LENGTH], ReadArrayError<<A::Family as ReadHost>::Error>>
+pub async fn read_array<const LENGTH: usize, F>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<[u8; LENGTH], ReadArrayError<F::Error>>
 where
-    A: ReceiverAccess<Family: ReadHost>,
+    F: ReadHost,
 {
     let mut bytes = [0; LENGTH];
     fill(io, &mut bytes.as_mut_slice(), LENGTH).await?;
@@ -323,11 +323,11 @@ impl<E> ReadArrayError<E> {
 
 /// Decode a primitive number in little endian after reading its complete array.
 #[call(sync)]
-pub async fn read_le<T: EndianValue, A>(
-    io: &mut A,
-) -> Result<T, ReadLeError<<A::Family as ReadHost>::Error>>
+pub async fn read_le<T: EndianValue, F>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<T, ReadLeError<F::Error>>
 where
-    A: ReceiverAccess<Family: ReadHost>,
+    F: ReadHost,
 {
     let mut bytes = T::Bytes::default();
     let length = bytes.as_mut().len();
@@ -376,11 +376,11 @@ impl<E> From<ReadArrayError<E>> for ReadLeError<E> {
 
 /// Decode a primitive number in big endian after reading its complete array.
 #[call(sync)]
-pub async fn read_be<T: EndianValue, A>(
-    io: &mut A,
-) -> Result<T, ReadBeError<<A::Family as ReadHost>::Error>>
+pub async fn read_be<T: EndianValue, F>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<T, ReadBeError<F::Error>>
 where
-    A: ReceiverAccess<Family: ReadHost>,
+    F: ReadHost,
 {
     let mut bytes = T::Bytes::default();
     let length = bytes.as_mut().len();
