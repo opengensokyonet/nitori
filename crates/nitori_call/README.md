@@ -7,50 +7,70 @@ It is experimental and requires the repository's pinned Rust nightly.
 
 ## Why calls?
 
-Consider an outgoing message that must wait for permission before using a shared
-connection. With an ordinary async function, acquiring the connection first
-holds it throughout that unrelated wait:
+Consider a buffer shared with the task that delivers bytes into it, such as the
+receive buffer of a QUIC stream implemented in user space, and a reader of
+frames made of a one-byte type, a one-byte length and the payload. An ordinary
+async reader cannot keep the buffer locked while it waits for bytes, since the
+delivering task needs the lock to append them. Each leaf read therefore locks,
+reads what has arrived and unlocks before it waits:
 
 ```rust
-use std::future::Future;
-use tokio::sync::Mutex;
-
-async fn send(shared: &Mutex<Vec<u8>>, permission: impl Future<Output = ()>) {
-    let mut output = shared.lock().await;
-    permission.await; // Other writers cannot use output during this wait.
-    output.extend_from_slice(b"PING\n");
-}
-```
-
-Moving the lock below the wait solves this particular case, but a leaf future
-can only choose between holding the resource across waits and acquiring it on
-every poll; several leaves completing in one poll then acquire it several times.
-Only the code that polls the composed operation knows where a poll begins and
-ends. A call therefore receives the resource from its caller on each poll, and
-the caller decides how long it stays acquired:
-
-```rust
-#![feature(impl_trait_in_assoc_type)]
-use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::WriteAllError, prelude::*};
-use std::future::Future;
-
-#[call(sync)]
-async fn send<F: Write, A: ReceiverAccess<Family = F>, Permission: Future<Output = ()>>(
-    io: &mut A,
-    permission: Permission,
-    message: &[u8],
-) -> Result<(), WriteAllError<F::Error>> {
-    permission.await;
-    io.write_all(message).await
+# use std::io;
+# use tokio::sync::Mutex;
+# struct StreamBuffer;
+# async fn read_array<const N: usize>(_: &Mutex<StreamBuffer>) -> io::Result<[u8; N]> {
+#     Ok([0; N])
+# }
+# async fn read_exact(_: &Mutex<StreamBuffer>, _: &mut Vec<u8>, _: usize) -> io::Result<()> {
+#     Ok(())
+# }
+// `read_array` and `read_exact` lock `stream`, read and unlock, and wait
+// without the lock when the bytes have not arrived.
+async fn read_frame(stream: &Mutex<StreamBuffer>, payload: &mut Vec<u8>) -> io::Result<u8> {
+    let [kind, length] = read_array::<2>(stream).await?; // lock · read · unlock
+    read_exact(stream, payload, usize::from(length)).await?; // lock · read · unlock
+    Ok(kind)
 }
 # fn main() {}
 ```
 
-`permission.await` uses no resource. An executor that acquires views on demand
-(see [Executors](#executors)) therefore locks nothing until `write_all` reads
-or writes. Ordinary async remains simpler when the operation owns its resource
-for its whole duration.
+When several frames have already arrived, one poll of the task runs through all
+of them, and every leaf locks again. A leaf future can only choose between
+holding the resource across waits and acquiring it on every poll, because only
+the code that polls the composed operation knows where a poll begins and ends.
+A call therefore receives the resource from its caller on each poll, and the
+caller decides how long it stays acquired:
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{calls::ReadExactError, prelude::*};
+use std::sync::Mutex;
+
+#[call(sync)]
+async fn read_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+    payload: &mut Vec<u8>,
+) -> Result<u8, ReadExactError<F::Error>> {
+    let [kind, length] = io.read_array::<2>().await?;
+    io.read_exact(payload, usize::from(length)).await?;
+    Ok(kind)
+}
+
+fn main() {
+    let stream = Mutex::new(b"\x00\x03cat\x01\x00".as_slice());
+    let mut payload = Vec::new();
+    assert_eq!((&stream).sync_read_frame_unpin(&mut payload).unwrap(), 0);
+    assert_eq!(payload, b"cat");
+    assert_eq!(*stream.lock().unwrap(), b"\x01\x00"); // The next frame has not been read.
+}
+```
+
+A reference to a mutex is an executor (see [Executors](#executors)): it locks
+at the first read of a poll, and the reads of every frame ready in that poll
+share the guard. When the bytes have not arrived, the poll ends and the lock is
+released, so the delivering task can append them. Ordinary async remains
+simpler when the operation owns its resource for its whole duration.
 
 ## Read a length-prefixed record
 
