@@ -60,7 +60,7 @@ async fn chunks<F: ReadChunk, A: ReceiverAccess<Family = F>>(
 ) -> Result<(), ReadChunksExactError<<F as Read>::Error>> {
     let mut chunks = pin!(io.read_chunks_exact(length, NonZeroUsize::new(2).unwrap()));
     loop {
-        match chunks.as_mut().next_event().await {
+        match chunks.as_mut().step().await {
             ControlFlow::Continue(chunk) => yield chunk,
             ControlFlow::Break(result) => return result,
         }

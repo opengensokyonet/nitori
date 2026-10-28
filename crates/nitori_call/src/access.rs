@@ -1,13 +1,12 @@
 //! Access to the view lent for the current poll.
-use crate::{Compose, Composed, ReceiverFamily, ViewOperation, call::Intercept, loan::RawViewLoan};
+use crate::{Compose, Composed, ReceiverFamily, ViewOperation, loan::RawViewLoan};
 use std::{
-    cell::{Cell, OnceCell},
+    cell::Cell,
     fmt,
     future::Future,
     marker::PhantomData,
     pin::Pin,
     ptr,
-    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -35,11 +34,14 @@ impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
     }
 }
 
-/// The view lent to a call for its current poll, if any, whether its
-/// operation asked for one or offered it back, and the waker the call was
-/// polled with.
-pub(crate) struct ViewCell<F: ReceiverFamily> {
+/// The view lent to one slot of a call for its current poll, if any, whether
+/// the operation asked for one or offered it back, and the waker the call was
+/// polled with. Each slot has a cell of its own, so slots on different
+/// threads share no state.
+pub struct ViewCell<F: ReceiverFamily> {
     pub(crate) view: Cell<Option<RawViewLoan<F>>>,
+    /// The thread that lent the view: the only one allowed to use it.
+    pub(crate) lender: Cell<ThreadMark>,
     /// Whether the lender may release this poll's view at a release point.
     pub(crate) releasable: Cell<bool>,
     pub(crate) requested: Cell<bool>,
@@ -48,21 +50,44 @@ pub(crate) struct ViewCell<F: ReceiverFamily> {
     pub(crate) release: Cell<bool>,
     /// Whether this poll answers a release point by keeping the view.
     pub(crate) kept: Cell<bool>,
-    /// Present once a branch of an intermediate executor has asked for a
-    /// view or offered it back; it keeps the branches waiting for an answer.
-    pub(crate) intercept: OnceCell<Arc<Intercept>>,
+    /// Whether this poll lends a view, or answers an offer, while branches
+    /// wait for it; they are woken before the operation is polled.
+    pub(crate) answered: Cell<bool>,
+    /// The branches of intermediate executors waiting for this slot's view,
+    /// or for the answer to its offer; allocated when the first one asks.
+    branches: Branches,
     pub(crate) root: RootWaker,
 }
 impl<F: ReceiverFamily> ViewCell<F> {
     pub(crate) fn new() -> Self {
         Self {
             view: Cell::new(None),
+            lender: Cell::new(ThreadMark::NONE),
             releasable: Cell::new(false),
             requested: Cell::new(false),
             release: Cell::new(false),
             kept: Cell::new(false),
-            intercept: OnceCell::new(),
+            answered: Cell::new(false),
+            branches: Cell::new(None),
             root: RootWaker::new(),
+        }
+    }
+    /// Whether a branch still waits for this slot's view or answer.
+    /// Only reads, so a shared reference to the call may ask.
+    #[inline]
+    pub(crate) fn waiting(&self) -> bool {
+        // SAFETY: the branches change only through take and set, and no
+        // reference to them outlives this read.
+        unsafe { &*self.branches.as_ptr() }
+            .as_ref()
+            .is_some_and(|branches| !branches.is_empty())
+    }
+    /// Move the waiting branches to `out`.
+    #[cold]
+    pub(crate) fn take_branches(&self, out: &mut Vec<Waker>) {
+        if let Some(mut branches) = self.branches.take() {
+            out.append(&mut branches);
+            self.branches.set(Some(branches));
         }
     }
     fn release_point(&self) -> ReleasePoint<'_> {
@@ -71,9 +96,39 @@ impl<F: ReceiverFamily> ViewCell<F> {
             releasable: self.releasable.get(),
             kept: self.kept.get(),
             release: &self.release,
-            intercept: &self.intercept,
+            branches: &self.branches,
             root: self.root.get(),
         }
+    }
+}
+
+/// The branches waiting for a slot. Boxed so that an idle cell spends one
+/// word on them, as most never have any.
+#[allow(clippy::box_collection)]
+type Branches = Cell<Option<Box<Vec<Waker>>>>;
+
+/// Keep the waker of a branch waiting for a slot's view or answer. Every
+/// branch that waits is kept until the slot is answered.
+fn defer(branches: &Branches, branch: &Waker) {
+    let mut kept = branches.take().unwrap_or_default();
+    if !kept.iter().any(|kept| kept.will_wake(branch)) {
+        kept.push(branch.clone());
+    }
+    branches.set(Some(kept));
+}
+
+/// Identifies a thread while it runs: no two running threads share a mark.
+/// A call's lender is running for as long as its view is lent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThreadMark(*const u8);
+thread_local! {
+    static MARK: u8 = const { 0 };
+}
+impl ThreadMark {
+    pub(crate) const NONE: Self = Self(ptr::null());
+    #[inline]
+    pub(crate) fn current() -> Self {
+        Self(MARK.with(ptr::from_ref))
     }
 }
 
@@ -110,7 +165,7 @@ pub(crate) fn polled_directly(root: *const Waker, cx: &Context<'_>) -> bool {
 /// The right to ask the caller of the current call for a view.
 pub struct ViewRequest<'a> {
     requested: &'a Cell<bool>,
-    intercept: &'a OnceCell<Arc<Intercept>>,
+    branches: &'a Branches,
     root: *const Waker,
 }
 impl ViewRequest<'_> {
@@ -123,9 +178,7 @@ impl ViewRequest<'_> {
     fn ask<T>(self, cx: &mut Context<'_>) -> Poll<T> {
         self.requested.set(true);
         if !polled_directly(self.root, cx) {
-            self.intercept
-                .get_or_init(|| Arc::new(Intercept::new()))
-                .defer(cx.waker());
+            defer(self.branches, cx.waker());
         }
         Poll::Pending
     }
@@ -137,7 +190,7 @@ pub struct ReleasePoint<'a> {
     releasable: bool,
     kept: bool,
     release: &'a Cell<bool>,
-    intercept: &'a OnceCell<Arc<Intercept>>,
+    branches: &'a Branches,
     root: *const Waker,
 }
 impl ReleasePoint<'_> {
@@ -153,9 +206,7 @@ impl ReleasePoint<'_> {
         *offered = true;
         self.release.set(true);
         if !polled_directly(self.root, cx) {
-            self.intercept
-                .get_or_init(|| Arc::new(Intercept::new()))
-                .defer(cx.waker());
+            defer(self.branches, cx.waker());
         }
         Poll::Pending
     }
@@ -166,22 +217,6 @@ impl ReleasePoint<'_> {
 pub trait ViewVisitor<F: ReceiverFamily>: ViewOperation<F> {
     fn absent(self, request: ViewRequest<'_>) -> Self::Output;
 }
-
-pub(crate) mod mode {
-    //! Unnameable outside this crate, so implementations of `Start` that cover
-    //! the probe are generic over the access.
-
-    /// Whether an access derives from a running call or from the probe that
-    /// checks whether a call is `Send`.
-    pub trait Mode: 'static {}
-    /// Accesses of running calls.
-    pub struct Local;
-    /// Never constructed: stands in for the slot when a call checks `Send`.
-    pub struct Probe;
-    impl Mode for Local {}
-    impl Mode for Probe {}
-}
-use mode::{Local, Mode, Probe};
 
 mod sealed {
     /// Implemented only by this crate's accesses.
@@ -197,11 +232,6 @@ pub(crate) use sealed::Sealed;
 #[allow(private_bounds)]
 pub trait ReceiverAccess: sealed::Sealed {
     type Family: ReceiverFamily;
-
-    /// Distinguishes accesses derived from the probe of [`Call`](crate::Call)'s
-    /// `Send` check. Accesses wrapping another access forward its mode.
-    #[doc(hidden)]
-    type Mode: Mode;
 
     /// Lend this poll's view to `visitor`, or give it a request for one.
     #[doc(hidden)]
@@ -255,7 +285,6 @@ impl<A: ReceiverAccess + ?Sized> Sealed for &mut A {}
 #[allow(private_bounds)]
 impl<A: ReceiverAccess + ?Sized> ReceiverAccess for &mut A {
     type Family = A::Family;
-    type Mode = A::Mode;
     fn visit_view<V: ViewVisitor<A::Family>>(&mut self, visitor: V) -> V::Output {
         (**self).visit_view(visitor)
     }
@@ -310,60 +339,72 @@ where
 ///
 /// The operation of a [`Call`](crate::Call) receives its root slot by value.
 /// `'s` is a branded lifetime: the operation must accept every `'s`, so the
-/// slot can neither be returned nor stored outside the operation. A slot is
-/// neither `Send` nor `Sync`: it is used only by the thread polling its call.
-#[allow(private_bounds)]
-pub struct ReceiverSlot<'s, F: ReceiverFamily, M: Mode = Local> {
+/// slot can neither be returned nor stored outside the operation.
+///
+/// A slot is `Send`, so an operation that keeps one is `Send` whenever the
+/// rest of what it keeps is. Within a poll it may move to a scoped thread,
+/// which can ask for a view or offer it back; using the view itself there
+/// panics, since only the thread polling the call may use it. A slot is not
+/// `Sync`.
+pub struct ReceiverSlot<'s, F: ReceiverFamily> {
     cell: *const ViewCell<F>,
     brand: PhantomData<fn(&'s ()) -> &'s ()>,
-    mode: PhantomData<fn() -> M>,
 }
-// SAFETY: probe slots are never constructed; they only stand in for the slot
-// when a call checks which other parts of its operation are `Send`.
-unsafe impl<F: ReceiverFamily> Send for ReceiverSlot<'_, F, Probe> {}
-// SAFETY: as above.
-unsafe impl<F: ReceiverFamily> Sync for ReceiverSlot<'_, F, Probe> {}
+// SAFETY: a slot holds no view: it points into the cell of its call, which
+// lends a view only while the call is polled. The brand keeps the slot inside
+// the call's future, so between polls it moves only with the call, and a
+// thread it reaches during a poll is a scoped one, joined before the poll
+// returns; the lender clears the cell after that. The slot is not Sync and is
+// used through `&mut`, so one thread at a time uses the cell's request and
+// release state. The view itself is used only after checking that the
+// current thread lent it.
+unsafe impl<F: ReceiverFamily> Send for ReceiverSlot<'_, F> {}
 
-#[allow(private_bounds)]
-impl<F: ReceiverFamily, M: Mode> fmt::Debug for ReceiverSlot<'_, F, M> {
+impl<F: ReceiverFamily> fmt::Debug for ReceiverSlot<'_, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiverSlot").finish_non_exhaustive()
     }
 }
-#[allow(private_bounds)]
-impl<F: ReceiverFamily, M: Mode> ReceiverSlot<'_, F, M> {
+impl<F: ReceiverFamily> ReceiverSlot<'_, F> {
     /// # Safety
-    /// `cell` must belong to a pinned call that outlives the slot and is
-    /// polled only on the thread that owns the slot.
+    /// `cell` must belong to a pinned call that outlives the slot, and the
+    /// slot must stay inside the call's future.
     pub(crate) unsafe fn new(cell: &ViewCell<F>) -> Self {
         Self {
             cell,
             brand: PhantomData,
-            mode: PhantomData,
         }
     }
 }
-impl<F: ReceiverFamily, M: Mode> Sealed for ReceiverSlot<'_, F, M> {}
+impl<F: ReceiverFamily> Sealed for ReceiverSlot<'_, F> {}
 #[allow(private_bounds)]
-impl<F: ReceiverFamily, M: Mode> ReceiverAccess for ReceiverSlot<'_, F, M> {
+impl<F: ReceiverFamily> ReceiverAccess for ReceiverSlot<'_, F> {
     type Family = F;
-    type Mode = M;
     fn visit_view<V: ViewVisitor<F>>(&mut self, visitor: V) -> V::Output {
-        // SAFETY: new's contract; the slot is not Send, so this is the thread
-        // polling the call.
+        // SAFETY: new's contract. No other thread uses the cell meanwhile:
+        // see the Send implementation.
         let cell = unsafe { &*self.cell };
         match cell.view.get() {
             // Outside a poll, which only an operation's destructor can reach,
             // there is no view either.
             None => visitor.absent(ViewRequest {
                 requested: &cell.requested,
-                intercept: &cell.intercept,
+                branches: &cell.branches,
                 root: cell.root.get(),
             }),
-            // SAFETY: the call lent this view for its current poll. No other
-            // use of it is in progress: the slot and every access derived
-            // from it are borrowed mutably for each visit.
-            Some(view) => unsafe { view.apply(visitor) },
+            Some(view) => {
+                // Checked before any reference to the view exists: it need
+                // not be Send.
+                assert!(
+                    cell.lender.get() == ThreadMark::current(),
+                    "a view lent to a call used outside the thread polling it"
+                );
+                // SAFETY: the call lent this view for its current poll, on
+                // this thread. No other use of it is in progress: the slot
+                // and every access derived from it are borrowed mutably for
+                // each visit.
+                unsafe { view.apply(visitor) }
+            }
         }
     }
     fn release_point(&mut self) -> ReleasePoint<'_> {

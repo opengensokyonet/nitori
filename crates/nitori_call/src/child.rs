@@ -1,7 +1,7 @@
 //! An emitting operation started on its parent's access.
 use crate::{
-    Emitter, Operation, ReceiverAccess, Start,
-    call::{InPlace, ItemCell, State, poll_events, remaining},
+    Accesses, Emitter, Operation, Start,
+    call::{InPlace, ItemCell, State, remaining, step_operation},
 };
 use futures_core::{FusedFuture, FusedStream, Stream};
 use std::{
@@ -14,19 +14,19 @@ use std::{
 };
 
 type Running<A, Op> = <Op as Start<'static, A>>::Fut;
-type Output<A, Op> = <Op as Operation<<A as ReceiverAccess>::Family>>::Output;
-type Yield<A, Op> = <Op as Operation<<A as ReceiverAccess>::Family>>::Yield;
+type Output<A, Op> = <Op as Operation<<A as Accesses>::Families>>::Output;
+type Yield<A, Op> = <Op as Operation<<A as Accesses>::Families>>::Yield;
 type ChildState<A, Op> = State<(Op, A), Running<A, Op>, Output<A, Op>>;
 
-/// An emitting operation running on an access borrowed from its parent, with
-/// a cell of its own for its items.
+/// An emitting operation running on an access borrowed from its parent, or on
+/// a tuple of them, with a cell of its own for its items.
 ///
 /// As a future it drops the items where they are emitted and completes with
 /// the final value; as a stream it delivers `Continue` for each item, then
 /// `Break` with the final value, then ends.
 pub struct Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     // Dropped before the cell its future points into.
@@ -39,13 +39,13 @@ where
 // changes only through `Pin<&mut Self>`.
 unsafe impl<A, Op> Sync for Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
 }
 impl<A, Op> fmt::Debug for Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -56,7 +56,7 @@ where
 }
 impl<A, Op> Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     pub fn new(operation: Op, access: A) -> Self {
@@ -75,18 +75,19 @@ where
         std::future::poll_fn(move |cx| self.as_mut().poll_next(cx))
     }
 
-    /// The next event, without the end of the stream: an item, or the final
-    /// value. Waiting for it after the final value panics.
-    pub fn next_event(
+    /// Run the child one step, until it emits an item or returns its final
+    /// value; unlike [`next`](Self::next), there is no end of the stream.
+    /// Waiting for a step after the final value panics.
+    pub fn step(
         mut self: Pin<&mut Self>,
     ) -> impl Future<Output = ControlFlow<Output<A, Op>, Yield<A, Op>>> {
         std::future::poll_fn(move |cx| {
-            assert!(!self.finished, "`next_event` after the final value");
-            self.as_mut().poll_event(false, cx)
+            assert!(!self.finished, "`step` after the final value");
+            self.as_mut().poll_step(false, cx)
         })
     }
 
-    fn poll_event(
+    fn poll_step(
         self: Pin<&mut Self>,
         discard: bool,
         cx: &mut Context<'_>,
@@ -101,19 +102,19 @@ where
         // brand chosen for storage; the future is dropped before the cell.
         let start = |(operation, access): (Op, A)| operation.start(access, Emitter::new(emitted));
         // SAFETY: the state is a field of the pinned child.
-        let poll = unsafe { poll_events(state, emitted, start, cx) };
+        let poll = unsafe { step_operation(state, emitted, start, cx) };
         this.finished = matches!(poll, Poll::Ready(ControlFlow::Break(_)));
         poll
     }
 }
 impl<A, Op> Future for Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     type Output = Output<A, Op>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match ready!(self.poll_event(true, cx)) {
+        match ready!(self.poll_step(true, cx)) {
             ControlFlow::Break(result) => Poll::Ready(result),
             ControlFlow::Continue(_) => unreachable!("discarded items are not stored"),
         }
@@ -121,7 +122,7 @@ where
 }
 impl<A, Op> Stream for Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     type Item = ControlFlow<Output<A, Op>, Yield<A, Op>>;
@@ -129,7 +130,7 @@ where
         if self.finished {
             return Poll::Ready(None);
         }
-        self.poll_event(false, cx).map(Some)
+        self.poll_step(false, cx).map(Some)
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         remaining(self.finished)
@@ -137,7 +138,7 @@ where
 }
 impl<A, Op> FusedFuture for Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     fn is_terminated(&self) -> bool {
@@ -146,7 +147,7 @@ where
 }
 impl<A, Op> FusedStream for Child<A, Op>
 where
-    A: ReceiverAccess,
+    A: Accesses,
     Op: for<'e> Start<'e, A>,
 {
     fn is_terminated(&self) -> bool {

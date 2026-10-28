@@ -1,7 +1,7 @@
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 #![allow(clippy::type_complexity)] // results paired with the remaining budget
 //! The prelude, the error aliases, the byte budgets, the endian writes, and
-//! reading a child's events with `next_event`.
+//! reading a child's events with `step`.
 use bytes::{Buf, BufMut, Bytes};
 use nitori_call::{ReceiverAccess, call, family_receiver};
 use nitori_io::{
@@ -101,7 +101,7 @@ async fn chunks_limited<A: ReceiverAccess<Family: ReadChunk<Chunk = Bytes>>>(
     let mut limited = io.compose(ReadLimit(budget));
     let mut chunks = pin!(limited.read_chunks_exact(length, NonZeroUsize::new(4).unwrap()));
     loop {
-        match chunks.as_mut().next_event().await {
+        match chunks.as_mut().step().await {
             ControlFlow::Continue(chunk) => yield chunk,
             ControlFlow::Break(result) => return result,
         }
@@ -226,14 +226,14 @@ async fn bytes_then_count<A: ReceiverAccess<Family: Read>>(
 }
 
 #[call(sync)]
-async fn next_event_after_final<A: ReceiverAccess<Family: Read>>(
+async fn step_after_final<A: ReceiverAccess<Family: Read>>(
     io: &mut A,
     events: &mut Vec<ControlFlow<usize, u8>>,
     past_the_end: bool,
 ) {
     let mut child = pin!(io.bytes_then_count());
     loop {
-        let event = child.as_mut().next_event().await;
+        let event = child.as_mut().step().await;
         let done = event.is_break();
         events.push(event.map_break(|result| result.unwrap_or(0)));
         if done {
@@ -241,15 +241,15 @@ async fn next_event_after_final<A: ReceiverAccess<Family: Read>>(
         }
     }
     if past_the_end {
-        let _ = child.as_mut().next_event().await;
+        let _ = child.as_mut().step().await;
     }
 }
 
 #[test]
-fn next_event_gives_items_then_the_final_value() {
+fn step_gives_items_then_the_final_value() {
     let mut input = b"xy".as_slice();
     let mut events = Vec::new();
-    input.sync_next_event_after_final_unpin(&mut events, false);
+    input.sync_step_after_final_unpin(&mut events, false);
     assert_eq!(
         events,
         [
@@ -261,8 +261,8 @@ fn next_event_gives_items_then_the_final_value() {
 }
 
 #[test]
-#[should_panic = "`next_event` after the final value"]
-fn next_event_after_the_final_value_panics() {
+#[should_panic = "`step` after the final value"]
+fn a_step_after_the_final_value_panics() {
     let mut input = b"xy".as_slice();
-    input.sync_next_event_after_final_unpin(&mut Vec::new(), true);
+    input.sync_step_after_final_unpin(&mut Vec::new(), true);
 }

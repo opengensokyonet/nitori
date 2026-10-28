@@ -181,8 +181,8 @@ or waking. An execution may switch between the two between polls.
 
 Inside an operation, the method of an emitting operation returns a `Child`,
 which is the same pair of future and stream on the parent's access; await it to
-keep only the final value, or pin it and call `next_event` to handle the
-items. `next_event` gives each item, then the final value; as a `Stream`,
+keep only the final value, or pin it and call `step` to handle the
+items. `step` gives each item, then the final value; as a `Stream`,
 through `next`, the child also ends with `None` afterwards:
 
 ```rust
@@ -199,7 +199,7 @@ async fn count_chunks<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     let mut chunks = pin!(io.read_chunks(length, NonZeroUsize::new(4).unwrap()));
     let mut count = 0;
     loop {
-        match chunks.as_mut().next_event().await {
+        match chunks.as_mut().step().await {
             ControlFlow::Continue(chunk) => {
                 count += 1;
                 yield bytes::Buf::remaining(&chunk);
@@ -282,8 +282,11 @@ lends it back for one capability call.
 `ReceiverAccess` is implemented by the slot a root operation receives, by
 `Composed`, and by `&mut A`; downstream crates do not implement it. Each use
 borrows the access mutably, so two operations cannot use it at the same time,
-and it never leaves the operation or the polling thread. Hand-written leaf
-operations call `poll_access`, which lends the current view to a callback:
+and it never leaves the operation. An access is `Send` but not `Sync`: within
+a poll it may move to a scoped thread, which can ask for a view, but only the
+thread polling the call may use the view, and an access elsewhere panics.
+Hand-written leaf operations call `poll_access`, which lends the current view
+to a callback:
 
 ```rust
 use nitori_call::{Direct, ReceiverAccess};
@@ -316,6 +319,54 @@ of its fields on each poll; successive polls may lend views of different
 resources. A call is `Send` when everything its operation keeps apart from the
 access is `Send`, even if the resource is not. `DynCall` is its dyn-compatible
 form. `is_terminated` tells whether the call has delivered its final value.
+
+A call over several receivers, `Call<(F1, F2), Op>`, gives its operation a
+tuple of slots, one for each family, and runs operations implementing
+`Start<'s, (A1, A2)>`. `poll_with_views` takes a view for each slot, lent as a
+`ViewLoan` or not at all: each slot asks for its own view and offers its own
+back, `views_needed` and `views_offered` tell which, and a lent view wakes only
+the branches waiting for that slot. A `Child` likewise runs over a tuple of
+accesses.
+
+`#[call]` makes such an operation of a function whose leading parameters are
+several accesses. Inside another operation, call the function itself; an
+executor over the receivers, such as a tuple of them, gets host methods:
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::prelude::*;
+use std::pin::pin;
+
+/// Copies up to `length` bytes, one at a time.
+#[call(sync)]
+async fn copy_bytes<F: Read, G: Write>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+    length: usize,
+) -> usize {
+    let mut copied = 0;
+    while copied < length {
+        let Ok([byte]) = source.read_array::<1>().await else { break };
+        if sink.write_all(&[byte][..]).await.is_err() {
+            break;
+        }
+        copied += 1;
+    }
+    copied
+}
+
+fn main() {
+    let mut hosts = pin!((b"abc".as_slice(), Vec::new()));
+    assert_eq!(hosts.as_mut().sync_copy_bytes(2), 2);
+    assert_eq!(hosts.1, b"ab");
+}
+```
+
+With the `fn-operation` feature, which needs nightly, `fn_operation` makes an
+operation of an async closure over the slots, `async |(a, b)| ..`, without
+naming it. The closure accepts slots of every brand, so it can neither return
+a slot nor hand one to a thread scope outside its future.
 
 ## Executors
 
@@ -370,7 +421,7 @@ async fn collect_records<F: Read, A: ReceiverAccess<Family = F>>(
 ) -> Result<(), ReadExactError<F::Error>> {
     let mut items = pin!(io.read_records());
     loop {
-        match items.as_mut().next_event().await {
+        match items.as_mut().step().await {
             ControlFlow::Continue(record) => records.push(record),
             ControlFlow::Break(result) => return result,
         }
@@ -432,12 +483,27 @@ other than `Guarded` reaches a part of the locked value, such as one stream of
 a connection; when that part is gone, its view reports it, as in the
 [lock tests](tests/locks.rs).
 
-An operation that needs two resources behind separate locks has two choices.
-A family whose view holds both guards acquires them together, in a fixed
-order, and lends both for the same polls. Or the operation runs a nested
+An operation over several receivers runs on executors over all of them. A
+tuple of receivers lends a view of each on every poll. `drive` takes a tuple of
+acquisitions and acquires each receiver only when its slot asks, on its own;
+a `Constructed` receiver in the tuple lends a view on every poll instead.
+`drive_composed` takes a tuple of states, one for each acquisition, so
+`drive_composed((LockAcquisition::new(&a), LockAcquisition::new(&b)), (Guarded,
+Guarded), operation)` runs an operation on the values behind two locks. No view
+is held while the task waits: a view acquired for one slot is released at the
+end of the poll even when another slot's acquisition is pending. An
+acquisition that blocks, such as one of `std::sync::Mutex`, still blocks while
+the poll holds the views acquired before it, so operations that lock the same
+blocking locks must ask for them in the same order; asynchronous locks have no
+such constraint.
+
+An operation that needs two resources behind separate locks can also use one
+family whose view holds both guards, which acquires them together in a fixed
+order and lends both for the same polls, or run a nested
 `drive(acquisition, operation)` for the second resource, which acquires it
 only for the polls that use it; the first resource is not held while the
-nested operation waits. The [driver tests](tests/driver.rs) show both.
+nested operation waits. The [driver tests](tests/driver.rs) show both, and the
+[lock tests](tests/locks.rs) show operations over several receivers.
 
 `BoundCall`, `Drive` and `Child` implement `FusedFuture` and `FusedStream`, as
 `futures::select!` requires. Dropping a call cancels it without rolling back

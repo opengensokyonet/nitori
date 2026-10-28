@@ -75,7 +75,6 @@ impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
     for Composed<'_, A, S>
 {
     type Family = S::Family;
-    type Mode = A::Mode;
     fn visit_view<V: ViewVisitor<S::Family>>(&mut self, visitor: V) -> V::Output {
         self.parent.visit_view(ComposeChild {
             state: Pin::new(&mut self.state),

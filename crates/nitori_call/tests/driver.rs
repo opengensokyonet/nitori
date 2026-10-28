@@ -73,7 +73,7 @@ struct Reader<'p> {
 }
 type Event<Op> = ControlFlow<<Op as Operation<Locked>>::Output, <Op as Operation<Locked>>::Yield>;
 impl<'p> CallExecutor for Reader<'p> {
-    type Family = Locked;
+    type Receivers = Locked;
     type Execution<'a, Op>
         = impl Future<Output = <Op as Operation<Locked>>::Output> + Stream<Item = Event<Op>>
     where

@@ -16,6 +16,8 @@ bytes = ["dep:bytes"]
 tokio-sync = ["dep:tokio", "tokio/sync"]
 # Run operations on values behind `futures::lock::Mutex`.
 futures-lock = ["dep:futures-util", "futures-util/std"]
+# Write operations as async closures with `fn_operation`; needs nightly.
+fn-operation = []
 
 [dependencies.bytes]
 workspace = true

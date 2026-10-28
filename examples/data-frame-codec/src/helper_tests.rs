@@ -358,9 +358,9 @@ fn write_helper_infers_input_generic() {
 
 async fn through_trait_only<T: ReadVarintHostExt + ?Sized>(
     target: Pin<&mut T>,
-) -> Result<u64, ReadBeError<<T::Family as Read>::Error>>
+) -> Result<u64, ReadBeError<<T::Receivers as Read>::Error>>
 where
-    T::Family: Read,
+    T::Receivers: Read,
 {
     target.read_varint().await
 }
@@ -408,7 +408,7 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
 
 async fn write_through_trait_only<
     F: nitori_io::Write,
-    T: CallExecutor<Family = F> + ?Sized + Unpin,
+    T: CallExecutor<Receivers = F> + ?Sized + Unpin,
 >(
     target: &mut T,
     input: Bytes,

@@ -131,7 +131,7 @@ macro_rules! lock_executor {
         /// operation uses it and releasing it at the end of each, or at
         /// release points.
         impl<'lock, T: Receiver + Unpin> CallExecutor for &'lock $mutex::$($path)::+<T> {
-            type Family = T::Family;
+            type Receivers = T::Family;
             type Execution<'a, Op>
                 = OnLock<'lock, $mutex::$($path)::+<T>, Op>
             where

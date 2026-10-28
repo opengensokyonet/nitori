@@ -20,6 +20,8 @@ use syn::{
     visit_mut::{self, VisitMut},
 };
 
+mod several;
+
 fn runtime() -> Tokens {
     quote!(::nitori_call)
 }
@@ -34,7 +36,8 @@ pub fn capability(attribute: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Generate an operation and conveniences for an async function whose first
-/// parameter is a mutable receiver access.
+/// parameter is a mutable receiver access, or whose leading parameters are
+/// several of them.
 #[proc_macro_attribute]
 pub fn call(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
@@ -375,9 +378,10 @@ impl Operation {
     }
 
     /// Parameters of a convenience trait over `receiver`, whose predicates
-    /// name the receiver's family where the operation says `Self`.
-    fn convenience_generics(&self, receiver: &Tokens) -> Generics {
-        let family: Type = parse_quote!(<Self as #receiver>::Family);
+    /// name the receiver's family, its associated type `family`, where the
+    /// operation says `Self`.
+    fn convenience_generics(&self, receiver: &Tokens, family: &Ident) -> Generics {
+        let family: Type = parse_quote!(<Self as #receiver>::#family);
         let mut generics = self.trait_generics.clone();
         if let Some(clause) = &mut generics.where_clause {
             for predicate in clause.predicates.iter_mut() {
@@ -407,7 +411,7 @@ impl Operation {
     /// Methods that bind a host, run the operation as a call and return its result.
     fn host_methods(&self) -> Tokens {
         let runtime = runtime();
-        let family: Type = parse_quote!(<Self as #runtime::CallExecutor>::Family);
+        let family: Type = parse_quote!(<Self as #runtime::CallExecutor>::Receivers);
         let path = self.struct_path();
         let names = self.names();
         let types = self.types(&family, Place::Outside);
@@ -469,6 +473,7 @@ fn convenience_trait(
     name: &Ident,
     generics: &Generics,
     receiver: Tokens,
+    family: &Ident,
     family_bounds: Tokens,
     methods: Tokens,
 ) -> Tokens {
@@ -481,12 +486,12 @@ fn convenience_trait(
         .collect();
     quote! {
         #vis trait #name<#(#parameters),*>: #receiver
-        where <Self as #receiver>::Family: #family_bounds, #(#predicates,)*
+        where <Self as #receiver>::#family: #family_bounds, #(#predicates,)*
         {
             #methods
         }
         impl<#(#parameters,)* __Receiver: #receiver + ?Sized> #name #type_generics for __Receiver
-        where <__Receiver as #receiver>::Family: #family_bounds, #(#predicates,)*
+        where <__Receiver as #receiver>::#family: #family_bounds, #(#predicates,)*
         {}
     }
 }
@@ -598,16 +603,18 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
     generated.extend(convenience_trait(
         vis,
         &format_ident!("{}Ext", item.ident),
-        &first.convenience_generics(&access),
+        &first.convenience_generics(&access, &format_ident!("Family")),
         access,
+        &format_ident!("Family"),
         bounds.clone(),
         access_methods,
     ));
     generated.extend(convenience_trait(
         vis,
         &format_ident!("{}HostExt", item.ident),
-        &first.convenience_generics(&host),
+        &first.convenience_generics(&host, &format_ident!("Receivers")),
         host,
+        &format_ident!("Receivers"),
         bounds,
         host_methods,
     ));
@@ -777,6 +784,10 @@ fn primitive(
 }
 
 fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
+    let count = several::access_count(&item);
+    if count > 1 {
+        return several::expand(item, options, count);
+    }
     let runtime = runtime();
     // The emitter parameter added for `yield`, named hygienically.
     let emitter = Ident::new("__emitter", Span::mixed_site());
@@ -1060,16 +1071,18 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let access_trait = convenience_trait(
         &operation.vis,
         &format_ident!("{}Ext", camel),
-        &operation.convenience_generics(&access),
+        &operation.convenience_generics(&access, &format_ident!("Family")),
         access,
+        &format_ident!("Family"),
         bounds.clone(),
         access_methods,
     );
     let host_trait = convenience_trait(
         &operation.vis,
         &format_ident!("{}HostExt", camel),
-        &operation.convenience_generics(&host),
+        &operation.convenience_generics(&host, &format_ident!("Receivers")),
         host,
+        &format_ident!("Receivers"),
         bounds,
         operation.host_methods(),
     );

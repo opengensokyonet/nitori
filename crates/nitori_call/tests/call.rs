@@ -1002,3 +1002,136 @@ fn a_branch_that_offers_its_view_back_is_polled_with_the_answer() {
     );
     assert_eq!(wakes.get(), 0);
 }
+
+/// The length of the bytes behind a view of `Shared`.
+fn shared_length(view: nitori_call::Access<'_, '_, Direct<Shared>>) -> usize {
+    view.into_pin()
+        .get_mut()
+        .0
+        .as_mut()
+        .get_mut()
+        .0
+        .borrow()
+        .len()
+}
+
+/// Tries the view on a scoped thread, then on the polling thread.
+struct MeasureElsewhere;
+impl Operation<Direct<Shared>> for MeasureElsewhere {
+    type Output = (bool, usize);
+    type Yield = Infallible;
+}
+impl<'s, A: ReceiverAccess<Family = Direct<Shared>> + Send> Start<'s, A> for MeasureElsewhere {
+    type Fut = impl Future<Output = (bool, usize)>;
+    fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+        async move {
+            let rejected = poll_fn(|cx| {
+                let waker = cx.waker().clone();
+                let joined = std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            io.poll_access(&mut Context::from_waker(&waker), |view, _| {
+                                Poll::Ready(shared_length(view))
+                            })
+                        })
+                        .join()
+                });
+                Poll::Ready(joined.is_err())
+            })
+            .await;
+            let length =
+                poll_fn(|cx| io.poll_access(cx, |view, _| Poll::Ready(shared_length(view)))).await;
+            (rejected, length)
+        }
+    }
+}
+
+#[test]
+fn a_view_is_used_only_on_the_thread_polling_its_call() {
+    let shared = Shared::default();
+    shared.0.borrow_mut().extend(*b"abc");
+    let mut call = pin!(Call::new(MeasureElsewhere));
+    assert_send(&call);
+    assert_eq!(
+        poll(call.as_mut(), Pin::new(&mut { shared })),
+        Poll::Ready((true, 3))
+    );
+}
+
+/// Asks for a view on a scoped thread, then uses it on the polling thread.
+struct AskElsewhere;
+impl Operation<Direct<Shared>> for AskElsewhere {
+    type Output = usize;
+    type Yield = Infallible;
+}
+impl<'s, A: ReceiverAccess<Family = Direct<Shared>> + Send> Start<'s, A> for AskElsewhere {
+    type Fut = impl Future<Output = usize>;
+    fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+        async move {
+            let mut asked = false;
+            poll_fn(|cx| {
+                if std::mem::replace(&mut asked, true) {
+                    return Poll::Ready(());
+                }
+                let waker = cx.waker().clone();
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            io.poll_access(&mut Context::from_waker(&waker), |_, _| Poll::Ready(()))
+                        })
+                        .join()
+                        .unwrap()
+                })
+            })
+            .await;
+            poll_fn(|cx| io.poll_access(cx, |view, _| Poll::Ready(shared_length(view)))).await
+        }
+    }
+}
+
+#[test]
+fn a_scoped_thread_may_ask_for_a_view() {
+    let shared = Shared::default();
+    shared.0.borrow_mut().extend(*b"ab");
+    let mut call = pin!(Call::new(AskElsewhere));
+    assert_eq!(
+        lazily(call.as_mut(), Pin::new(&mut { shared })),
+        (true, Poll::Ready(2))
+    );
+}
+
+/// Asks for a view in a branch that is polled only when woken, while another
+/// branch emits an item in the same poll.
+struct AskWhileEmitting;
+impl<F: ReceiverFamily> Operation<F> for AskWhileEmitting {
+    type Output = u8;
+    type Yield = u8;
+}
+impl<'s, A: ReceiverAccess<Family: Read<Error = Infallible>>> Start<'s, A> for AskWhileEmitting {
+    type Fut = impl Future<Output = u8>;
+    fn start(self, mut io: A, mut emitter: Emitter<'s, u8>) -> Self::Fut {
+        async move {
+            let read = only_when_woken(async { read_array::<1, _>(&mut io).await.unwrap()[0] });
+            let emit = emitter.emit(7);
+            futures_util::future::join(read, emit).await.0
+        }
+    }
+}
+
+#[test]
+fn a_branch_that_asks_while_an_item_is_emitted_is_woken_by_the_view() {
+    let mut input = b"x".as_slice();
+    let mut call = pin!(Call::<Memory, _>::new(AskWhileEmitting));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(
+        call.as_mut().poll_with(None, &mut cx),
+        CallPoll::Ready(ControlFlow::Continue(7))
+    );
+    assert_eq!(
+        call.as_mut().poll_with(
+            Some(Lend::Fixed(pin!(Pin::new(&mut input).view()))),
+            &mut cx
+        ),
+        CallPoll::Ready(ControlFlow::Break(b'x'))
+    );
+}

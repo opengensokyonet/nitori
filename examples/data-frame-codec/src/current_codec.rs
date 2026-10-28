@@ -45,7 +45,7 @@ pub async fn read_data_frame<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     let length = usize::try_from(length).context(LengthSnafu)?;
     let mut chunks = pin!(io.read_chunks_exact(length, chunk_size));
     loop {
-        match chunks.as_mut().next_event().await {
+        match chunks.as_mut().step().await {
             ControlFlow::Continue(chunk) => yield chunk,
             ControlFlow::Break(result) => break result.context(PayloadSnafu)?,
         }

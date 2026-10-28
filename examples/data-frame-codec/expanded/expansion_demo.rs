@@ -75,7 +75,7 @@ impl<__Receiver: ::nitori_call::ReceiverAccess + ?Sized> ReadPairExt for
     Read {}
 trait ReadPairHostExt: ::nitori_call::CallExecutor where
     <Self as
-    ::nitori_call::CallExecutor>::Family: ::nitori_call::ReceiverFamily +
+    ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
     Read {
     fn read_pair<'__d>(self: ::core::pin::Pin<&'__d mut Self>)
         -> <Self as ::nitori_call::CallExecutor>::Execution<'__d, ReadPair<>>
@@ -91,7 +91,7 @@ trait ReadPairHostExt: ::nitori_call::CallExecutor where
         ->
             <ReadPair<> as
             ::nitori_call::Operation<<Self as
-            ::nitori_call::CallExecutor>::Family>>::Output where
+            ::nitori_call::CallExecutor>::Receivers>>::Output where
         ReadPair<>: '__d {
         ::nitori_call::__private::run_sync(Self::read_pair(self))
     }
@@ -99,7 +99,7 @@ trait ReadPairHostExt: ::nitori_call::CallExecutor where
         ->
             <ReadPair<> as
             ::nitori_call::Operation<<Self as
-            ::nitori_call::CallExecutor>::Family>>::Output where
+            ::nitori_call::CallExecutor>::Receivers>>::Output where
         Self: ::core::marker::Unpin, ReadPair<>: '__d {
         ::nitori_call::__private::run_sync(Self::read_pair(::core::pin::Pin::new(self)))
     }
@@ -107,8 +107,8 @@ trait ReadPairHostExt: ::nitori_call::CallExecutor where
 impl<__Receiver: ::nitori_call::CallExecutor + ?Sized> ReadPairHostExt for
     __Receiver where
     <__Receiver as
-    ::nitori_call::CallExecutor>::Family: ::nitori_call::ReceiverFamily + Read
-    {}
+    ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
+    Read {}
 
 fn main() {
     let mut input = b"\x01\x02".as_slice();
@@ -196,7 +196,7 @@ fn main() {
                 Read<Error = Infallible> {}
             trait SumHostExt: ::nitori_call::CallExecutor where
                 <Self as
-                ::nitori_call::CallExecutor>::Family: ::nitori_call::ReceiverFamily +
+                ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
                 Read<Error = Infallible> {
                 fn sum<'__d>(self: ::core::pin::Pin<&'__d mut Self>)
                     ->
@@ -216,7 +216,7 @@ fn main() {
             impl<__Receiver: ::nitori_call::CallExecutor + ?Sized> SumHostExt
                 for __Receiver where
                 <__Receiver as
-                ::nitori_call::CallExecutor>::Family: ::nitori_call::ReceiverFamily +
+                ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
                 Read<Error = Infallible> {}
             let execution =
                 {

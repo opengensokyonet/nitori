@@ -121,6 +121,10 @@ impl<'scope, F: ReceiverFamily + 'scope> ViewLoan<'scope, F> {
             borrow: PhantomData,
         }
     }
+    /// The loan, without the borrow that keeps it valid.
+    pub(crate) fn into_raw(self) -> RawViewLoan<F> {
+        self.raw
+    }
     pub fn apply<A: ViewOperation<F>>(&mut self, operation: A) -> A::Output {
         // SAFETY: the lifetime marker keeps the original pinned loan alive,
         // and &mut self excludes every other use through this wrapper.

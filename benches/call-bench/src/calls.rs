@@ -135,7 +135,7 @@ pub async fn read_all<P: Protocol>(
         let kind = {
             let mut frame = pin!(io.read_frame(protocol));
             loop {
-                match frame.as_mut().next_event().await {
+                match frame.as_mut().step().await {
                     ControlFlow::Continue(piece) => pieces.push(piece),
                     ControlFlow::Break(kind) => break kind?,
                 }
@@ -333,7 +333,7 @@ impl<'p, L: Lock> ViewAcquisition<'p> for LockAcquisition<'p, L> {
 
 type Event<F, Op> = ControlFlow<<Op as Operation<F>>::Output, <Op as Operation<F>>::Yield>;
 impl<'p, L: Lock> CallExecutor for Shared<'p, L> {
-    type Family = Locked<L>;
+    type Receivers = Locked<L>;
     type Execution<'a, Op>
         = impl Future<Output = <Op as Operation<Locked<L>>>::Output>
         + Stream<Item = Event<Locked<L>, Op>>

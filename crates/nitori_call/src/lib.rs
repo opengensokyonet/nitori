@@ -71,19 +71,53 @@
 //!
 //! ## Threads
 //!
-//! A slot stays on the thread polling its call:
+//! A view is used only on the thread polling its call. A slot may move to a
+//! scoped thread during a poll, but using the view there panics:
+//!
+//! ```should_panic
+//! #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_call::{Call, Direct, DirectView, Emitter, Lend, Operation, ReceiverAccess, ReceiverFamily, Start};
+//! # use std::{convert::Infallible, future::{Future, poll_fn}, pin::{Pin, pin}, task::{Context, Poll, Waker}};
+//! struct Elsewhere;
+//! impl<F: ReceiverFamily> Operation<F> for Elsewhere {
+//!     type Output = ();
+//!     type Yield = Infallible;
+//! }
+//! impl<'s, A: ReceiverAccess + Send> Start<'s, A> for Elsewhere {
+//!     type Fut = impl Future<Output = ()>;
+//!     fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!         async move {
+//!             poll_fn(|cx| {
+//!                 let waker = cx.waker().clone();
+//!                 std::thread::scope(|scope| {
+//!                     scope.spawn(|| io.poll_access(&mut Context::from_waker(&waker), |_, _| Poll::Ready(())));
+//!                 });
+//!                 Poll::Ready(())
+//!             })
+//!             .await
+//!         }
+//!     }
+//! }
+//! let mut call = pin!(Call::<Direct<u8>, _>::new(Elsewhere));
+//! let mut value = 0;
+//! let _ = call.as_mut().poll_return_with(
+//!     Some(Lend::Fixed(pin!(DirectView(Pin::new(&mut value))))),
+//!     &mut Context::from_waker(Waker::noop()),
+//! );
+//! ```
+//!
+//! A slot is not `Sync`, so threads cannot share one:
 //!
 //! ```compile_fail
-//! # use nitori_call::{Direct, ReceiverAccess, ReceiverSlot};
-//! # use std::task::{Context, Poll, Waker};
-//! fn elsewhere(io: &mut ReceiverSlot<'_, Direct<Vec<u8>>>) {
+//! # use nitori_call::{Direct, ReceiverSlot};
+//! fn shared(io: &ReceiverSlot<'_, Direct<Vec<u8>>>) {
 //!     std::thread::scope(|scope| {
-//!         scope.spawn(|| io.poll_access(&mut Context::from_waker(Waker::noop()), |_, _| Poll::Ready(())));
+//!         scope.spawn(|| io);
 //!     });
 //! }
 //! ```
 //!
-//! A call is `Send` when everything its operation keeps apart from the slot is
+//! A call is `Send` when everything its operation keeps besides the slot is
 //! `Send`. The resource and its views need not be: they are used only
 //! during a poll, on the polling thread.
 //!
@@ -133,6 +167,7 @@
 //! ```
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(feature = "tokio-sync", feature(impl_trait_in_assoc_type))]
+#![cfg_attr(feature = "fn-operation", feature(async_fn_traits, unboxed_closures))]
 
 mod receiver;
 pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamily};
@@ -142,14 +177,20 @@ mod access;
 pub use access::{Access, ReceiverAccess, ReceiverSlot, ReleaseView};
 mod compose;
 pub use compose::{Compose, Composed};
+mod receivers;
+pub use receivers::{Accesses, Receivers};
 mod call;
 pub use call::{Call, CallPoll, DynCall, Emitter, Lend, Operation, RootOperation, Start};
 mod child;
 pub use child::Child;
+#[cfg(feature = "fn-operation")]
+mod fn_operation;
+#[cfg(feature = "fn-operation")]
+pub use fn_operation::{FnOperation, fn_operation};
 mod driver;
 pub use driver::{
-    AcquiredScope, AcquisitionState, BoundCall, CallExecutor, Composing, Drive, ReceiverScope,
-    ViewAcquisition, drive, drive_composed,
+    AcquiredScope, AcquisitionState, Acquisitions, BoundCall, CallExecutor, Composing, Constructed,
+    Drive, ReceiverScope, ViewAcquisition, drive, drive_composed,
 };
 mod lock;
 pub use lock::{Guarded, Lock, LockAcquisition, Locked};
