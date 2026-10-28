@@ -1,0 +1,23 @@
+[package]
+name = "loan-proof"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[[test]]
+name = "scoped"
+path = "scoped.rs"
+
+[[test]]
+name = "family"
+path = "family.rs"
+
+[dev-dependencies]
+futures-util = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+
+# Build this experiment independently of the library workspace.
+[workspace]
+resolver = "3"

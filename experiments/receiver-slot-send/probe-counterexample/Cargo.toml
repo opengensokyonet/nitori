@@ -1,0 +1,16 @@
+[package]
+name = "probe-counterexample"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "probe-counterexample"
+path = "main.rs"
+
+[dependencies]
+nitori_call = { path = "../../../crates/nitori_call" }
+
+# Build this check independently of the library workspace.
+[workspace]
+resolver = "3"
