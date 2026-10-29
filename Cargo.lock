@@ -103,6 +103,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitori_id"
+version = "0.0.0"
+
+[[package]]
 name = "nitori_io"
 version = "0.0.0"
 dependencies = [

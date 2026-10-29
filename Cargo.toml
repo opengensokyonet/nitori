@@ -3,6 +3,7 @@ members = [
     "benches/call-bench",
     "crates/nitori_call",
     "crates/nitori_call_macros",
+    "crates/nitori_id",
     "crates/nitori_io",
     "examples/data-frame-codec",
 ]
