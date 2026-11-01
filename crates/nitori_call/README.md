@@ -349,7 +349,11 @@ the branches waiting for that slot. A `Child` likewise runs over a tuple of
 accesses. The tuple has 2 to 12 elements and can nest.
 
 `#[call]` makes such an operation of a function whose leading parameters are
-several accesses. Inside another operation, call the function itself; an
+several accesses. Accesses can share a family parameter: two accesses written
+`ReceiverAccess<Family = F>` make `Operation<(F, F)>`, two receivers of one
+family. Accesses come first, and every later parameter bounded by
+`ReceiverAccess` or `LentAccess` must be one of them, so an access cannot pass
+as an ordinary argument. Inside another operation, call the function itself; an
 executor over the receivers, such as a tuple of them, gets host methods:
 
 ```rust

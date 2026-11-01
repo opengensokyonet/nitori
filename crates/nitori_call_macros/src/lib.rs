@@ -875,9 +875,9 @@ fn primitive(
 }
 
 fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
-    let count = several::access_count(&item);
-    if count > 1 {
-        return several::expand(item, options, count);
+    let (accesses, generics) = several::take_accesses(&item)?;
+    if accesses.len() > 1 {
+        return several::expand(item, options, accesses, generics);
     }
     let runtime = runtime();
     // The emitter parameter added for `yield`, named hygienically.
@@ -918,7 +918,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         kind: access_kind,
         bounds: family_bounds,
         family: family_name,
-    } = take_access_bounds(&access.ty, &mut generics)?;
+    } = take_access_bounds(&access.ty, &mut generics, &[])?;
     reject_hosted_lent(&options, access_kind, access.ty.span())?;
     // Explicit arguments for calling the function from the operation's future.
     let turbofish: Vec<Tokens> = signature
@@ -1286,9 +1286,13 @@ fn mentions(tokens: Tokens, name: &str) -> bool {
 /// Accepted forms: `&mut impl ReceiverAccess<Family: Bounds>`, or `&mut A`
 /// where `A` is bounded by `ReceiverAccess<Family: Bounds>`; in either,
 /// `Family = F` with `F: Bounds` a type parameter of the function, which is
-/// removed from `generics` as well. `LentAccess` may stand for
-/// `ReceiverAccess`.
-fn take_access_bounds(ty: &Type, generics: &mut Generics) -> Result<AccessBounds> {
+/// removed from `generics` as well unless an access of `earlier` shares it
+/// and keeps its bounds. `LentAccess` may stand for `ReceiverAccess`.
+fn take_access_bounds(
+    ty: &Type,
+    generics: &mut Generics,
+    earlier: &[AccessBounds],
+) -> Result<AccessBounds> {
     let (access, kind, bound) = take_access(ty, generics)?;
     match bound {
         FamilyBound::Bounds(bounds) => Ok(AccessBounds {
@@ -1297,6 +1301,18 @@ fn take_access_bounds(ty: &Type, generics: &mut Generics) -> Result<AccessBounds
             bounds,
             family: None,
         }),
+        FamilyBound::Named(family)
+            if earlier
+                .iter()
+                .any(|access| access.family.as_ref() == Some(&family)) =>
+        {
+            Ok(AccessBounds {
+                access,
+                kind,
+                bounds: Punctuated::new(),
+                family: Some(family),
+            })
+        }
         FamilyBound::Named(family) => {
             let bounds = take_type_parameter(generics, &family).ok_or_else(|| {
                 Error::new(
@@ -1416,8 +1432,24 @@ enum FamilyBound {
     Named(Ident),
 }
 
-/// The access traits among `bounds`, by the last segment of their paths: which
-/// kind of access they make, and how they bound the family.
+/// The access trait `bound` names, by the last segment of its path, and that
+/// segment.
+fn access_trait(bound: &TypeParamBound) -> Option<(AccessKind, &syn::PathSegment)> {
+    let TypeParamBound::Trait(trait_bound) = bound else {
+        return None;
+    };
+    let last = trait_bound.path.segments.last()?;
+    if last.ident == "LentAccess" {
+        Some((AccessKind::Lent, last))
+    } else if last.ident == "ReceiverAccess" {
+        Some((AccessKind::Receiver, last))
+    } else {
+        None
+    }
+}
+
+/// The access traits among `bounds`: which kind of access they make, and how
+/// they bound the family.
 fn family_bounds(
     bounds: &Punctuated<TypeParamBound, Token![+]>,
     span: &Type,
@@ -1425,17 +1457,7 @@ fn family_bounds(
     let mut kind = None;
     let mut family = None;
     for bound in bounds {
-        let TypeParamBound::Trait(trait_bound) = bound else {
-            continue;
-        };
-        let Some(last) = trait_bound.path.segments.last() else {
-            continue;
-        };
-        let this = if last.ident == "LentAccess" {
-            AccessKind::Lent
-        } else if last.ident == "ReceiverAccess" {
-            AccessKind::Receiver
-        } else {
+        let Some((this, last)) = access_trait(bound) else {
             continue;
         };
         kind = Some(kind.map_or(this, |kind| match kind {

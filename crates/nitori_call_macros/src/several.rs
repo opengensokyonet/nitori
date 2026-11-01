@@ -1,30 +1,65 @@
 //! `#[call]` for functions whose leading parameters are several accesses.
 use crate::{
-    AccessBounds, AccessKind, Module, Options, RewriteYield, arguments, camel_case, collect_names,
-    mentions, name_impl_traits, name_lifetimes, reject_hosted_lent, runtime, split_generics,
-    take_access_bounds,
+    AccessBounds, AccessKind, Module, Options, RewriteYield, access_trait, arguments, camel_case,
+    collect_names, mentions, name_impl_traits, name_lifetimes, reject_hosted_lent, runtime,
+    split_generics, take_access_bounds, take_type_parameter,
 };
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
 use syn::{
     Error, FnArg, GenericParam, Generics, Ident, ItemFn, LifetimeParam, Result, ReturnType, Type,
-    TypeParamBound, WherePredicate, parse_quote,
+    TypeGroup, TypeParamBound, TypeParen, TypeReference, WherePredicate, parse_quote,
     punctuated::Punctuated,
     spanned::Spanned,
     visit_mut::{self, VisitMut},
 };
 
-/// How many leading parameters of `item` are accesses.
-pub(crate) fn access_count(item: &ItemFn) -> usize {
+/// The leading parameters of `item` that are accesses, and its generics
+/// without them. After the first, every parameter bounded as an access must
+/// be a valid access among the leading ones.
+pub(crate) fn take_accesses(item: &ItemFn) -> Result<(Vec<AccessBounds>, Generics)> {
     let mut generics = item.sig.generics.clone();
-    item.sig
-        .inputs
-        .iter()
-        .take_while(|input| match input {
-            FnArg::Typed(typed) => take_access_bounds(&typed.ty, &mut generics).is_ok(),
-            FnArg::Receiver(_) => false,
-        })
-        .count()
+    let mut accesses = Vec::new();
+    let mut ended = false;
+    for input in &item.sig.inputs {
+        let FnArg::Typed(typed) = input else { break };
+        if !accesses.is_empty() && !bounded_as_access(&typed.ty, &generics) {
+            ended = true;
+            continue;
+        }
+        if ended {
+            return Err(Error::new(
+                typed.ty.span(),
+                "accesses must come before the other parameters",
+            ));
+        }
+        match take_access_bounds(&typed.ty, &mut generics, &accesses) {
+            Ok(access) => accesses.push(access),
+            // A function with one access reports its first parameter itself.
+            Err(_) if accesses.is_empty() => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((accesses, generics))
+}
+
+/// Whether `ty` says it is an access, valid or not: an `impl Trait` or a type
+/// parameter of `generics` bounded by an access trait, behind any references.
+fn bounded_as_access(ty: &Type, generics: &Generics) -> bool {
+    match ty {
+        Type::Reference(TypeReference { elem, .. })
+        | Type::Paren(TypeParen { elem, .. })
+        | Type::Group(TypeGroup { elem, .. }) => bounded_as_access(elem, generics),
+        Type::ImplTrait(bounds) => bounds
+            .bounds
+            .iter()
+            .any(|bound| access_trait(bound).is_some()),
+        Type::Path(path) if path.qself.is_none() => path.path.get_ident().is_some_and(|ident| {
+            take_type_parameter(&mut generics.clone(), ident)
+                .is_some_and(|bounds| bounds.iter().any(|bound| access_trait(bound).is_some()))
+        }),
+        _ => false,
+    }
 }
 
 /// Replaces `A::Family` and `<A as ReceiverAccess>::Family` with a family
@@ -78,7 +113,12 @@ struct Access {
     local: Ident,
 }
 
-pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result<Tokens> {
+pub(crate) fn expand(
+    mut item: ItemFn,
+    options: Options,
+    taken: Vec<AccessBounds>,
+    mut generics: Generics,
+) -> Result<Tokens> {
     let runtime = runtime();
     let emitter = Ident::new("__emitter", Span::mixed_site());
     match &options.yields {
@@ -108,20 +148,16 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
         ));
     }
 
-    // The accesses, removed from the generics.
-    let mut generics = signature.generics.clone();
+    let count = taken.len();
     let mut accesses = Vec::new();
-    for (index, input) in signature.inputs.iter().take(count).enumerate() {
-        let FnArg::Typed(typed) = input else {
-            unreachable!()
-        };
+    for (index, (input, taken)) in signature.inputs.iter().zip(taken).enumerate() {
         let AccessBounds {
             access,
             kind,
             bounds,
             family,
-        } = take_access_bounds(&typed.ty, &mut generics)?;
-        reject_hosted_lent(&options, kind, typed.ty.span())?;
+        } = taken;
+        reject_hosted_lent(&options, kind, input.span())?;
         accesses.push(Access {
             name: access,
             kind,
@@ -307,7 +343,15 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
     let access_parameters: Vec<&Ident> = accesses.iter().map(|access| &access.parameter).collect();
     let access_bounds: Vec<Tokens> = accesses.iter().map(|access| access.kind.bound()).collect();
     let locals: Vec<&Ident> = accesses.iter().map(|access| &access.local).collect();
-    let family_bounds: Vec<Tokens> = accesses
+    // Accesses sharing a family name it once; the first holds its bounds.
+    let mut distinct: Vec<&Access> = Vec::new();
+    for access in &accesses {
+        if !distinct.iter().any(|seen| seen.family == access.family) {
+            distinct.push(access);
+        }
+    }
+    let family_parameters: Vec<&Ident> = distinct.iter().map(|access| &access.family).collect();
+    let family_bounds: Vec<Tokens> = distinct
         .iter()
         .map(|access| {
             let family = &access.family;
@@ -385,6 +429,7 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
             trait_generics: &trait_generics,
             method_generics: &method_generics,
             family_bounds: &family_bounds,
+            family_parameters: &family_parameters,
             families: &families,
             struct_arguments: &struct_arguments,
             names: &names,
@@ -414,6 +459,9 @@ struct HostTrait<'a> {
     trait_generics: &'a Generics,
     method_generics: &'a Generics,
     family_bounds: &'a [Tokens],
+    /// Each family once.
+    family_parameters: &'a [&'a Ident],
+    /// The family of each access.
     families: &'a [&'a Ident],
     struct_arguments: &'a Tokens,
     names: &'a [&'a Ident],
@@ -434,6 +482,7 @@ fn host_trait(host: HostTrait<'_>) -> Tokens {
         trait_generics,
         method_generics,
         family_bounds,
+        family_parameters,
         families,
         struct_arguments,
         names,
@@ -517,13 +566,13 @@ fn host_trait(host: HostTrait<'_>) -> Tokens {
     let doc = format!("Run [`{operation}`] on an executor over its receivers.");
     quote! {
         #[doc = #doc]
-        #vis trait #trait_name<#(#trait_parameters,)* #(#families,)*>:
+        #vis trait #trait_name<#(#trait_parameters,)* #(#family_parameters,)*>:
             #runtime::CallExecutor<Receivers = #receivers>
         where #(#family_bounds,)* #(#trait_predicates,)*
         {
             #methods
         }
-        impl<#(#trait_parameters,)* #(#families,)* __Executor> #trait_name<#(#trait_names,)* #(#families,)*> for __Executor
+        impl<#(#trait_parameters,)* #(#family_parameters,)* __Executor> #trait_name<#(#trait_names,)* #(#family_parameters,)*> for __Executor
         where
             __Executor: #runtime::CallExecutor<Receivers = #receivers> + ?Sized,
             #(#family_bounds,)* #(#trait_predicates,)*

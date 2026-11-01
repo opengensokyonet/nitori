@@ -235,6 +235,69 @@ pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 /// methods, so `sync` is an error. The access trait is recognized by the last
 /// segment of its path, which a renamed import hides.
 ///
+/// Several leading accesses make an operation over several receivers, and they
+/// may share a family parameter, as `Operation<(F, F)>`. After the first, every
+/// parameter bounded by an access trait is one of these accesses, never an
+/// ordinary argument, so it must have the form the first has:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{Direct, ReceiverAccess, call};
+/// #[call]
+/// async fn concrete(
+///     first: &mut impl ReceiverAccess<Family: Sized>,
+///     second: &mut impl ReceiverAccess<Family = Direct<u32>>,
+/// ) {
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn shared(
+///     first: &mut impl ReceiverAccess<Family: Sized>,
+///     second: &impl ReceiverAccess<Family: Sized>,
+/// ) {
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn shared_named<A: ReceiverAccess<Family: Sized>>(
+///     first: &mut impl ReceiverAccess<Family: Sized>,
+///     second: &A,
+/// ) {
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn by_value(
+///     first: &mut impl ReceiverAccess<Family: Sized>,
+///     second: impl ReceiverAccess<Family: Sized>,
+/// ) {
+/// }
+/// ```
+///
+/// Accesses come first:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn late<A: ReceiverAccess<Family: Sized>>(
+///     first: &mut impl ReceiverAccess<Family: Sized>,
+///     length: usize,
+///     second: &mut A,
+/// ) {
+/// }
+/// ```
+///
 /// With `yields = Item`, each `yield value` written directly in the function
 /// body emits an item, and the return value is the final value. The crate
 /// enables `yield_expr` as well. `yield` in closures (including coroutines),
