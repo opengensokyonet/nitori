@@ -8,17 +8,24 @@
 //! call shows against the cost of an access. A release point after every
 //! access shows what releasing costs: nothing to do with an exclusive
 //! receiver, a release and a new acquisition with a lock.
+//!
+//! A step that cannot wait reads as a closure on a lent access. The rows of
+//! that group compare it with `poll_fn` and `poll_access`, the way to write
+//! the same step on a plain access, and each call is polled directly with a
+//! view pinned by the caller, as a driver lending every view does. The rows
+//! with two receivers use both in one step, nested on a plain access.
 use crate::{
     calls::{Locked, Release, Shared},
     common::{Lock, LockKind, LockStats, PerLock, PollLock, Progress, with_lock},
 };
 use nitori_call::{
-    BorrowedReceiver, ReceiverAccess, ReceiverFamily, call, capability, family_receiver,
+    BorrowedReceiver, Call, CallPoll, Lend, LentAccess, LentAccesses, LentCall, Receiver,
+    ReceiverAccess, ReceiverFamily, ViewLoan, call, capability, family_receiver,
 };
 use std::{
     future::poll_fn,
     hint::black_box,
-    pin::Pin,
+    pin::{Pin, pin},
     task::{Context, Poll, ready},
     time::{Duration, Instant},
 };
@@ -54,6 +61,10 @@ pub trait Step: ReceiverFamily {
     ) -> Poll<u64>
     where
         Self: 'visit;
+    /// The same step, which cannot wait.
+    fn advance<'visit>(host: Pin<&mut Self::ReceiverView<'visit>>) -> u64
+    where
+        Self: 'visit;
 }
 family_receiver!(impl [] for Counter);
 impl Step for Counter {
@@ -66,6 +77,13 @@ impl Step for Counter {
     {
         Poll::Ready(host.get_mut().0.as_mut().get_mut().step())
     }
+    #[inline]
+    fn advance<'visit>(host: Pin<&mut BorrowedReceiver<'visit, Counter>>) -> u64
+    where
+        Self: 'visit,
+    {
+        host.get_mut().0.as_mut().get_mut().step()
+    }
 }
 impl<L: Lock<Value = Counter>> Step for Locked<L> {
     fn poll_step<'visit>(
@@ -76,6 +94,12 @@ impl<L: Lock<Value = Counter>> Step for Locked<L> {
         Self: 'visit,
     {
         Poll::Ready(host.get_mut().0.step())
+    }
+    fn advance<'visit>(host: Pin<&mut <Self as ReceiverFamily>::ReceiverView<'visit>>) -> u64
+    where
+        Self: 'visit,
+    {
+        host.get_mut().0.step()
     }
 }
 
@@ -89,6 +113,78 @@ async fn steps(io: &mut impl ReceiverAccess<Family: Step>, count: usize, release
         if release {
             io.release_view().await;
         }
+    }
+    last
+}
+
+/// Make `count` synchronous steps on a plain access.
+#[call]
+async fn polled_steps<F: Step>(io: &mut impl ReceiverAccess<Family = F>, count: usize) -> u64 {
+    let mut last = 0;
+    for _ in 0..count {
+        last = poll_fn(|cx| {
+            io.poll_access(cx, |access, _| Poll::Ready(F::advance(access.into_pin())))
+        })
+        .await;
+    }
+    last
+}
+
+/// Make `count` steps with `with` on a lent access.
+#[call]
+async fn lent_steps<F: Step>(io: &mut impl LentAccess<Family = F>, count: usize) -> u64 {
+    let mut last = 0;
+    for _ in 0..count {
+        last = io.with(|access| F::advance(access.into_pin()));
+    }
+    last
+}
+
+/// Make `count` steps with the generated method on a lent access.
+#[call]
+async fn lent_method_steps(io: &mut impl LentAccess<Family: Step>, count: usize) -> u64 {
+    let mut last = 0;
+    for _ in 0..count {
+        last = io.advance();
+    }
+    last
+}
+
+/// Step both receivers `count` times, nesting one access in the other.
+#[call]
+async fn polled_pairs<F: Step, G: Step>(
+    first: &mut impl ReceiverAccess<Family = F>,
+    second: &mut impl ReceiverAccess<Family = G>,
+    count: usize,
+) -> u64 {
+    let mut last = 0;
+    for _ in 0..count {
+        last = poll_fn(|cx| {
+            first.poll_access(cx, |first, cx| {
+                second.poll_access(cx, |second, _| {
+                    G::advance(second.into_pin());
+                    Poll::Ready(F::advance(first.into_pin()))
+                })
+            })
+        })
+        .await;
+    }
+    last
+}
+
+/// Step both receivers `count` times in one synchronous step each.
+#[call]
+async fn lent_pairs<F: Step, G: Step>(
+    first: &mut impl LentAccess<Family = F>,
+    second: &mut impl LentAccess<Family = G>,
+    count: usize,
+) -> u64 {
+    let mut last = 0;
+    for _ in 0..count {
+        last = (&mut *first, &mut *second).with(|first, second| {
+            G::advance(second.into_pin());
+            F::advance(first.into_pin())
+        });
     }
     last
 }
@@ -229,6 +325,99 @@ pub fn run(runtime: &Runtime) {
             }),
         );
     }
+    println!("synchronous steps, exclusive");
+    row(
+        "poll_fn + poll_access",
+        per_access(runtime, async |per_call| {
+            let mut counter = Counter::default();
+            let mut last = 0;
+            for _ in 0..ACCESSES / per_call {
+                let mut call = pin!(Call::<Counter, _>::new(PolledSteps::new(per_call)));
+                let mut view = pin!(Pin::new(black_box(&mut counter)).view());
+                last = poll_fn(|cx| {
+                    let lend = Some(Lend::Fixed(view.as_mut()));
+                    match call.as_mut().poll_return_with(lend, cx) {
+                        CallPoll::Ready(value) => Poll::Ready(value),
+                        _ => Poll::Pending,
+                    }
+                })
+                .await;
+            }
+            last
+        }),
+    );
+    row(
+        "LentCall, with",
+        per_access(runtime, async |per_call| {
+            let mut counter = Counter::default();
+            let mut last = 0;
+            for _ in 0..ACCESSES / per_call {
+                let mut call = pin!(LentCall::<Counter, _>::new(LentSteps::new(per_call)));
+                let mut view = pin!(Pin::new(black_box(&mut counter)).view());
+                last = poll_fn(|cx| call.as_mut().poll_return_with_views(view.as_mut(), cx)).await;
+            }
+            last
+        }),
+    );
+    row(
+        "LentCall, method",
+        per_access(runtime, async |per_call| {
+            let mut counter = Counter::default();
+            let mut last = 0;
+            for _ in 0..ACCESSES / per_call {
+                let mut call = pin!(LentCall::<Counter, _>::new(LentMethodSteps::new(per_call)));
+                let mut view = pin!(Pin::new(black_box(&mut counter)).view());
+                last = poll_fn(|cx| call.as_mut().poll_return_with_views(view.as_mut(), cx)).await;
+            }
+            last
+        }),
+    );
+    row(
+        "two, nested poll_access",
+        per_access(runtime, async |per_call| {
+            let (mut first, mut second) = (Counter::default(), Counter::default());
+            let mut last = 0;
+            for _ in 0..ACCESSES / per_call {
+                let mut call = pin!(Call::<(Counter, Counter), _>::new(PolledPairs::new(
+                    per_call
+                )));
+                let mut first = pin!(Pin::new(black_box(&mut first)).view());
+                let mut second = pin!(Pin::new(black_box(&mut second)).view());
+                last = poll_fn(|cx| {
+                    let lends = (
+                        Some(Lend::Fixed(ViewLoan::new(first.as_mut()))),
+                        Some(Lend::Fixed(ViewLoan::new(second.as_mut()))),
+                    );
+                    match call.as_mut().poll_return_with_views(lends, cx) {
+                        CallPoll::Ready(value) => Poll::Ready(value),
+                        _ => Poll::Pending,
+                    }
+                })
+                .await;
+            }
+            last
+        }),
+    );
+    row(
+        "two, tuple with",
+        per_access(runtime, async |per_call| {
+            let (mut first, mut second) = (Counter::default(), Counter::default());
+            let mut last = 0;
+            for _ in 0..ACCESSES / per_call {
+                let mut call = pin!(LentCall::<(Counter, Counter), _>::new(LentPairs::new(
+                    per_call
+                )));
+                let mut first = pin!(Pin::new(black_box(&mut first)).view());
+                let mut second = pin!(Pin::new(black_box(&mut second)).view());
+                last = poll_fn(|cx| {
+                    call.as_mut()
+                        .poll_return_with_views((first.as_mut(), second.as_mut()), cx)
+                })
+                .await;
+            }
+            last
+        }),
+    );
     for lock in [LockKind::Fair, LockKind::Unfair, LockKind::Blocking] {
         println!("{}", crate::lock_name(lock));
         with_lock(lock, RunLocked { runtime });
