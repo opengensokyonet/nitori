@@ -8,7 +8,7 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Layout
 
-- `crates/nitori_call`: calls written as ordinary async functions and polled with a view of their resource, or none, on each poll; operations, receiver accesses, composition, executors, and the `#[call]` and `#[capability]` macros. Executions are both futures of the final value and streams of yielded items. See its [README](crates/nitori_call/README.md).
+- `crates/nitori_call`: calls written as ordinary async functions and polled with a view of their resource, or none, on each poll; operations, receiver accesses, composition, executors, and the `#[call]` and `#[capability]` macros. Executions are both futures of the final value and streams of yielded items. A caller that lends every view on every poll gets synchronous access to them, where `.await` and `yield` are the only points other work can run. See its [README](crates/nitori_call/README.md).
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
 - `crates/nitori_id`: identities unique within a process and never reused, each pairing the `TypeId` of its owning type with an opaque allocated value. See its [README](crates/nitori_id/README.md).
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).

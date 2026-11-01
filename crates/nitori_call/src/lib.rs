@@ -175,6 +175,8 @@ mod loan;
 pub use loan::{ViewLoan, ViewOperation};
 mod access;
 pub use access::{Access, ReceiverAccess, ReceiverSlot, ReleaseView};
+mod lent;
+pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;
 pub use compose::{Compose, Composed};
 mod receivers;
@@ -225,6 +227,11 @@ pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 /// }
 /// # fn main() { assert_eq!(0u8.sync_check_unpin(), Ok(())); }
 /// ```
+///
+/// An access bounded by [`LentAccess`] instead makes an operation that runs
+/// only in a [`LentCall`]: it has access methods on lent accesses and no host
+/// methods, so `sync` is an error. The access trait is recognized by the last
+/// segment of its path, which a renamed import hides.
 ///
 /// With `yields = Item`, each `yield value` written directly in the function
 /// body emits an item, and the return value is the final value. The crate
@@ -300,6 +307,30 @@ pub use nitori_call_macros::call;
 /// the future it starts. Type and const parameters of the trait become
 /// parameters of the structs and of the convenience traits. A method whose
 /// arguments mention `Self` gives its struct a type parameter `Family`.
+///
+/// Any other method whose first parameter is a view is synchronous. It becomes
+/// a method of `{Trait}Ext` for each [`LentAccess`], which panics like
+/// [`with`](LentAccess::with) outside a poll, and of `{Trait}ViewExt` for the
+/// [`Access`] of the family. A method exists on the view alone when its
+/// signature ties anything to the lifetimes of the view, or when it returns
+/// `impl Trait`, which captures them. A trait may have only synchronous
+/// methods, and then has no `{Trait}HostExt`. A synchronous method may not
+/// share its name with the operation of a poll method:
+///
+/// ```compile_fail
+/// # use nitori_call::{ReceiverFamily, capability};
+/// # use std::{pin::Pin, task::{Context, Poll}};
+/// #[capability]
+/// pub trait Twice: ReceiverFamily {
+///     fn poll_read<'v>(view: Pin<&mut Self::ReceiverView<'v>>, cx: &mut Context<'_>) -> Poll<u8>
+///     where
+///         Self: 'v;
+///     fn read<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> u8
+///     where
+///         Self: 'v;
+/// }
+/// ```
+///
 /// Arguments:
 ///
 /// - `module = name` generates the operations in module `name`; by default

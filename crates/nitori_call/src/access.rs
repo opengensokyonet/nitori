@@ -32,6 +32,10 @@ impl<'a, 'h, F: ReceiverFamily + 'h> Access<'a, 'h, F> {
     pub fn into_pin(self) -> Pin<&'a mut F::ReceiverView<'h>> {
         self.view
     }
+    /// Reborrow the view, for several uses within one access.
+    pub fn as_pin(&mut self) -> Pin<&mut F::ReceiverView<'h>> {
+        self.view.as_mut()
+    }
 }
 
 /// The view lent to one slot of a call for its current poll, if any, whether

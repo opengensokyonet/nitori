@@ -388,6 +388,139 @@ operation of an async closure over the slots, `async |(a, b)| ..`, without
 naming it. The closure accepts slots of every brand, so it can neither return
 a slot nor hand one to a thread scope outside its future.
 
+## Synchronous access
+
+A caller that holds its resources, and lends all of them on every poll, gives
+an operation more than `poll_access` promises: the view is always there. With
+`ReceiverAccess`, an `.await` can mean waiting for a view as much as waiting
+for an event, so the source does not show where other work can run between two
+steps. `LentCall<R, Op>` states the promise in its type. It wraps a `Call`,
+`poll_with_views` takes a view of every receiver, and the result is a plain
+`Poll`, since no request for a view or release point can happen.
+
+The operation takes `LentAccess`, which adds synchronous access to
+`ReceiverAccess`. `.await` and `yield` are then all the points where other work
+can run, and the code between them is atomic with respect to it. `io.with`
+lends the view to a closure. `(&mut a, &mut b).with(|a, b| ..)`, with
+`LentAccesses` imported, lends the views of 2 to 4 accesses to one closure. The
+closure cannot wait and keeps no view.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{
+    Direct, DirectView, LentAccess, LentAccesses, LentCall, Receiver, ReceiverFamily, call,
+    capability, direct_receiver,
+};
+use std::{
+    collections::VecDeque,
+    ops::ControlFlow,
+    pin::{Pin, pin},
+    task::{Context, Poll, Waker},
+};
+
+#[capability]
+pub trait Queue: ReceiverFamily {
+    fn poll_pop<'v>(view: Pin<&mut Self::ReceiverView<'v>>, cx: &mut Context<'_>) -> Poll<u32>
+    where
+        Self: 'v;
+    /// A method without a context is synchronous.
+    fn remaining<'v>(view: Pin<&mut Self::ReceiverView<'v>>) -> u32
+    where
+        Self: 'v;
+}
+#[capability]
+pub trait Counter: ReceiverFamily {
+    fn add<'v>(view: Pin<&mut Self::ReceiverView<'v>>, by: u32) -> u32
+    where
+        Self: 'v;
+}
+
+#[call]
+async fn sum<Q: Queue, C: Counter>(
+    queue: &mut impl LentAccess<Family = Q>,
+    counter: &mut impl LentAccess<Family = C>,
+    items: usize,
+) -> u32 {
+    let mut total = 0;
+    for _ in 0..items {
+        let item = queue.pop().await; // Other work can run here.
+        counter.add(item); // Nothing else runs from here to the next `.await`.
+        total = (&mut *queue, &mut *counter)
+            .with(|mut queue, mut counter| counter.add(queue.remaining()));
+    }
+    total
+}
+
+#[derive(Default)]
+pub struct Items(VecDeque<u32>);
+direct_receiver!(impl [] for Items);
+impl Queue for Direct<Items> {
+    fn poll_pop<'v>(view: Pin<&mut DirectView<'v, Items>>, _: &mut Context<'_>) -> Poll<u32>
+    where
+        Self: 'v,
+    {
+        let items = view.get_pin_mut().get_mut();
+        items.0.pop_front().map_or(Poll::Pending, Poll::Ready)
+    }
+    fn remaining<'v>(view: Pin<&mut DirectView<'v, Items>>) -> u32
+    where
+        Self: 'v,
+    {
+        view.get_pin_mut().0.len() as u32
+    }
+}
+#[derive(Default)]
+pub struct Total(u32);
+direct_receiver!(impl [] for Total);
+impl Counter for Direct<Total> {
+    fn add<'v>(view: Pin<&mut DirectView<'v, Total>>, by: u32) -> u32
+    where
+        Self: 'v,
+    {
+        let total = view.get_pin_mut().get_mut();
+        total.0 += by;
+        total.0
+    }
+}
+
+fn main() {
+    let (mut items, mut total) = (Items(VecDeque::from([1, 2])), Total::default());
+    let mut call = pin!(LentCall::<(Direct<Items>, Direct<Total>), _>::new(Sum::new(2)));
+    let mut queue = pin!(Pin::new(&mut items).view());
+    let mut counter = pin!(Pin::new(&mut total).view());
+    let poll = call.as_mut().poll_with_views(
+        (queue.as_mut(), counter.as_mut()),
+        &mut Context::from_waker(Waker::noop()),
+    );
+    assert!(matches!(poll, Poll::Ready(ControlFlow::Break(4))));
+}
+```
+
+`#[capability]` treats a method that takes a view and is not a `poll_` method as
+synchronous, and a trait may have only such methods. Each one becomes a method
+of `{Trait}Ext` for lent accesses, `counter.add(1)`, and of `{Trait}ViewExt` for
+the `Access` a closure receives, `view.add(1)`. The second works in any closure
+that holds an `Access`, including `poll_access`. A method exists on the view
+alone when its signature ties anything to the view's lifetimes, as one
+returning a value that borrows the view does, or when it returns `impl Trait`,
+which captures them: an access keeps its view inside a closure.
+
+`#[call]` recognizes `LentAccess` as it does `ReceiverAccess`, by the last
+segment of the bound's path, so a renamed import is not seen. An operation
+written for a lent access runs only in a `LentCall`: it has `{Op}Ext` for lent
+accesses but no `{Op}HostExt`, since no executor promises a view on every poll,
+and `sync` is an error. Every other operation works on a lent access.
+
+A view is lent as a `Pin<&mut _>`, and the views of several receivers as a tuple
+of the same shape. A `ViewLoan` can stand in for any of them.
+`poll_return_with_views` delivers only the final value. A driver can lend one
+pinned view to several calls in one poll, through `view.as_mut()`, and the calls
+hold no resource between polls.
+
+An operation's destructor can run outside a poll, when the call is dropped, and
+there is no view then. `with` panics in that case. A destructor uses `try_with`,
+which returns `None` there, on one access or on a tuple.
+
 ## Executors
 
 `CallExecutor` decides how an operation runs on a value. Every `Receiver` is an

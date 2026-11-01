@@ -5,7 +5,8 @@
 //! into an operation struct whose future runs the function, rewriting only the
 //! `yield` expressions of its body. Both then generate the same conveniences:
 //! methods on receiver accesses inside operations, and methods on hosts that
-//! bind and run a call.
+//! bind and run a call. `#[capability]` also generates methods for a trait's
+//! synchronous methods, on lent accesses and on views.
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
@@ -21,13 +22,14 @@ use syn::{
 };
 
 mod several;
+mod synchronous;
 
 fn runtime() -> Tokens {
     quote!(::nitori_call)
 }
 
 /// Generate operations and conveniences for every `poll_*` method of a
-/// capability trait.
+/// capability trait, and methods for its synchronous methods.
 #[proc_macro_attribute]
 pub fn capability(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemTrait);
@@ -98,6 +100,50 @@ impl Options {
 struct Argument {
     name: Ident,
     ty: Type,
+}
+
+/// Which trait bounds an access.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccessKind {
+    /// `ReceiverAccess`: the operation may have to wait for a view.
+    Receiver,
+    /// `LentAccess`: the operation runs only in a `LentCall`.
+    Lent,
+}
+impl AccessKind {
+    fn bound(self) -> Tokens {
+        let runtime = runtime();
+        match self {
+            AccessKind::Receiver => quote!(#runtime::ReceiverAccess),
+            AccessKind::Lent => quote!(#runtime::LentAccess),
+        }
+    }
+}
+
+/// What a convenience trait extends: implementors of `bound`, whose family is
+/// `<Self as family_trait>::family`.
+struct Subject {
+    bound: Tokens,
+    family_trait: Tokens,
+    family: Ident,
+}
+impl Subject {
+    fn access(kind: AccessKind) -> Self {
+        let runtime = runtime();
+        Self {
+            bound: kind.bound(),
+            family_trait: quote!(#runtime::ReceiverAccess),
+            family: format_ident!("Family"),
+        }
+    }
+    fn host() -> Self {
+        let runtime = runtime();
+        Self {
+            bound: quote!(#runtime::CallExecutor),
+            family_trait: quote!(#runtime::CallExecutor),
+            family: format_ident!("Receivers"),
+        }
+    }
 }
 
 /// What the generators need to know about one operation. Argument types,
@@ -377,18 +423,14 @@ impl Operation {
         }
     }
 
-    /// Parameters of a convenience trait over `receiver`, whose predicates
-    /// name the receiver's family, its associated type `family`, where the
-    /// operation says `Self`.
-    fn convenience_generics(&self, receiver: &Tokens, family: &Ident) -> Generics {
-        let family: Type = parse_quote!(<Self as #receiver>::#family);
-        let mut generics = self.trait_generics.clone();
-        if let Some(clause) = &mut generics.where_clause {
-            for predicate in clause.predicates.iter_mut() {
-                *predicate = self.substitute(predicate.clone(), &family, Place::Outside);
-            }
-        }
-        generics
+    /// Parameters of a convenience trait over `subject`, whose predicates
+    /// name the subject's family where the operation says `Self`.
+    fn convenience_generics(&self, subject: &Subject) -> Generics {
+        generics_over(
+            &self.trait_generics,
+            subject,
+            self.capability_at(Place::Outside).as_ref(),
+        )
     }
 
     /// Wrap definitions in the struct's module, if it has one.
@@ -467,16 +509,41 @@ impl Operation {
     }
 }
 
+/// `generics`, whose predicates name the family of `subject` where they say
+/// `Self`.
+fn generics_over(generics: &Generics, subject: &Subject, capability: Option<&Path>) -> Generics {
+    let Subject {
+        family_trait,
+        family,
+        ..
+    } = subject;
+    let family: Type = parse_quote!(<Self as #family_trait>::#family);
+    let mut generics = generics.clone();
+    if let Some(clause) = &mut generics.where_clause {
+        for predicate in clause.predicates.iter_mut() {
+            predicate.substitute(&mut SelfAsFamily {
+                family: &family,
+                capability,
+            });
+        }
+    }
+    generics
+}
+
 /// A trait with conveniences, and its blanket implementation.
 fn convenience_trait(
     vis: &Visibility,
     name: &Ident,
     generics: &Generics,
-    receiver: Tokens,
-    family: &Ident,
+    subject: &Subject,
     family_bounds: Tokens,
     methods: Tokens,
 ) -> Tokens {
+    let Subject {
+        bound,
+        family_trait,
+        family,
+    } = subject;
     let (_, type_generics, _) = generics.split_for_impl();
     let parameters: Vec<&GenericParam> = generics.params.iter().collect();
     let predicates: Vec<&WherePredicate> = generics
@@ -485,13 +552,13 @@ fn convenience_trait(
         .flat_map(|clause| clause.predicates.iter())
         .collect();
     quote! {
-        #vis trait #name<#(#parameters),*>: #receiver
-        where <Self as #receiver>::#family: #family_bounds, #(#predicates,)*
+        #vis trait #name<#(#parameters),*>: #bound
+        where <Self as #family_trait>::#family: #family_bounds, #(#predicates,)*
         {
             #methods
         }
-        impl<#(#parameters,)* __Receiver: #receiver + ?Sized> #name #type_generics for __Receiver
-        where <__Receiver as #receiver>::#family: #family_bounds, #(#predicates,)*
+        impl<#(#parameters,)* __Receiver: #bound + ?Sized> #name #type_generics for __Receiver
+        where <__Receiver as #family_trait>::#family: #family_bounds, #(#predicates,)*
         {}
     }
 }
@@ -579,10 +646,22 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
             name,
         )?);
     }
-    if operations.is_empty() {
+    let synchronous = synchronous::methods(&item)?;
+    if operations.is_empty() && synchronous.is_empty() {
         return Err(Error::new(
             item.ident.span(),
-            "#[capability] found no poll_* methods",
+            "#[capability] found no poll_* methods and no methods taking a view",
+        ));
+    }
+    if let Some(method) = synchronous.iter().find(|method| {
+        operations
+            .iter()
+            .any(|(operation, ..)| operation.name == method.name)
+    }) {
+        let name = &method.name;
+        return Err(Error::new(
+            name.span(),
+            format!("`{name}` is also the operation of `poll_{name}`; rename one of them"),
         ));
     }
 
@@ -594,29 +673,41 @@ fn expand_capability(mut item: ItemTrait, options: Options) -> Result<Tokens> {
         access_methods.extend(method.clone());
         host_methods.extend(operation.host_methods());
     }
-    let first = &operations[0].0;
-    let mut generated = first.in_module(definitions);
+    for method in &synchronous {
+        access_methods.extend(method.access_method(&capability));
+    }
     let vis = &item.vis;
-    let bounds = first.family_bound_tokens(Place::Outside);
-    let access = quote!(#runtime::ReceiverAccess);
-    let host = quote!(#runtime::CallExecutor);
+    let bounds = quote!(#runtime::ReceiverFamily + #capability);
+    let access = Subject::access(AccessKind::Receiver);
+    let host = Subject::host();
+    let mut generated = match operations.first() {
+        Some((first, ..)) => first.in_module(definitions),
+        None => Tokens::new(),
+    };
     generated.extend(convenience_trait(
         vis,
         &format_ident!("{}Ext", item.ident),
-        &first.convenience_generics(&access, &format_ident!("Family")),
-        access,
-        &format_ident!("Family"),
+        &generics_over(&trait_generics, &access, Some(&capability)),
+        &access,
         bounds.clone(),
         access_methods,
     ));
-    generated.extend(convenience_trait(
-        vis,
-        &format_ident!("{}HostExt", item.ident),
-        &first.convenience_generics(&host, &format_ident!("Receivers")),
-        host,
-        &format_ident!("Receivers"),
-        bounds,
-        host_methods,
+    if !operations.is_empty() {
+        generated.extend(convenience_trait(
+            vis,
+            &format_ident!("{}HostExt", item.ident),
+            &generics_over(&trait_generics, &host, Some(&capability)),
+            &host,
+            bounds.clone(),
+            host_methods,
+        ));
+    }
+    generated.extend(synchronous::view_trait(
+        &item,
+        &trait_generics,
+        &capability,
+        &bounds,
+        &synchronous,
     ));
     item.attrs
         .retain(|attribute| !attribute.path().is_ident("capability"));
@@ -824,9 +915,11 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let mut generics = signature.generics.clone();
     let AccessBounds {
         access: access_name,
+        kind: access_kind,
         bounds: family_bounds,
         family: family_name,
     } = take_access_bounds(&access.ty, &mut generics)?;
+    reject_hosted_lent(&options, access_kind, access.ty.span())?;
     // Explicit arguments for calling the function from the operation's future.
     let turbofish: Vec<Tokens> = signature
         .generics
@@ -981,6 +1074,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let arguments = operation.arguments();
     let names = operation.names();
     let access_family: Type = parse_quote!(<__A as #runtime::ReceiverAccess>::Family);
+    let access_bound = access_kind.bound();
     let bounds = operation.family_bound_tokens(Place::Inside);
     // A named family is a parameter of the impl, constrained by the access,
     // so that `F::Name` resolves as in the function.
@@ -1007,7 +1101,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     definition.extend(quote! {
         impl<'__s, #parameters __A, #family_impl_parameter> #runtime::Start<'__s, __A> for #struct_name<#arguments>
         where
-            __A: #runtime::ReceiverAccess,
+            __A: #access_bound,
             #access_predicate
             #family_equality
             <__A as #runtime::ReceiverAccess>::Family: #bounds,
@@ -1066,26 +1160,27 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     };
     let camel = &operation.struct_name;
     let bounds = operation.family_bound_tokens(Place::Outside);
-    let access = quote!(#runtime::ReceiverAccess);
-    let host = quote!(#runtime::CallExecutor);
+    let access = Subject::access(access_kind);
     let access_trait = convenience_trait(
         &operation.vis,
         &format_ident!("{}Ext", camel),
-        &operation.convenience_generics(&access, &format_ident!("Family")),
-        access,
-        &format_ident!("Family"),
+        &operation.convenience_generics(&access),
+        &access,
         bounds.clone(),
         access_methods,
     );
-    let host_trait = convenience_trait(
-        &operation.vis,
-        &format_ident!("{}HostExt", camel),
-        &operation.convenience_generics(&host, &format_ident!("Receivers")),
-        host,
-        &format_ident!("Receivers"),
-        bounds,
-        operation.host_methods(),
-    );
+    // A lent operation needs a view on every poll, which no executor promises.
+    let host_trait = (access_kind == AccessKind::Receiver).then(|| {
+        let host = Subject::host();
+        convenience_trait(
+            &operation.vis,
+            &format_ident!("{}HostExt", camel),
+            &operation.convenience_generics(&host),
+            &host,
+            bounds,
+            operation.host_methods(),
+        )
+    });
     // The function itself takes the emitter last.
     if let Some(yields) = &options.yields {
         item.sig
@@ -1098,6 +1193,18 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         #access_trait
         #host_trait
     })
+}
+
+/// `sync` generates host methods, which a lent operation does not have.
+fn reject_hosted_lent(options: &Options, kind: AccessKind, span: Span) -> Result<()> {
+    if options.sync && kind == AccessKind::Lent {
+        return Err(Error::new(
+            span,
+            "`sync` runs an operation on an executor; one written for `LentAccess` runs only \
+             in a `LentCall`",
+        ));
+    }
+    Ok(())
 }
 
 /// Parameters named by the family bounds belong to the generated traits, the
@@ -1179,12 +1286,14 @@ fn mentions(tokens: Tokens, name: &str) -> bool {
 /// Accepted forms: `&mut impl ReceiverAccess<Family: Bounds>`, or `&mut A`
 /// where `A` is bounded by `ReceiverAccess<Family: Bounds>`; in either,
 /// `Family = F` with `F: Bounds` a type parameter of the function, which is
-/// removed from `generics` as well.
+/// removed from `generics` as well. `LentAccess` may stand for
+/// `ReceiverAccess`.
 fn take_access_bounds(ty: &Type, generics: &mut Generics) -> Result<AccessBounds> {
-    let (access, bound) = take_access(ty, generics)?;
+    let (access, kind, bound) = take_access(ty, generics)?;
     match bound {
         FamilyBound::Bounds(bounds) => Ok(AccessBounds {
             access,
+            kind,
             bounds,
             family: None,
         }),
@@ -1198,6 +1307,7 @@ fn take_access_bounds(ty: &Type, generics: &mut Generics) -> Result<AccessBounds
             })?;
             Ok(AccessBounds {
                 access,
+                kind,
                 bounds,
                 family: Some(family),
             })
@@ -1209,6 +1319,8 @@ fn take_access_bounds(ty: &Type, generics: &mut Generics) -> Result<AccessBounds
 struct AccessBounds {
     /// The access type's name, if it has one.
     access: Option<Ident>,
+    /// Which trait bounds it.
+    kind: AccessKind,
     /// The bounds of the family.
     bounds: Punctuated<TypeParamBound, Token![+]>,
     /// The family's type parameter, if it is named.
@@ -1255,8 +1367,11 @@ fn take_type_parameter(
 }
 
 /// Remove the access type from `generics`; return its name, if it has one,
-/// and how it bounds its family.
-fn take_access(ty: &Type, generics: &mut Generics) -> Result<(Option<Ident>, FamilyBound)> {
+/// which trait bounds it, and how it bounds its family.
+fn take_access(
+    ty: &Type,
+    generics: &mut Generics,
+) -> Result<(Option<Ident>, AccessKind, FamilyBound)> {
     let Type::Reference(reference) = ty else {
         return Err(Error::new(
             ty.span(),
@@ -1270,7 +1385,10 @@ fn take_access(ty: &Type, generics: &mut Generics) -> Result<(Option<Ident>, Fam
         ));
     }
     match &*reference.elem {
-        Type::ImplTrait(bounds) => Ok((None, family_bounds(&bounds.bounds, ty)?)),
+        Type::ImplTrait(bounds) => {
+            let (kind, bound) = family_bounds(&bounds.bounds, ty)?;
+            Ok((None, kind, bound))
+        }
         Type::Path(path) if path.qself.is_none() && path.path.get_ident().is_some() => {
             let ident = path.path.get_ident().unwrap().clone();
             let bounds = take_type_parameter(generics, &ident).ok_or_else(|| {
@@ -1279,11 +1397,13 @@ fn take_access(ty: &Type, generics: &mut Generics) -> Result<(Option<Ident>, Fam
                     "the access type must be a parameter of this function",
                 )
             })?;
-            Ok((Some(ident), family_bounds(&bounds, ty)?))
+            let (kind, bound) = family_bounds(&bounds, ty)?;
+            Ok((Some(ident), kind, bound))
         }
         _ => Err(Error::new(
             ty.span(),
-            "the access must be `&mut impl ReceiverAccess<..>` or `&mut A`",
+            "the access must be `&mut impl ReceiverAccess<..>`, `&mut impl LentAccess<..>` or \
+             `&mut A`",
         )),
     }
 }
@@ -1296,10 +1416,14 @@ enum FamilyBound {
     Named(Ident),
 }
 
+/// The access traits among `bounds`, by the last segment of their paths: which
+/// kind of access they make, and how they bound the family.
 fn family_bounds(
     bounds: &Punctuated<TypeParamBound, Token![+]>,
     span: &Type,
-) -> Result<FamilyBound> {
+) -> Result<(AccessKind, FamilyBound)> {
+    let mut kind = None;
+    let mut family = None;
     for bound in bounds {
         let TypeParamBound::Trait(trait_bound) = bound else {
             continue;
@@ -1307,42 +1431,64 @@ fn family_bounds(
         let Some(last) = trait_bound.path.segments.last() else {
             continue;
         };
-        if last.ident != "ReceiverAccess" {
+        let this = if last.ident == "LentAccess" {
+            AccessKind::Lent
+        } else if last.ident == "ReceiverAccess" {
+            AccessKind::Receiver
+        } else {
             continue;
-        }
-        let PathArguments::AngleBracketed(arguments) = &last.arguments else {
-            return Ok(FamilyBound::Bounds(Punctuated::new()));
         };
-        for argument in &arguments.args {
-            if let GenericArgument::Constraint(constraint) = argument
-                && constraint.ident == "Family"
-            {
-                return Ok(FamilyBound::Bounds(constraint.bounds.clone()));
-            }
-            if let GenericArgument::AssocType(assoc) = argument
-                && assoc.ident == "Family"
-            {
-                if let Type::Path(path) = &assoc.ty
-                    && path.qself.is_none()
-                    && let Some(family) = path.path.get_ident()
-                {
-                    return Ok(FamilyBound::Named(family.clone()));
-                }
-                return Err(Error::new(
-                    assoc.span(),
-                    "operations are defined for every family with the capabilities they \
-                     use: bound the family by a trait, as in `ReceiverAccess<Family: Read>`, \
-                     or name it with a type parameter, as in `ReceiverAccess<Family = F>` \
-                     with `F: Read`",
-                ));
-            }
+        kind = Some(kind.map_or(this, |kind| match kind {
+            AccessKind::Lent => AccessKind::Lent,
+            AccessKind::Receiver => this,
+        }));
+        if family.is_none() {
+            family = declared_family(last)?;
         }
-        return Ok(FamilyBound::Bounds(Punctuated::new()));
     }
-    Err(Error::new(
-        span.span(),
-        "the access must be bounded by `ReceiverAccess<Family: ..>`",
+    let kind = kind.ok_or_else(|| {
+        Error::new(
+            span.span(),
+            "the access must be bounded by `ReceiverAccess<Family: ..>` or \
+             `LentAccess<Family: ..>`",
+        )
+    })?;
+    Ok((
+        kind,
+        family.unwrap_or(FamilyBound::Bounds(Punctuated::new())),
     ))
+}
+
+/// What `ReceiverAccess<..>` or `LentAccess<..>` says about the family.
+fn declared_family(access: &syn::PathSegment) -> Result<Option<FamilyBound>> {
+    let PathArguments::AngleBracketed(arguments) = &access.arguments else {
+        return Ok(None);
+    };
+    for argument in &arguments.args {
+        if let GenericArgument::Constraint(constraint) = argument
+            && constraint.ident == "Family"
+        {
+            return Ok(Some(FamilyBound::Bounds(constraint.bounds.clone())));
+        }
+        if let GenericArgument::AssocType(assoc) = argument
+            && assoc.ident == "Family"
+        {
+            if let Type::Path(path) = &assoc.ty
+                && path.qself.is_none()
+                && let Some(family) = path.path.get_ident()
+            {
+                return Ok(Some(FamilyBound::Named(family.clone())));
+            }
+            return Err(Error::new(
+                assoc.span(),
+                "operations are defined for every family with the capabilities they \
+                 use: bound the family by a trait, as in `ReceiverAccess<Family: Read>`, \
+                 or name it with a type parameter, as in `ReceiverAccess<Family = F>` \
+                 with `F: Read`",
+            ));
+        }
+    }
+    Ok(None)
 }
 
 /// Turns each `yield e` of the function body into an emission. `yield` in

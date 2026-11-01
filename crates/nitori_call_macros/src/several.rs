@@ -1,7 +1,8 @@
 //! `#[call]` for functions whose leading parameters are several accesses.
 use crate::{
-    AccessBounds, Module, Options, RewriteYield, arguments, camel_case, collect_names, mentions,
-    name_impl_traits, name_lifetimes, runtime, split_generics, take_access_bounds,
+    AccessBounds, AccessKind, Module, Options, RewriteYield, arguments, camel_case, collect_names,
+    mentions, name_impl_traits, name_lifetimes, reject_hosted_lent, runtime, split_generics,
+    take_access_bounds,
 };
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
@@ -66,6 +67,8 @@ impl VisitMut for AccessAsFamily<'_> {
 struct Access {
     /// Its type parameter, if it has one.
     name: Option<Ident>,
+    /// Which trait bounds it.
+    kind: AccessKind,
     bounds: Punctuated<TypeParamBound, syn::Token![+]>,
     /// The family's parameter in generated impls.
     family: Ident,
@@ -114,11 +117,14 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
         };
         let AccessBounds {
             access,
+            kind,
             bounds,
             family,
         } = take_access_bounds(&typed.ty, &mut generics)?;
+        reject_hosted_lent(&options, kind, typed.ty.span())?;
         accesses.push(Access {
             name: access,
+            kind,
             bounds,
             // A named family keeps its name, so that `F::Name` resolves.
             family: family.unwrap_or_else(|| format_ident!("__F{index}")),
@@ -174,7 +180,10 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
                 .chain([&access.family])
                 .any(|name| names.contains(&name.to_string()))
         });
-        if mentions_access || names.iter().any(|name| name == "ReceiverAccess") {
+        let names_access_trait = names
+            .iter()
+            .any(|name| name == "ReceiverAccess" || name == "LentAccess");
+        if mentions_access || names_access_trait {
             return Err(Error::new(
                 ty.span(),
                 "with several accesses, the other arguments may not depend on them",
@@ -296,6 +305,7 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
     };
     let families: Vec<&Ident> = accesses.iter().map(|access| &access.family).collect();
     let access_parameters: Vec<&Ident> = accesses.iter().map(|access| &access.parameter).collect();
+    let access_bounds: Vec<Tokens> = accesses.iter().map(|access| access.kind.bound()).collect();
     let locals: Vec<&Ident> = accesses.iter().map(|access| &access.local).collect();
     let family_bounds: Vec<Tokens> = accesses
         .iter()
@@ -340,7 +350,7 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
         impl<'__s, #parameters #(#family_bounds,)* #(#access_parameters,)*>
             #runtime::Start<'__s, (#(#access_parameters,)*)> for #name<#struct_arguments>
         where
-            #(#access_parameters: #runtime::ReceiverAccess<Family = #families>,)*
+            #(#access_parameters: #access_bounds<Family = #families>,)*
             #(#all_predicates,)*
         {
             type Fut = impl ::core::future::Future<
@@ -362,20 +372,26 @@ pub(crate) fn expand(mut item: ItemFn, options: Options, count: usize) -> Result
         }
     };
 
-    let host = host_trait(HostTrait {
-        vis,
-        operation: &name,
-        function,
-        lifetimes: &lifetimes,
-        trait_generics: &trait_generics,
-        method_generics: &method_generics,
-        family_bounds: &family_bounds,
-        families: &families,
-        struct_arguments: &struct_arguments,
-        names: &names,
-        types: &types,
-        output: &output,
-        sync: options.sync,
+    // A lent access needs a view on every poll, which no executor promises.
+    let lent = accesses
+        .iter()
+        .any(|access| access.kind == AccessKind::Lent);
+    let host = (!lent).then(|| {
+        host_trait(HostTrait {
+            vis,
+            operation: &name,
+            function,
+            lifetimes: &lifetimes,
+            trait_generics: &trait_generics,
+            method_generics: &method_generics,
+            family_bounds: &family_bounds,
+            families: &families,
+            struct_arguments: &struct_arguments,
+            names: &names,
+            types: &types,
+            output: &output,
+            sync: options.sync,
+        })
     });
 
     if let Some(yields) = &options.yields {

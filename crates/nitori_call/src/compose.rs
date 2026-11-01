@@ -1,6 +1,6 @@
 //! Scoped adaptation of the current view into another family.
 use crate::{
-    ReceiverAccess, ReceiverFamily, ViewOperation,
+    LentAccess, ReceiverAccess, ReceiverFamily, ViewOperation,
     access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
 };
 use std::{
@@ -86,6 +86,7 @@ impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
         self.parent.release_point()
     }
 }
+impl<A: LentAccess + ?Sized, S: Compose<A::Family> + Unpin> LentAccess for Composed<'_, A, S> {}
 
 /// Builds the child view from the parent view before visiting it.
 struct ComposeChild<'q, F, S, V> {
