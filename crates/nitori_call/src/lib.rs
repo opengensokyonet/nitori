@@ -169,6 +169,8 @@
 #![cfg_attr(feature = "tokio-sync", feature(impl_trait_in_assoc_type))]
 #![cfg_attr(feature = "fn-operation", feature(async_fn_traits, unboxed_closures))]
 
+#[macro_use]
+mod tuples;
 mod receiver;
 pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamily};
 mod loan;

@@ -6,7 +6,8 @@ use crate::{
 };
 use std::{fmt, pin::Pin, task::Waker};
 
-/// The receivers a call lends views of: one family, or a tuple of them.
+/// The receivers a call lends views of: one family, or a tuple of 2 to 12
+/// elements, each a family or such a tuple.
 ///
 /// The operation of the call receives a slot for each receiver, and the
 /// caller lends each one separately: a view of one receiver can be lent while
@@ -19,7 +20,7 @@ pub trait Receivers: cells::Sealed + Sized {
     type Lends<'a>
     where
         Self: 'a;
-    /// One flag for each receiver.
+    /// One flag for each receiver, in the same shape.
     type Flags: Copy + fmt::Debug + PartialEq + Eq;
     #[doc(hidden)]
     type Cells: cells::CellSet<Self>;
@@ -176,7 +177,7 @@ pub(crate) mod cells {
 }
 
 macro_rules! tuple_receivers {
-    ($($name:ident $index:tt),+) => {
+    ($(($name:ident $_b:ident $_c:ident $_value:ident $index:tt $_borrow:lifetime $_inner:lifetime))+) => {
         impl<$($name: Receivers),+> cells::Sealed for ($($name,)+) {}
         impl<$($name: Receivers),+> Receivers for ($($name,)+) {
             type Slots<'s> = ($($name::Slots<'s>,)+);
@@ -237,6 +238,4 @@ macro_rules! tuple_receivers {
         }
     };
 }
-tuple_receivers!(A 0, B 1);
-tuple_receivers!(A 0, B 1, C 2);
-tuple_receivers!(A 0, B 1, C 2, D 3);
+for_tuples!(tuple_receivers);

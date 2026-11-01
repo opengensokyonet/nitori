@@ -346,7 +346,7 @@ tuple of slots, one for each family, and runs operations implementing
 `ViewLoan` or not at all: each slot asks for its own view and offers its own
 back, `views_needed` and `views_offered` tell which, and a lent view wakes only
 the branches waiting for that slot. A `Child` likewise runs over a tuple of
-accesses.
+accesses. The tuple has 2 to 12 elements and can nest.
 
 `#[call]` makes such an operation of a function whose leading parameters are
 several accesses. Inside another operation, call the function itself; an
@@ -401,9 +401,13 @@ steps. `LentCall<R, Op>` states the promise in its type. It wraps a `Call`,
 The operation takes `LentAccess`, which adds synchronous access to
 `ReceiverAccess`. `.await` and `yield` are then all the points where other work
 can run, and the code between them is atomic with respect to it. `io.with`
-lends the view to a closure. `(&mut a, &mut b).with(|a, b| ..)`, with
-`LentAccesses` imported, lends the views of 2 to 4 accesses to one closure. The
-closure cannot wait and keeps no view.
+lends the view to a closure. `(&mut a, &mut b).with(|(a, b)| ..)`, with
+`LentAccesses` imported, lends several views to one closure. The tuple has 2 to
+12 elements, each an access or another tuple. A closure opens one level: an
+inner tuple reaches it unopened, for a `with` of its own, so
+`(&mut a, (&mut b, &mut c)).with(|(a, rest)| rest.with(|(b, c)| ..))` holds all
+three views in the innermost closure, and nesting reaches any number of
+accesses. The closure cannot wait and keeps no view.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
@@ -446,7 +450,7 @@ async fn sum<Q: Queue, C: Counter>(
         let item = queue.pop().await; // Other work can run here.
         counter.add(item); // Nothing else runs from here to the next `.await`.
         total = (&mut *queue, &mut *counter)
-            .with(|mut queue, mut counter| counter.add(queue.remaining()));
+            .with(|(mut queue, mut counter)| counter.add(queue.remaining()));
     }
     total
 }
@@ -510,6 +514,13 @@ segment of the bound's path, so a renamed import is not seen. An operation
 written for a lent access runs only in a `LentCall`: it has `{Op}Ext` for lent
 accesses but no `{Op}HostExt`, since no executor promises a view on every poll,
 and `sync` is an error. Every other operation works on a lent access.
+
+An operation over several accesses can mix both kinds. One `LentAccess` is
+enough to confine it to a `LentCall`, which lends every receiver on every poll,
+the plain ones included. An access declared `ReceiverAccess` keeps that
+interface in the body: it has no `with`, its `.await`s can still wait for
+events, and it cannot join a tuple `with`. The bound says what the body uses,
+not how the view arrives.
 
 A view is lent as a `Pin<&mut _>`, and the views of several receivers as a tuple
 of the same shape. A `ViewLoan` can stand in for any of them.
@@ -636,9 +647,10 @@ other than `Guarded` reaches a part of the locked value, such as one stream of
 a connection; when that part is gone, its view reports it, as in the
 [lock tests](tests/locks.rs).
 
-An operation over several receivers runs on executors over all of them. A
-tuple of receivers lends a view of each on every poll. `drive` takes a tuple of
-acquisitions and acquires each receiver only when its slot asks, on its own;
+An operation over several receivers runs on executors over all of them, each
+receiver one element of a flat tuple of 2 to 12. A tuple of receivers lends a
+view of each on every poll. `drive` takes a tuple of acquisitions and acquires
+each receiver only when its slot asks, on its own;
 a `Constructed` receiver in the tuple lends a view on every poll instead.
 `drive_composed` takes a tuple of states, one for each acquisition, so
 `drive_composed((LockAcquisition::new(&a), LockAcquisition::new(&b)), (Guarded,

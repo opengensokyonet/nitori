@@ -68,7 +68,7 @@ async fn summing<Q, C>(
         let item = queue.next().await;
         let first = counter.add(item);
         let second = counter.with(|mut view| view.add(item));
-        let both = (&mut *queue, &mut *counter).with(|_, mut view| view.add(1));
+        let both = (&mut *queue, &mut *counter).with(|(_, mut view)| view.add(1));
         yield first + second + both;
     }
 }
@@ -179,7 +179,7 @@ async fn filling<J, S>(
     S: Source,
 {
     for _ in 0..rounds {
-        (&mut *journal, &mut *source).with(|mut journal, mut source| {
+        (&mut *journal, &mut *source).with(|(mut journal, mut source)| {
             let mut attempt = journal.begin();
             source.fill(attempt.buffer());
         });
@@ -663,7 +663,7 @@ where
 {
     fn drop(&mut self) {
         let both = (&mut *self.first, &mut *self.second)
-            .try_with(|mut first, mut second| first.add(1) + second.add(1));
+            .try_with(|(mut first, mut second)| first.add(1) + second.add(1));
         self.seen.set(Some(both));
     }
 }
@@ -774,9 +774,9 @@ where
     D: Counter,
 {
     let sum = (&mut *a, &mut *b, &mut *c, &mut *d)
-        .with(|mut a, mut b, mut c, mut d| a.add(1) + b.add(2) + c.add(3) + d.add(4));
+        .with(|(mut a, mut b, mut c, mut d)| a.add(1) + b.add(2) + c.add(3) + d.add(4));
     let again = (&mut *a, &mut *b, &mut *c, &mut *d)
-        .try_with(|mut a, mut b, mut c, mut d| a.add(1) + b.add(1) + c.add(1) + d.add(1));
+        .try_with(|(mut a, mut b, mut c, mut d)| a.add(1) + b.add(1) + c.add(1) + d.add(1));
     (sum, again)
 }
 
@@ -847,7 +847,7 @@ impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)> f
             composed.add(1);
             composed.add_twice(2).await;
             composed.plain_add(3).await;
-            (io.compose(SameCounter), &mut other).with(|mut first, mut second| {
+            (io.compose(SameCounter), &mut other).with(|(mut first, mut second)| {
                 second.add(10);
                 first.add(4)
             })
@@ -892,7 +892,7 @@ impl<'s> Start<'s, NestedSlots<'s>> for Nested {
     ) -> Self::Fut {
         async move {
             let item = items.next().await;
-            (&mut first, &mut last).with(|mut first, mut last| first.add(item) + last.add(item))
+            (&mut first, &mut last).with(|(mut first, mut last)| first.add(item) + last.add(item))
         }
     }
 }
@@ -946,6 +946,87 @@ fn a_lent_call_runs_operations_with_plain_accesses_too() {
             &mut Context::from_waker(Waker::noop()),
         ),
         Poll::Ready(ControlFlow::Break(6))
+    ));
+}
+
+/// A plain access in a lent call still waits for its own events, while the
+/// lent one stays synchronous on every poll.
+#[call]
+async fn gated<F, G>(
+    gate: &mut impl ReceiverAccess<Family = F>,
+    total: &mut impl LentAccess<Family = G>,
+) -> u32
+where
+    F: Queue,
+    G: Counter,
+{
+    total.add(1);
+    let item = gate.next().await;
+    gate.release_view().await;
+    total.add(item)
+}
+
+#[test]
+fn a_plain_access_of_a_lent_call_can_wait() {
+    let mut items = Items::default();
+    let mut total = Total::default();
+    let mut call = pin!(LentCall::<(Direct<Items>, Direct<Total>), _>::new(
+        Gated::new()
+    ));
+    let mut cx = Context::from_waker(Waker::noop());
+    {
+        let mut items_view = pin!(Pin::new(&mut items).view());
+        let mut total_view = pin!(Pin::new(&mut total).view());
+        assert!(matches!(
+            call.as_mut()
+                .poll_with_views((items_view.as_mut(), total_view.as_mut()), &mut cx),
+            Poll::Pending
+        ));
+    }
+    assert_eq!(total.0, 1);
+    items.0.push_back(6);
+    let mut items_view = pin!(Pin::new(&mut items).view());
+    let mut total_view = pin!(Pin::new(&mut total).view());
+    assert!(matches!(
+        call.as_mut()
+            .poll_with_views((items_view.as_mut(), total_view.as_mut()), &mut cx),
+        Poll::Ready(ControlFlow::Break(7))
+    ));
+}
+
+/// A lent access goes to operations written for either kind, alone or mixed.
+#[call]
+async fn plain_step<F: Queue>(io: &mut impl ReceiverAccess<Family = F>) -> u32 {
+    io.next().await
+}
+#[call]
+async fn through_both<F, G>(
+    queue: &mut impl nitori_call::LentAccess<Family = F>,
+    total: &mut impl nitori_call::LentAccess<Family = G>,
+) -> u32
+where
+    F: Queue,
+    G: Counter,
+{
+    let first = queue.plain_step().await;
+    first + mixed(queue, total).await
+}
+
+#[test]
+fn a_lent_access_reaches_plain_and_mixed_operations() {
+    let mut items = Items(VecDeque::from([2, 3]));
+    let mut total = Total::default();
+    let mut call = pin!(LentCall::<(Direct<Items>, Direct<Total>), _>::new(
+        ThroughBoth::new()
+    ));
+    let mut items_view = pin!(Pin::new(&mut items).view());
+    let mut total_view = pin!(Pin::new(&mut total).view());
+    assert!(matches!(
+        call.as_mut().poll_with_views(
+            (items_view.as_mut(), total_view.as_mut()),
+            &mut Context::from_waker(Waker::noop()),
+        ),
+        Poll::Ready(ControlFlow::Break(5))
     ));
 }
 

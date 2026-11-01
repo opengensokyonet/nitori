@@ -339,7 +339,7 @@ mod hosts {
         }
     }
     macro_rules! tuple_hosts {
-        ($($name:ident $view:ident $index:tt),+) => {
+        ($(($name:ident $_b:ident $_c:ident $view:ident $index:tt $_borrow:lifetime $_inner:lifetime))+) => {
             impl<$($name: Receiver),+> Hosts for ($($name,)+) {
                 type Receivers = ($($name::Family,)+);
                 #[inline]
@@ -376,9 +376,7 @@ mod hosts {
             }
         };
     }
-    tuple_hosts!(A a 0, B b 1);
-    tuple_hosts!(A a 0, B b 1, C c 2);
-    tuple_hosts!(A a 0, B b 1, C c 2, D d 3);
+    for_tuples!(tuple_hosts);
 }
 use hosts::{Hosts, LendsVisitor, PollCall};
 
@@ -888,40 +886,23 @@ impl<F: ReceiverFamily, C: SlotState<F>> Lender<F> for WithState<'_, C> {
 /// the later slots are lent and the call is polled. A chain lends its first
 /// slot, then the rest through the next shorter chain, and prepends the
 /// first lend to theirs.
-mod chain1 {
-    use super::*;
+trait Chain {
+    type Receivers: Receivers;
+    fn lend<V: LendsVisitor<Self::Receivers>>(self, visitor: V) -> V::Output;
+}
+impl<'view, S: Source<'view>, L: Lender<S::Family>> Chain for (Part<'_, 'view, S, L>,) {
+    type Receivers = L::Family;
     #[inline]
-    pub(super) fn lend<'view, S, L, V>((part,): (Part<'_, 'view, S, L>,), visitor: V) -> V::Output
-    where
-        S: Source<'view>,
-        L: Lender<S::Family>,
-        V: LendsVisitor<L::Family>,
-    {
-        part.lend(Single(visitor))
+    fn lend<V: LendsVisitor<L::Family>>(self, visitor: V) -> V::Output {
+        self.0.lend(Single(visitor))
     }
 }
 macro_rules! chain {
     (
-        $name:ident, $shorter:ident;
-        $first_source:ident $first_lender:ident $first_family:ident;
-        $($source:ident $lender:ident $family:ident $lend:ident),+;
-        $rest:pat
+        ($first_source:ident $first_lender:ident $first_family:ident $_lend:ident $_index:tt $_borrow:lifetime $_inner:lifetime)
+        $(($source:ident $lender:ident $family:ident $lend:ident $_rest_index:tt $_rest_borrow:lifetime $_rest_inner:lifetime))+
     ) => {
-        mod $name {
-            use super::*;
-            #[inline]
-            pub(super) fn lend<'view, $first_source, $first_lender, $($source, $lender,)+ V>(
-                (first, $($lend,)+): (Part<'_, 'view, $first_source, $first_lender>, $(Part<'_, 'view, $source, $lender>,)+),
-                visitor: V,
-            ) -> V::Output
-            where
-                $first_source: Source<'view>,
-                $first_lender: Lender<$first_source::Family>,
-                $($source: Source<'view>, $lender: Lender<$source::Family>,)+
-                V: LendsVisitor<($first_lender::Family, $($lender::Family,)+)>,
-            {
-                first.lend(Head { rest: ($($lend,)+), visitor })
-            }
+        const _: () = {
             struct Head<'r, 'view, $($source: Source<'view>, $lender,)+ V> {
                 rest: ($(Part<'r, 'view, $source, $lender>,)+),
                 visitor: V,
@@ -937,7 +918,7 @@ macro_rules! chain {
                 where
                     $first_family: 'x,
                 {
-                    $shorter::lend(self.rest, Prepend { first, visitor: self.visitor })
+                    Chain::lend(self.rest, Prepend { first, visitor: self.visitor })
                 }
             }
             struct Prepend<'x, $first_family: ReceiverFamily, V> {
@@ -955,24 +936,38 @@ macro_rules! chain {
                 where
                     chain!(@rest $($family),+): 'y,
                 {
-                    let $rest = rest;
+                    let chain!(@rest $($lend),+) = rest;
                     self.visitor.visit((self.first, $($lend,)+))
                 }
             }
-        }
+            impl<
+                'r,
+                'view,
+                $first_source: Source<'view>,
+                $first_lender: Lender<$first_source::Family>,
+                $($source: Source<'view>, $lender: Lender<$source::Family>,)+
+            > Chain
+                for (
+                    Part<'r, 'view, $first_source, $first_lender>,
+                    $(Part<'r, 'view, $source, $lender>,)+
+                )
+            {
+                type Receivers = ($first_lender::Family, $($lender::Family,)+);
+                #[inline]
+                fn lend<V: LendsVisitor<Self::Receivers>>(self, visitor: V) -> V::Output {
+                    let (first, $($lend,)+) = self;
+                    first.lend(Head { rest: ($($lend,)+), visitor })
+                }
+            }
+        };
     };
-    (@rest $family:ident) => { $family };
-    (@rest $($family:ident),+) => { ($($family,)+) };
+    (@rest $name:ident) => { $name };
+    (@rest $($name:ident),+) => { ($($name,)+) };
 }
-chain!(chain2, chain1; S1 L1 F1; S2 L2 F2 b; b);
-chain!(chain3, chain2; S1 L1 F1; S2 L2 F2 b, S3 L3 F3 c; (b, c));
-chain!(chain4, chain3; S1 L1 F1; S2 L2 F2 b, S3 L3 F3 c, S4 L4 F4 d; (b, c, d));
+for_tuples!(chain);
 
 macro_rules! tuple_acquisitions {
-    (
-        $chain:ident;
-        $($source:ident $family:ident $lender:ident $state:ident $index:tt),+
-    ) => {
+    ($(($source:ident $_b:ident $state:ident $lender:ident $index:tt $_borrow:lifetime $_inner:lifetime))+) => {
         impl<'view, $($source: Source<'view>),+> acquisitions::Sealed for ($($source,)+) {}
 
         impl<'view, $($source: Source<'view>),+> Acquisitions<'view, AsAcquired> for ($($source,)+) {
@@ -1035,7 +1030,7 @@ macro_rules! tuple_acquisitions {
                 // SAFETY: as in `acquire`.
                 let (this, held) = unsafe { (self.get_unchecked_mut(), held.get_unchecked_mut()) };
                 $(let mut $lender = AsAcquired;)+
-                $chain::lend(
+                Chain::lend(
                     ($(Part {
                         source: unsafe { Pin::new_unchecked(&mut this.$index) },
                         held: unsafe { Pin::new_unchecked(&mut held.$index) },
@@ -1093,7 +1088,7 @@ macro_rules! tuple_acquisitions {
                     )
                 };
                 $(let mut $lender = WithState(unsafe { Pin::new_unchecked(&mut states.$index) });)+
-                $chain::lend(
+                Chain::lend(
                     ($(Part {
                         source: unsafe { Pin::new_unchecked(&mut this.$index) },
                         held: unsafe { Pin::new_unchecked(&mut held.$index) },
@@ -1106,9 +1101,7 @@ macro_rules! tuple_acquisitions {
         }
     };
 }
-tuple_acquisitions!(chain2; A FA a SA 0, B FB b SB 1);
-tuple_acquisitions!(chain3; A FA a SA 0, B FB b SB 1, C FC c SC 2);
-tuple_acquisitions!(chain4; A FA a SA 0, B FB b SB 1, C FC c SC 2, D FD d SD 3);
+for_tuples!(tuple_acquisitions);
 
 /// An operation run with views from acquisitions, acquiring a view for a
 /// receiver only on polls whose operation asks for it and releasing it at the

@@ -181,7 +181,7 @@ async fn lent_pairs<F: Step, G: Step>(
 ) -> u64 {
     let mut last = 0;
     for _ in 0..count {
-        last = (&mut *first, &mut *second).with(|first, second| {
+        last = (&mut *first, &mut *second).with(|(first, second)| {
             G::advance(second.into_pin());
             F::advance(first.into_pin())
         });

@@ -77,6 +77,44 @@
 //! }
 //! ```
 //!
+//! An operation may mix both kinds of access. One lent access is enough to
+//! keep it from a plain call, and an access declared plain stays plain in its
+//! body, however it was lent:
+//!
+//! ```compile_fail,E0277
+//! #![feature(impl_trait_in_assoc_type)]
+//! use nitori_call::{Call, Direct, LentAccess, ReceiverAccess, ReceiverFamily, call};
+//! #[call]
+//! async fn mixed<F: ReceiverFamily, G: ReceiverFamily>(
+//!     plain: &mut impl ReceiverAccess<Family = F>,
+//!     lent: &mut impl LentAccess<Family = G>,
+//! ) {
+//! }
+//! fn make() -> impl Sized {
+//!     Call::<(Direct<u8>, Direct<u32>), _>::new(Mixed::new())
+//! }
+//! ```
+//!
+//! ```compile_fail,E0599
+//! use nitori_call::{Direct, LentAccess, LentAccesses, ReceiverAccess};
+//! fn step(
+//!     plain: &mut impl ReceiverAccess<Family = Direct<u8>>,
+//!     lent: &mut impl LentAccess<Family = Direct<u32>>,
+//! ) {
+//!     (plain, lent).with(|_| ());
+//! }
+//! ```
+//!
+//! A tuple has at most 12 elements. More accesses nest, each inner tuple
+//! opening in a closure of its own:
+//!
+//! ```compile_fail,E0599
+//! use nitori_call::{Direct, LentAccess, LentAccesses};
+//! fn step<A: LentAccess<Family = Direct<u32>> + Copy>(a: A) {
+//!     (a, a, a, a, a, a, a, a, a, a, a, a, a).with(|_| ());
+//! }
+//! ```
+//!
 //! A lent operation has no host methods, so `sync` is an error:
 //!
 //! ```compile_fail
@@ -237,40 +275,90 @@ impl<F: ReceiverFamily> ReceiverAccess for LentSlot<'_, F> {
 impl<F: ReceiverFamily> LentAccess for LentSlot<'_, F> {}
 
 /// Several lent accesses used at once, in one synchronous step: the closure
-/// gets one [`Access`] for each, cannot wait, and keeps no view.
+/// gets one argument of the tuple's shape with an [`Access`] for each access,
+/// cannot wait, and keeps no view.
 ///
-/// Implemented for tuples of 2 to 4 [`LentAccess`]es, such as
-/// `(&mut a, &mut b)`.
-pub trait LentAccesses<Body, Out> {
+/// Implemented for tuples of 2 to 12 elements, each a [`LentAccess`] or such a
+/// tuple. A closure names one lifetime for each view, so it opens one level:
+/// an inner tuple reaches it unopened, for a `with` of its own, and nesting
+/// reaches any number of accesses. `(&mut a, (&mut b, &mut c))` takes
+/// `|(a, rest)| rest.with(|(b, c)| ..)`.
+pub trait LentAccesses<Body, Out>: Sized {
     /// Run `body` once with this poll's views.
     ///
     /// # Panics
     /// As for [`LentAccess::with`].
-    fn with(self, body: Body) -> Out;
+    #[track_caller]
+    fn with(self, body: Body) -> Out {
+        self.try_with(body)
+            .expect("a lent view used outside a poll")
+    }
     /// Run `body` once with this poll's views, or return `None` outside a
-    /// poll.
+    /// poll. An inner tuple answers for itself, in its own `try_with`.
     ///
     /// # Panics
     /// As for [`LentAccess::try_with`].
     fn try_with(self, body: Body) -> Option<Out>;
 }
 
-/// Nests one `with` in another for each access, then calls the body.
+mod elements {
+    //! The elements of a tuple of accesses: an access opens into its view,
+    //! and a tuple stays as it is. Unnameable outside this crate.
+    use super::LentAccess;
+    use crate::{Access, Direct, ReceiverFamily};
+
+    pub trait Element {
+        /// The family of the view it opens into. A tuple opens into none, so
+        /// its family only fills the bound.
+        type Family: ReceiverFamily;
+        /// The closure's argument, given the access this element would be.
+        type Opened<A>;
+        fn open<R, B>(self, body: B) -> Option<R>
+        where
+            B: for<'a, 'h> FnOnce(Self::Opened<Access<'a, 'h, Self::Family>>) -> R;
+    }
+    impl<A: LentAccess> Element for A {
+        type Family = A::Family;
+        type Opened<O> = O;
+        #[inline]
+        fn open<R, B>(mut self, body: B) -> Option<R>
+        where
+            B: for<'a, 'h> FnOnce(Access<'a, 'h, A::Family>) -> R,
+        {
+            self.try_with(body)
+        }
+    }
+    macro_rules! tuple_element {
+        ($(($name:ident $($_rest:tt)*))+) => {
+            impl<$($name: Element),+> Element for ($($name,)+) {
+                type Family = Direct<()>;
+                type Opened<O> = Self;
+                #[inline]
+                fn open<R, B>(self, body: B) -> Option<R>
+                where
+                    B: for<'a, 'h> FnOnce(Self) -> R,
+                {
+                    Some(body(self))
+                }
+            }
+        };
+    }
+    for_tuples!(tuple_element);
+}
+use elements::Element;
+
+/// Nests one `open` in another for each element, then calls the body.
 macro_rules! with_views {
-    ($method:ident, $body:expr, [$($done:ident)*]) => {
-        $body($($done),*)
+    ($body:ident, [$($done:ident)*]) => {
+        Some($body(($($done,)*)))
     };
-    (with, $body:expr, [$($done:ident)*] $first:ident $($rest:ident)*) => {
-        LentAccess::with(&mut $first, |$first| with_views!(with, $body, [$($done)* $first] $($rest)*))
-    };
-    (try_with, $body:expr, [$($done:ident)*] $first:ident $($rest:ident)*) => {
-        LentAccess::try_with(&mut $first, |$first| with_views!(try_with, $body, [$($done)* $first] $($rest)*))
-            .flatten()
+    ($body:ident, [$($done:ident)*] $first:ident $($rest:ident)*) => {
+        Element::open($first, |$first| with_views!($body, [$($done)* $first] $($rest)*)).flatten()
     };
 }
 
 macro_rules! lent_tuple {
-    ($($name:ident $view:ident $access:ident $index:tt $borrow:lifetime $inner:lifetime),+) => {
+    ($(($name:ident $view:ident $_c:ident $access:ident $index:tt $borrow:lifetime $inner:lifetime))+) => {
         impl<$($name: LentReceivers),+> LentReceivers for ($($name,)+) {
             type LentSlots<'s> = ($($name::LentSlots<'s>,)+);
             #[inline]
@@ -289,27 +377,21 @@ macro_rules! lent_tuple {
                 ($(self.$index.lends(),)+)
             }
         }
-        impl<$($name: LentAccess,)+ Body, Out> LentAccesses<Body, Out> for ($($name,)+)
+        impl<$($name: Element,)+ Body, Out> LentAccesses<Body, Out> for ($($name,)+)
         where
-            Body: for<$($borrow, $inner),+> FnOnce($(Access<$borrow, $inner, $name::Family>),+) -> Out,
+            Body: for<$($borrow, $inner),+> FnOnce(
+                ($($name::Opened<Access<$borrow, $inner, $name::Family>>,)+),
+            ) -> Out,
         {
             #[inline]
-            #[track_caller]
-            fn with(self, body: Body) -> Out {
-                let ($(mut $access,)+) = self;
-                with_views!(with, body, [] $($access)+)
-            }
-            #[inline]
             fn try_with(self, body: Body) -> Option<Out> {
-                let ($(mut $access,)+) = self;
-                with_views!(try_with, (|$($access),+| Some(body($($access),+))), [] $($access)+)
+                let ($($access,)+) = self;
+                with_views!(body, [] $($access)+)
             }
         }
     };
 }
-lent_tuple!(A V a 0 'a0 'h0, B W b 1 'a1 'h1);
-lent_tuple!(A V a 0 'a0 'h0, B W b 1 'a1 'h1, C X c 2 'a2 'h2);
-lent_tuple!(A V a 0 'a0 'h0, B W b 1 'a1 'h1, C X c 2 'a2 'h2, D Y d 3 'a3 'h3);
+for_tuples!(lent_tuple);
 
 mod receivers {
     //! What a `LentCall` needs of its receivers and of its views. Unnameable
