@@ -755,7 +755,7 @@ async fn insisting<F: Counter>(io: &mut impl LentAccess<Family = F>) {
 #[should_panic(expected = "a lent view used outside a poll")]
 fn with_outside_a_poll_panics() {
     let mut total = Total::default();
-    let mut call = Box::pin(LentCall::<Direct<Total>, _>::new(Insisting::new()));
+    let mut call = pin!(LentCall::<Direct<Total>, _>::new(Insisting::new()));
     assert!(matches!(poll_on(call.as_mut(), &mut total), Poll::Pending));
 }
 

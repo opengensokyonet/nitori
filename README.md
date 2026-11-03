@@ -17,7 +17,7 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Development
 
-Install [rustup](https://rustup.rs/) and Python 3. The repository pins `nightly-2026-09-20` with rustfmt and Clippy in `rust-toolchain.toml` (rustc 1.100.0-nightly, feaadeeac). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
+Install [rustup](https://rustup.rs/) and Python 3. The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
 SNAFU is pinned to commit `03cb8d2e52a3b0b33a39cc3d4ce8a7075fa4ab58` in the public [Open Gensokyo Network fork](https://github.com/opengensokyonet/snafu), pending [upstream PR #565](https://github.com/shepmaster/snafu/pull/565). Its conditional diagnostic trait implementations and decoupled error construction are required. Cargo fetches this source automatically; no sibling checkout is needed.
 
