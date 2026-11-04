@@ -4,12 +4,15 @@ Foundational Rust tools for Open Gensokyo Network, administratively supported by
 
 Source: [opengensokyonet/nitori](https://github.com/opengensokyonet/nitori).
 
-This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, and a DATA frame codec prototype. The current APIs are experimental and are not stable production APIs.
+This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, and a DATA frame codec prototype. The current APIs are experimental and are not stable production APIs.
 
 ## Layout
 
 - `crates/nitori_call`: calls written as ordinary async functions and polled with a view of their resource, or none, on each poll; operations, receiver accesses, composition, executors, and the `#[call]` and `#[capability]` macros. Executions are both futures of the final value and streams of yielded items. A caller that lends every view on every poll gets synchronous access to them, where `.await` and `yield` are the only points other work can run. See its [README](crates/nitori_call/README.md).
 - `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
+- `crates/nitori_crypto`: cryptographic capabilities as traits, one per capability: hashing, HMAC, HKDF, key exchange, signature verification, signing and random bytes, with the TLS code points that name their algorithms. An implementation answers which algorithms it supports with a `Supported` value when the algorithm is chosen, and operations that take one do not fail for lack of support. See its [README](crates/nitori_crypto/README.md).
+- `crates/nitori_crypto_ring`: the `nitori_crypto` capabilities that [ring](https://crates.io/crates/ring) provides, and local signing keys built from PKCS#8. See its [README](crates/nitori_crypto_ring/README.md).
+- `crates/nitori_crypto_aws_lc`: the `nitori_crypto` capabilities that [aws-lc-rs](https://crates.io/crates/aws-lc-rs) provides, adding P-521, ML-KEM-768 and the X25519MLKEM768 hybrid group, and local signing keys built from PKCS#8. The `fixed-x25519` feature adds an X25519 exchange with a given private key, for reproducing published traces. aws-lc-rs builds AWS-LC from C sources, which needs a C compiler and CMake. See its [README](crates/nitori_crypto_aws_lc/README.md).
 - `crates/nitori_id`: identities unique within a process and never reused, each pairing the `TypeId` of its owning type with an opaque allocated value. See its [README](crates/nitori_id/README.md).
 - `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
 - `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
@@ -17,7 +20,7 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Development
 
-Install [rustup](https://rustup.rs/) and Python 3. The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
+Install [rustup](https://rustup.rs/) and Python 3; `nitori_crypto_aws_lc` also needs a C compiler and CMake. The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
 SNAFU is pinned to commit `03cb8d2e52a3b0b33a39cc3d4ce8a7075fa4ab58` in the public [Open Gensokyo Network fork](https://github.com/opengensokyonet/snafu), pending [upstream PR #565](https://github.com/shepmaster/snafu/pull/565). Its conditional diagnostic trait implementations and decoupled error construction are required. Cargo fetches this source automatically; no sibling checkout is needed.
 

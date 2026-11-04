@@ -3,6 +3,9 @@ members = [
     "benches/call-bench",
     "crates/nitori_call",
     "crates/nitori_call_macros",
+    "crates/nitori_crypto",
+    "crates/nitori_crypto_aws_lc",
+    "crates/nitori_crypto_ring",
     "crates/nitori_id",
     "crates/nitori_io",
     "examples/data-frame-codec",
@@ -10,6 +13,7 @@ members = [
 resolver = "3"
 
 [workspace.dependencies]
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 bytes = "1.12.1"
 futures-core = "0.3.32"
 futures-io = "0.3.32"
@@ -17,11 +21,16 @@ futures-sink = "0.3.32"
 futures-util = { version = "0.3.32", default-features = false }
 nitori_call = { path = "crates/nitori_call" }
 nitori_call_macros = { path = "crates/nitori_call_macros" }
+nitori_crypto = { path = "crates/nitori_crypto" }
+nitori_crypto_ring = { path = "crates/nitori_crypto_ring" }
 nitori_io = { path = "crates/nitori_io" }
 pin-project-lite = "0.2.17"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
+ring = { version = "0.17.14", features = ["std"] }
+smallvec = { version = "1.16.4", features = ["const_generics"] }
 snafu = { version = "0.9.2", git = "https://github.com/opengensokyonet/snafu", rev = "03cb8d2e52a3b0b33a39cc3d4ce8a7075fa4ab58" }
 syn = { version = "2.0.119", features = ["full", "visit-mut", "extra-traits"] }
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.19", default-features = false }
+zeroize = "1.9.1"

@@ -1,0 +1,19 @@
+[package]
+name = "nitori_crypto_aws_lc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+
+[features]
+default = []
+fixed-x25519 = []
+
+[dependencies]
+aws-lc-rs.workspace = true
+nitori_crypto.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+nitori_crypto_ring.workspace = true
+ring.workspace = true
