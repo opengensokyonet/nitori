@@ -17,6 +17,7 @@ pub mod calls;
 pub mod error;
 pub mod helpers;
 pub mod prelude;
+mod split;
 
 /// Fill a caller-selected buffer, advancing it by the returned byte count.
 ///
@@ -77,3 +78,4 @@ pub trait Write: nitori_call::ReceiverFamily {
 
 mod ext;
 pub use ext::*;
+pub use split::SplitTo;
