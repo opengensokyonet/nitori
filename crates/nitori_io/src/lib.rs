@@ -78,4 +78,4 @@ pub trait Write: nitori_call::ReceiverFamily {
 
 mod ext;
 pub use ext::*;
-pub use split::SplitTo;
+pub use split::{SplitTo, SplitToError};

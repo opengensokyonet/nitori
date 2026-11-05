@@ -193,19 +193,20 @@ fn main() {
 ## Splitting a buffer
 
 `SplitTo` cuts the first bytes of a buffer off as a piece of their own and
-leaves the rest in the buffer, without copying. It is implemented for
-`BytesMut`, whose pieces are writable independently, and for `&[u8]`, whose
-pieces are subslices. The trait does not require `AsRef<[u8]>` or
-`AsMut<[u8]>`; code that reads the bytes or rewrites them in place adds the
-bound it needs. Cutting more bytes than the buffer holds panics. Unlike
-`ReadChunk`, a piece is one contiguous buffer, which is what in-place header
-unprotection and AEAD need.
+leaves the rest in the buffer, without copying. It is implemented for `Bytes`,
+whose pieces are read-only, for `BytesMut`, whose pieces are writable
+independently, and for `&[u8]`, whose pieces are subslices. The trait does not
+require `AsRef<[u8]>` or `AsMut<[u8]>`; code that reads the bytes or rewrites
+them in place adds the bound it needs. Cutting more bytes than the buffer holds
+returns a `SplitToError` that carries both numbers and leaves the buffer
+unchanged. Unlike `ReadChunk`, a piece is one contiguous buffer, which is what
+in-place header unprotection and AEAD need.
 
 ```rust
 use nitori_io::SplitTo;
 
 let mut datagram = &b"headbody"[..];
-let head = datagram.split_to(4);
+let head = datagram.split_to(4).unwrap();
 assert_eq!((head, datagram), (&b"head"[..], &b"body"[..]));
 ```
 
