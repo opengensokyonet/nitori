@@ -1,10 +1,10 @@
-use crate::current_codec::{ReadDataFrameHostExt as _, ReadVarintHostExt};
+use crate::current_codec::{ReadDataFrameHostExt as _, ReadVarintError, ReadVarintHostExt};
 use bytes::{BufMut, Bytes};
 use futures_core::Stream;
 use nitori_call::{
     CallExecutor, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start, call,
 };
-use nitori_io::calls::{ReadBeError, WriteAllError, WriteAllHostExt as _};
+use nitori_io::calls::{WriteAllError, WriteAllHostExt as _};
 use nitori_io::{PollReadExt as _, Read, ReadChunk};
 use std::convert::Infallible;
 use std::{
@@ -358,7 +358,7 @@ fn write_helper_infers_input_generic() {
 
 async fn through_trait_only<T: ReadVarintHostExt + ?Sized>(
     target: Pin<&mut T>,
-) -> Result<u64, ReadBeError<<T::Receivers as Read>::Error>>
+) -> Result<u64, ReadVarintError<<T::Receivers as Read>::Error>>
 where
     T::Receivers: Read,
 {

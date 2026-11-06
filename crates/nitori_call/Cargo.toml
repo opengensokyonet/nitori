@@ -34,5 +34,6 @@ optional = true
 [dev-dependencies]
 bytes.workspace = true
 nitori_io.workspace = true
+snafu.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 futures-util = { workspace = true, features = ["std"] }

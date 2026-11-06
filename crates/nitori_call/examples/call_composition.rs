@@ -7,20 +7,29 @@ use nitori_io::{
     Write,
     calls::{WriteAllError, WriteAllExt as _},
 };
+use snafu::{ResultExt, Snafu};
 use std::{
     ops::ControlFlow,
     pin::pin,
     task::{Context, Poll, Waker},
 };
 
+#[derive(Debug, Snafu)]
+enum WriteLineError<E> {
+    #[snafu(display("could not write the line"))]
+    Line { source: WriteAllError<E> },
+    #[snafu(display("could not write the newline"))]
+    Newline { source: WriteAllError<E> },
+}
+
 #[call(sync, yields = usize)]
 async fn write_line<F: Write, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     line: &[u8],
-) -> Result<usize, WriteAllError<F::Error>> {
-    io.write_all(line).await?;
+) -> Result<usize, WriteLineError<F::Error>> {
+    io.write_all(line).await.context(LineSnafu)?;
     yield line.len();
-    io.write_all(b"\n".as_slice()).await?;
+    io.write_all(b"\n".as_slice()).await.context(NewlineSnafu)?;
     Ok(line.len() + 1)
 }
 

@@ -190,6 +190,7 @@ dependencies = [
  "nitori_call_macros",
  "nitori_io",
  "pin-project-lite",
+ "snafu",
  "tokio",
 ]
 

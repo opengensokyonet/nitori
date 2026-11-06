@@ -52,16 +52,28 @@ caller decides how long it stays acquired:
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::ReadExactError, prelude::*};
+use nitori_io::{
+    calls::{ReadArrayError, ReadExactError},
+    prelude::*,
+};
+use snafu::{ResultExt, Snafu};
 use std::sync::Mutex;
+
+#[derive(Debug, Snafu)]
+enum ReadFrameError<E> {
+    Header { source: ReadArrayError<E> },
+    Payload { source: ReadExactError<E> },
+}
 
 #[call(sync)]
 async fn read_frame<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     payload: &mut Vec<u8>,
-) -> Result<u8, ReadExactError<F::Error>> {
-    let [kind, length] = io.read_array::<2>().await?;
-    io.read_exact(payload, usize::from(length)).await?;
+) -> Result<u8, ReadFrameError<F::Error>> {
+    let [kind, length] = io.read_array::<2>().await.context(HeaderSnafu)?;
+    io.read_exact(payload, usize::from(length))
+        .await
+        .context(PayloadSnafu)?;
     Ok(kind)
 }
 
@@ -192,15 +204,27 @@ memory slice or an asynchronous IO bridge.
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::ReadExactError, prelude::*};
+use nitori_io::{
+    calls::{ReadArrayError, ReadExactError},
+    prelude::*,
+};
+use snafu::{ResultExt, Snafu};
+
+#[derive(Debug, Snafu)]
+enum ReadRecordError<E> {
+    Length { source: ReadArrayError<E> },
+    Payload { source: ReadExactError<E> },
+}
 
 #[call(sync)]
 async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     output: &mut Vec<u8>,
-) -> Result<usize, ReadExactError<F::Error>> {
-    let [length] = io.read_array::<1>().await?;
-    io.read_exact(output, usize::from(length)).await?;
+) -> Result<usize, ReadRecordError<F::Error>> {
+    let [length] = io.read_array::<1>().await.context(LengthSnafu)?;
+    io.read_exact(output, usize::from(length))
+        .await
+        .context(PayloadSnafu)?;
     Ok(usize::from(length))
 }
 
@@ -371,6 +395,7 @@ also tests it across Pending and cancellation:
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
+use snafu::{ResultExt, Snafu};
 
 #[call(sync)]
 async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
@@ -379,12 +404,23 @@ async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
     io.read_array::<2>().await
 }
 
+#[derive(Debug, Snafu)]
+enum ReadRecordError<E> {
+    #[snafu(display("could not read the record length"))]
+    Length { source: ReadArrayError<E> },
+    #[snafu(display("could not read the record word"))]
+    Word { source: ReadArrayError<E> },
+}
+
 #[call(sync)]
 async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 2], ReadArrayError<F::Error>> {
-    let [length] = io.read_array::<1>().await?;
-    io.compose(ReadLimit(usize::from(length))).read_word().await
+) -> Result<[u8; 2], ReadRecordError<F::Error>> {
+    let [length] = io.read_array::<1>().await.context(LengthSnafu)?;
+    io.compose(ReadLimit(usize::from(length)))
+        .read_word()
+        .await
+        .context(WordSnafu)
 }
 
 fn main() {
@@ -394,8 +430,10 @@ fn main() {
 
     // The malformed first record has only one byte; the next record stays readable.
     let mut input = b"\x01A\x02BC".as_slice();
-    let error = input.sync_read_record_unpin().unwrap_err();
-    assert_eq!(error.completed(), 1);
+    let Err(ReadRecordError::Word { source }) = input.sync_read_record_unpin() else {
+        panic!("expected the word to be cut short");
+    };
+    assert_eq!(source.completed(), 1);
     assert_eq!(input, b"\x02BC");
     assert_eq!(input.sync_read_record_unpin().unwrap(), *b"BC");
 }
@@ -674,30 +712,54 @@ poll:
 ```rust
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::ReadExactError, prelude::*};
+use nitori_io::{
+    calls::{ReadArrayError, ReadExactError},
+    prelude::*,
+};
+use snafu::{ResultExt, Snafu};
 use std::{ops::ControlFlow, pin::pin};
+
+#[derive(Debug, Snafu)]
+enum ReadRecordsError<E> {
+    #[snafu(display("could not read the length of record {index}"))]
+    Length {
+        index: usize,
+        source: ReadArrayError<E>,
+    },
+    #[snafu(display("could not read record {index}"))]
+    Record {
+        index: usize,
+        source: ReadExactError<E>,
+    },
+}
 
 /// Length-prefixed records, until an empty one.
 #[call(yields = Vec<u8>)]
 async fn read_records<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<(), ReadExactError<F::Error>> {
-    loop {
-        let [length] = io.read_array::<1>().await?;
+) -> Result<(), ReadRecordsError<F::Error>> {
+    for index in 0usize.. {
+        let [length] = io
+            .read_array::<1>()
+            .await
+            .context(LengthSnafu { index })?;
         if length == 0 {
-            return Ok(());
+            break;
         }
         let mut record = Vec::new();
-        io.read_exact(&mut record, usize::from(length)).await?;
+        io.read_exact(&mut record, usize::from(length))
+            .await
+            .context(RecordSnafu { index })?;
         yield record;
     }
+    Ok(())
 }
 
 #[call(sync)]
 async fn collect_records<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     records: &mut Vec<Vec<u8>>,
-) -> Result<(), ReadExactError<F::Error>> {
+) -> Result<(), ReadRecordsError<F::Error>> {
     let mut items = pin!(io.read_records());
     loop {
         match items.as_mut().step().await {

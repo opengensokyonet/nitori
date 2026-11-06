@@ -10,15 +10,139 @@ use std::prelude::rust_2024::*;
 
 use nitori_call::{CallExecutor, ReceiverAccess, call};
 use nitori_io::{Read, calls::{ReadBeError, ReadBeExt as _}};
+use snafu::{ResultExt, Snafu};
 use std::{
     convert::Infallible, future::Future, pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
 
+enum OperandPosition { First, Second, }
+#[automatically_derived]
+#[doc(hidden)]
+unsafe impl ::core::clone::TrivialClone for OperandPosition { }
+#[automatically_derived]
+impl ::core::clone::Clone for OperandPosition {
+    #[inline]
+    fn clone(&self) -> Self { *self }
+}
+#[automatically_derived]
+impl ::core::marker::Copy for OperandPosition { }
+#[automatically_derived]
+impl ::core::fmt::Debug for OperandPosition {
+    #[inline]
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        ::core::fmt::Formatter::write_str(f,
+            match self {
+                OperandPosition::First => "First",
+                OperandPosition::Second => "Second",
+            })
+    }
+}
+
+enum ReadPairError<E> {
+
+    #[snafu(display("could not read the {position:?} operand"))]
+    Operand {
+        position: OperandPosition,
+        source: ReadBeError<E>,
+    },
+}
+#[automatically_derived]
+impl<E: ::core::fmt::Debug> ::core::fmt::Debug for ReadPairError<E> {
+    #[inline]
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        match self {
+            Self::Operand { position: __self_0, source: __self_1 } =>
+                ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                    "Operand position source", __self_0, &__self_1),
+        }
+    }
+}
+#[doc = "SNAFU context selector for the `ReadPairError::Operand` variant"]
+struct OperandSnafu<__T0> {
+    #[allow(missing_docs)]
+    position: __T0,
+}
+#[automatically_derived]
+impl<__T0: ::core::fmt::Debug> ::core::fmt::Debug for OperandSnafu<__T0> {
+    #[inline]
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        ::core::fmt::Formatter::debug_struct_field1_finish(f,
+            "OperandSnafu position", &&self.position)
+    }
+}
+#[automatically_derived]
+impl<__T0: ::core::marker::Copy> ::core::marker::Copy for OperandSnafu<__T0> {
+}
+#[automatically_derived]
+impl<__T0: ::core::clone::Clone> ::core::clone::Clone for OperandSnafu<__T0> {
+    #[inline]
+    fn clone(&self) -> Self {
+        OperandSnafu { position: ::core::clone::Clone::clone(&self.position) }
+    }
+}
+impl<E, __T0> ::snafu::IntoError<ReadPairError<E>> for OperandSnafu<__T0>
+    where __T0: ::core::convert::Into<OperandPosition> {
+    type Source = ReadBeError<E>;
+    #[track_caller]
+    fn into_error(self, error: Self::Source) -> ReadPairError<E> {
+        let error: ReadBeError<E> = (|v| v)(error);
+        ReadPairError::Operand {
+            source: error,
+            position: ::core::convert::Into::into(self.position),
+        }
+    }
+}
+#[allow(single_use_lifetimes)]
+impl<E> ::core::fmt::Display for ReadPairError<E> where  {
+    fn fmt(&self, __snafu_display_formatter: &mut ::core::fmt::Formatter)
+        -> ::core::fmt::Result {
+
+        #[allow(unused_variables)]
+        match *self {
+            ReadPairError::Operand { ref position, ref source } => {
+
+
+
+                // The generated items stay inside this block.
+
+                __snafu_display_formatter.write_fmt(format_args!("could not read the {0:?} operand",
+                        position))
+            }
+        }
+    }
+}
+#[allow(single_use_lifetimes)]
+impl<E> ::snafu::Error for ReadPairError<E> where Self: ::core::fmt::Debug +
+    ::core::fmt::Display, ReadBeError<E>: ::snafu::AsErrorSource {
+    fn source(&self)
+        -> ::core::option::Option<&(dyn ::snafu::Error + 'static)> {
+        use ::snafu::AsErrorSource;
+        match *self {
+            ReadPairError::Operand { ref source, .. } => {
+                ::core::option::Option::Some(source.as_error_source())
+            }
+        }
+    }
+}
+#[allow(single_use_lifetimes)]
+impl<E> ::snafu::ErrorCompat for ReadPairError<E> where  {
+    fn backtrace(&self) -> ::core::option::Option<&::snafu::Backtrace> {
+        match *self {
+            ReadPairError::Operand { .. } => { ::core::option::Option::None }
+        }
+    }
+}
 async fn read_pair<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A)
-    -> Result<u16, ReadBeError<F::Error>> {
-    let first = io.read_be::<u8>().await?;
-    let second = io.read_be::<u8>().await?;
+    -> Result<u16, ReadPairError<F::Error>> {
+    let first =
+        io.read_be::<u8>().await.context(OperandSnafu {
+                    position: OperandPosition::First,
+                })?;
+    let second =
+        io.read_be::<u8>().await.context(OperandSnafu {
+                    position: OperandPosition::Second,
+                })?;
     Ok(u16::from(first) + u16::from(second))
 }
 #[doc = "The `read_pair` operation."]
@@ -31,7 +155,7 @@ impl ReadPair<> where  {
 }
 impl<F: ::nitori_call::ReceiverFamily + Read> ::nitori_call::Operation<F> for
     ReadPair<> where  {
-    type Output = Result<u16, ReadBeError<F::Error>>;
+    type Output = Result<u16, ReadPairError<F::Error>>;
     type Yield = ::core::convert::Infallible;
 }
 impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read>
@@ -109,11 +233,8 @@ impl<__Receiver: ::nitori_call::CallExecutor + ?Sized> ReadPairHostExt for
     <__Receiver as
     ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
     Read {}
-
 fn main() {
     let mut input = b"\x01\x02".as_slice();
-
-    // The generated items stay inside this block.
     {
         match (&input.sync_read_pair_unpin().unwrap(), &3) {
             (left_val, right_val) => {
@@ -131,11 +252,116 @@ fn main() {
     let mut input = b"\x01\x02".as_slice();
     let sum =
         {
+            enum SumError {
+
+                #[snafu(display("could not read the {position:?} operand"))]
+                Operand {
+                    position: OperandPosition,
+                    source: ReadBeError<Infallible>,
+                },
+            }
+            #[automatically_derived]
+            impl ::core::fmt::Debug for SumError {
+                #[inline]
+                fn fmt(&self, f: &mut ::core::fmt::Formatter)
+                    -> ::core::fmt::Result {
+                    match self {
+                        Self::Operand { position: __self_0, source: __self_1 } =>
+                            ::core::fmt::Formatter::debug_struct_field2_finish(f,
+                                "Operand position source", __self_0, &__self_1),
+                    }
+                }
+            }
+            #[doc =
+            "SNAFU context selector for the `SumError::Operand` variant"]
+            struct OperandSnafu<__T0> {
+                #[allow(missing_docs)]
+                position: __T0,
+            }
+            #[automatically_derived]
+            impl<__T0: ::core::fmt::Debug> ::core::fmt::Debug for
+                OperandSnafu<__T0> {
+                #[inline]
+                fn fmt(&self, f: &mut ::core::fmt::Formatter)
+                    -> ::core::fmt::Result {
+                    ::core::fmt::Formatter::debug_struct_field1_finish(f,
+                        "OperandSnafu position", &&self.position)
+                }
+            }
+            #[automatically_derived]
+            impl<__T0: ::core::marker::Copy> ::core::marker::Copy for
+                OperandSnafu<__T0> {
+            }
+            #[automatically_derived]
+            impl<__T0: ::core::clone::Clone> ::core::clone::Clone for
+                OperandSnafu<__T0> {
+                #[inline]
+                fn clone(&self) -> Self {
+                    OperandSnafu {
+                        position: ::core::clone::Clone::clone(&self.position),
+                    }
+                }
+            }
+            impl<__T0> ::snafu::IntoError<SumError<>> for OperandSnafu<__T0>
+                where __T0: ::core::convert::Into<OperandPosition> {
+                type Source = ReadBeError<Infallible>;
+                #[track_caller]
+                fn into_error(self, error: Self::Source) -> SumError<> {
+                    let error: ReadBeError<Infallible> = (|v| v)(error);
+                    SumError::Operand {
+                        source: error,
+                        position: ::core::convert::Into::into(self.position),
+                    }
+                }
+            }
+            #[allow(single_use_lifetimes)]
+            impl ::core::fmt::Display for SumError<> where  {
+                fn fmt(&self,
+                    __snafu_display_formatter: &mut ::core::fmt::Formatter)
+                    -> ::core::fmt::Result {
+
+                    #[allow(unused_variables)]
+                    match *self {
+                        SumError::Operand { ref position, ref source } => {
+                            __snafu_display_formatter.write_fmt(format_args!("could not read the {0:?} operand",
+                                    position))
+                        }
+                    }
+                }
+            }
+            #[allow(single_use_lifetimes)]
+            impl ::snafu::Error for SumError<> where
+                Self: ::core::fmt::Debug + ::core::fmt::Display {
+                fn source(&self)
+                    -> ::core::option::Option<&(dyn ::snafu::Error + 'static)> {
+                    use ::snafu::AsErrorSource;
+                    match *self {
+                        SumError::Operand { ref source, .. } => {
+                            ::core::option::Option::Some(source.as_error_source())
+                        }
+                    }
+                }
+            }
+            #[allow(single_use_lifetimes)]
+            impl ::snafu::ErrorCompat for SumError<> where  {
+                fn backtrace(&self)
+                    -> ::core::option::Option<&::snafu::Backtrace> {
+                    match *self {
+                        SumError::Operand { .. } => { ::core::option::Option::None }
+                    }
+                }
+            }
             async fn sum<A: ReceiverAccess<Family
                 : Read<Error = Infallible>>>(io: &mut A)
-                -> Result<u16, ReadBeError<Infallible>> {
-                let first = io.read_be::<u8>().await?;
-                let second = io.read_be::<u8>().await?;
+                -> Result<u16, SumError> {
+                let first =
+                    io.read_be::<u8>().await.context(OperandSnafu {
+                                position: OperandPosition::First,
+                            })?;
+                let second =
+                    io.read_be::<u8>().await.context(OperandSnafu {
+                                position: OperandPosition::Second,
+                            })?;
                 Ok(u16::from(first) + u16::from(second))
             }
             #[doc = "The `sum` operation."]
@@ -149,7 +375,7 @@ fn main() {
             impl<__F: ::nitori_call::ReceiverFamily +
                 Read<Error = Infallible>> ::nitori_call::Operation<__F> for
                 Sum<> where  {
-                type Output = Result<u16, ReadBeError<Infallible>>;
+                type Output = Result<u16, SumError>;
                 type Yield = ::core::convert::Infallible;
             }
             impl<'__s, __A> ::nitori_call::Start<'__s, __A> for Sum<> where

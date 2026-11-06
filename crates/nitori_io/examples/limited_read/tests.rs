@@ -40,7 +40,7 @@ impl Read for Delayed<'_> {
 fn poll<'data>(
     call: Pin<&mut Call<Delayed<'data>, ReadRecord>>,
     host: &mut Delayed<'data>,
-) -> CallPoll<Result<[u8; 2], ReadArrayError<Infallible>>> {
+) -> CallPoll<Result<[u8; 2], ReadRecordError<Infallible>>> {
     call.poll_return_with(
         Some(Lend::Fixed(pin!(Pin::new(host).view()))),
         &mut Context::from_waker(Waker::noop()),
@@ -63,10 +63,11 @@ fn budget_survives_pending_and_partial_reads() {
     assert_eq!(host.input, b"\x01A\x02BC");
     assert!(matches!(poll(call.as_mut(), &mut host), CallPoll::Pending));
     assert_eq!(host.input, b"A\x02BC");
-    let CallPoll::Ready(Err(error)) = poll(call.as_mut(), &mut host) else {
+    let CallPoll::Ready(Err(ReadRecordError::Word { source })) = poll(call.as_mut(), &mut host)
+    else {
         panic!("expected record boundary")
     };
-    assert_eq!(error.completed(), 1);
+    assert_eq!(source.completed(), 1);
     assert_eq!(host.input, b"\x02BC");
 }
 

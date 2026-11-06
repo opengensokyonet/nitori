@@ -5,6 +5,7 @@ use nitori_call::{Call, CallPoll, Lend, Receiver};
 use nitori_io::calls::WriteAll;
 use std::{
     convert::Infallible,
+    future::Future,
     pin::Pin,
     task::{Context, Poll, Waker},
 };
@@ -66,10 +67,12 @@ fn multi_byte_length_and_wrong_type() {
     }
     assert!(input.is_empty());
     let mut input = b"\x01\0".as_slice();
-    assert!(matches!(
-        input.sync_read_data_frame_unpin(NonZeroUsize::new(2).unwrap()),
-        Err(CodecError::WrongType { actual: 1 })
-    ));
+    let Err(CodecError::WrongType { actual }) =
+        input.sync_read_data_frame_unpin(NonZeroUsize::new(2).unwrap())
+    else {
+        panic!("expected a wrong frame type");
+    };
+    assert_eq!(actual.get(), 1);
 }
 
 /// Counts chunk reads and returns at most two bytes per chunk.
@@ -215,4 +218,57 @@ fn named_write_preserves_partial_progress_across_pending() {
     };
     returned.unwrap();
     assert_eq!(output.bytes, b"abc");
+}
+
+/// The output of a future that never waits.
+fn ready<T>(future: impl Future<Output = T>) -> T {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("memory input does not wait"),
+    }
+}
+
+#[test]
+fn varint_reads_every_width() {
+    for (bytes, expected) in [
+        (&b"\x25"[..], 0x25),
+        (&b"\x7b\xbd"[..], 15_293),
+        (&b"\x9d\x7f\x3e\x7d"[..], 494_878_333),
+        (
+            &b"\xc2\x19\x7c\x5e\xff\x14\xe8\x8c"[..],
+            151_288_809_941_952_652,
+        ),
+    ] {
+        let mut input = bytes;
+        assert_eq!(ready(input.read_varint_unpin()).unwrap(), expected);
+        assert!(input.is_empty());
+    }
+}
+
+#[test]
+fn varint_failures_name_the_step() {
+    let mut input = b"".as_slice();
+    assert!(matches!(
+        ready(input.read_varint_unpin()),
+        Err(ReadVarintError::FirstByte { .. })
+    ));
+    let mut input = b"\x80\x01".as_slice();
+    let Err(ReadVarintError::RemainingBytes { source }) = ready(input.read_varint_unpin()) else {
+        panic!("expected the remaining bytes to be cut short");
+    };
+    assert_eq!(source.completed(), 1);
+}
+
+#[test]
+fn frame_header_failures_name_the_field() {
+    let mut input = b"".as_slice();
+    assert!(matches!(
+        input.sync_read_data_frame_unpin(NonZeroUsize::new(2).unwrap()),
+        Err(CodecError::FrameType { .. })
+    ));
+    let mut input = b"\0".as_slice();
+    assert!(matches!(
+        input.sync_read_data_frame_unpin(NonZeroUsize::new(2).unwrap()),
+        Err(CodecError::FrameLength { .. })
+    ));
 }

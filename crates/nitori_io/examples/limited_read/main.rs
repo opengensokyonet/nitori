@@ -3,6 +3,7 @@
 
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
+use snafu::{ResultExt, Snafu};
 
 // This parser can be reused with either an unrestricted or a limited receiver.
 #[call(sync)]
@@ -12,12 +13,23 @@ async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
     io.read_array::<2>().await
 }
 
+#[derive(Debug, Snafu)]
+enum ReadRecordError<E> {
+    #[snafu(display("could not read the record length"))]
+    Length { source: ReadArrayError<E> },
+    #[snafu(display("could not read the record word"))]
+    Word { source: ReadArrayError<E> },
+}
+
 #[call(sync)]
 async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 2], ReadArrayError<F::Error>> {
-    let [length] = io.read_array::<1>().await?;
-    io.compose(ReadLimit(usize::from(length))).read_word().await
+) -> Result<[u8; 2], ReadRecordError<F::Error>> {
+    let [length] = io.read_array::<1>().await.context(LengthSnafu)?;
+    io.compose(ReadLimit(usize::from(length)))
+        .read_word()
+        .await
+        .context(WordSnafu)
 }
 
 fn main() {
@@ -27,8 +39,10 @@ fn main() {
 
     // The malformed first record has only one byte; the next record stays readable.
     let mut input = b"\x01A\x02BC".as_slice();
-    let error = input.sync_read_record_unpin().unwrap_err();
-    assert_eq!(error.completed(), 1);
+    let Err(ReadRecordError::Word { source }) = input.sync_read_record_unpin() else {
+        panic!("expected the word to be cut short");
+    };
+    assert_eq!(source.completed(), 1);
     assert_eq!(input, b"\x02BC");
     assert_eq!(input.sync_read_record_unpin().unwrap(), *b"BC");
 }
