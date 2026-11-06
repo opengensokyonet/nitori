@@ -1110,27 +1110,34 @@ for_tuples!(tuple_acquisitions);
 /// the acquired views themselves, or by [`drive_composed`], which composes
 /// each first. A tuple of acquisitions drives an operation over several
 /// receivers, each acquired on its own.
-pub struct Drive<'view, S, Op, L = AsAcquired>
+///
+/// `R` is always the families of `S`. Naming them apart from `S` keeps the
+/// call's type free of a projection through `'view`, so that a task awaiting
+/// a `Drive` can be shown to be `Send`.
+pub struct Drive<'view, S, Op, L = AsAcquired, R = <S as Acquisitions<'view, L>>::Receivers>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     acquisition: InPlace<S>,
     lender: InPlace<L>,
-    call: Call<S::Receivers, Op>,
+    call: Call<R, Op>,
     view: PhantomData<&'view ()>,
 }
 // SAFETY: a shared reference only reads whether the call has finished.
-unsafe impl<'view, S, Op, L> Sync for Drive<'view, S, Op, L>
+unsafe impl<'view, S, Op, L, R> Sync for Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
 }
-impl<'view, S, Op, L> Drive<'view, S, Op, L>
+impl<'view, S, Op, L, R> Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     fn project(self: Pin<&mut Self>) -> Parts<'_, S, L, Call<S::Receivers, Op>> {
         // SAFETY: the acquisition, the lender and the call are structurally
@@ -1145,10 +1152,11 @@ where
         }
     }
 }
-impl<'view, S, Op, L> fmt::Debug for Drive<'view, S, Op, L>
+impl<'view, S, Op, L, R> fmt::Debug for Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Drive")
@@ -1160,10 +1168,11 @@ where
 /// The pinned acquisition, lender and call of a `Drive`.
 type Parts<'a, S, L, C> = (Pin<&'a mut S>, Pin<&'a mut L>, Pin<&'a mut C>);
 
-impl<'view, S, Op, L> Future for Drive<'view, S, Op, L>
+impl<'view, S, Op, L, R> Future for Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     type Output = Output<S::Receivers, Op>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -1174,10 +1183,11 @@ where
         })
     }
 }
-impl<'view, S, Op, L> Stream for Drive<'view, S, Op, L>
+impl<'view, S, Op, L, R> Stream for Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     type Item = Event<S::Receivers, Op>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1191,19 +1201,21 @@ where
         remaining(self.call.is_terminated())
     }
 }
-impl<'view, S, Op, L> FusedFuture for Drive<'view, S, Op, L>
+impl<'view, S, Op, L, R> FusedFuture for Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     fn is_terminated(&self) -> bool {
         self.call.is_terminated()
     }
 }
-impl<'view, S, Op, L> FusedStream for Drive<'view, S, Op, L>
+impl<'view, S, Op, L, R> FusedStream for Drive<'view, S, Op, L, R>
 where
-    S: Acquisitions<'view, L>,
-    Op: RootOperation<S::Receivers>,
+    S: Acquisitions<'view, L, Receivers = R>,
+    R: Receivers,
+    Op: RootOperation<R>,
 {
     fn is_terminated(&self) -> bool {
         self.call.is_terminated()

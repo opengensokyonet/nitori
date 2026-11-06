@@ -197,7 +197,7 @@ pub use driver::{
     Drive, ReceiverScope, ViewAcquisition, drive, drive_composed,
 };
 mod lock;
-pub use lock::{Guarded, Lock, LockAcquisition, Locked};
+pub use lock::{Guarded, Lock, LockAcquisition, Locked, StdMutexAcquire};
 
 /// Generate an operation and its conveniences from an async function taking a
 /// receiver access first.

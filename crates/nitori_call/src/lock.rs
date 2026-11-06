@@ -147,11 +147,22 @@ macro_rules! lock_executor {
     };
 }
 
+/// The acquisition of a `std::sync::Mutex`: it locks when polled, and holds
+/// no guard before, so an acquisition waiting for it can move to another
+/// thread.
+#[derive(Debug)]
+pub struct StdMutexAcquire<'a, T: ?Sized>(&'a std::sync::Mutex<T>);
+impl<'a, T: ?Sized> Future for StdMutexAcquire<'a, T> {
+    type Output = std::sync::MutexGuard<'a, T>;
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(self.0.lock().expect("the lock is poisoned"))
+    }
+}
 lock_executor!(
     std::sync::Mutex,
     std::sync::MutexGuard<'a, T>,
-    std::future::Ready<std::sync::MutexGuard<'a, T>>,
-    |lock| std::future::ready(lock.lock().expect("the lock is poisoned"))
+    StdMutexAcquire<'a, T>,
+    |lock| StdMutexAcquire(lock)
 );
 lock_executor!(
     #[cfg(feature = "tokio-sync")]

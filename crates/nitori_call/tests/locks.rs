@@ -73,6 +73,24 @@ fn a_poisoned_std_mutex_panics() {
 
 /// A fixed acquired view stays fixed when composed: the lock is kept
 /// through the release point.
+/// Require `task` to be `Send`, as a task of a multi-thread runtime must be.
+fn assert_send_task<F: Future + Send>(_: F) {}
+
+#[test]
+fn executions_on_std_mutexes_can_be_awaited_in_tasks() {
+    let output = std::sync::Mutex::new(Vec::new());
+    assert_send_task(async { (&output).write_all_unpin(&b"a"[..]).await });
+    let source = std::sync::Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
+    assert_send_task(async {
+        drive_composed(
+            (LockAcquisition::new(&source), LockAcquisition::new(&output)),
+            (Guarded, Guarded),
+            CopyBytes::new(1),
+        )
+        .await
+    });
+}
+
 #[test]
 fn composing_keeps_whether_the_view_is_releasable() {
     let output = std::sync::Mutex::new(Vec::new());
@@ -169,6 +187,21 @@ mod tokio_sync {
     use tokio::sync::Mutex;
 
     #[test]
+    fn executions_can_be_awaited_in_tasks() {
+        let output = Mutex::new(Vec::new());
+        assert_send_task(async { (&output).write_all_unpin(&b"a"[..]).await });
+        let source = Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
+        assert_send_task(async {
+            drive_composed(
+                (LockAcquisition::new(&source), LockAcquisition::new(&output)),
+                (Guarded, Guarded),
+                CopyBytes::new(1),
+            )
+            .await
+        });
+    }
+
+    #[test]
     fn the_lock_is_free_while_the_operation_waits_for_something_else() {
         let output = Mutex::new(Vec::new());
         let open = Cell::new(false);
@@ -231,6 +264,21 @@ mod tokio_sync {
 mod futures_lock {
     use super::*;
     use futures_util::lock::Mutex;
+
+    #[test]
+    fn executions_can_be_awaited_in_tasks() {
+        let output = Mutex::new(Vec::new());
+        assert_send_task(async { (&output).write_all_unpin(&b"a"[..]).await });
+        let source = Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
+        assert_send_task(async {
+            drive_composed(
+                (LockAcquisition::new(&source), LockAcquisition::new(&output)),
+                (Guarded, Guarded),
+                CopyBytes::new(1),
+            )
+            .await
+        });
+    }
 
     #[test]
     fn the_lock_is_free_while_the_operation_waits_for_something_else() {
