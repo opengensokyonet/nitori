@@ -28,6 +28,7 @@ use std::{
     future::poll_fn,
     hint::black_box,
     pin::{Pin, pin},
+    sync::OnceLock,
     task::{Context, Poll, ready},
     time::{Duration, Instant},
 };
@@ -278,6 +279,14 @@ async fn plain_steps(source: &mut impl PollStep, count: usize) -> u64 {
 /// counter's last value.
 fn per_access(runtime: &Runtime, mut run: impl AsyncFnMut(usize) -> u64) -> [f64; 2] {
     PER_CALL.map(|per_call| {
+        if PER_CALL_ONLY
+            .get()
+            .copied()
+            .flatten()
+            .is_some_and(|only| only != per_call)
+        {
+            return f64::NAN;
+        }
         let mut measure = || {
             let start = Instant::now();
             let last = runtime.block_on(run(per_call));
@@ -292,8 +301,17 @@ fn per_access(runtime: &Runtime, mut run: impl AsyncFnMut(usize) -> u64) -> [f64
     })
 }
 
-fn row(name: &str, costs: [f64; 2]) {
-    println!("  {name:<28} {:>11.1} {:>12.1}", costs[0], costs[1]);
+/// The row to run, named by `rows=`, or all.
+static ROWS: OnceLock<Option<String>> = OnceLock::new();
+/// The accesses per call to measure, given by `per_call=`, or both.
+static PER_CALL_ONLY: OnceLock<Option<usize>> = OnceLock::new();
+
+/// Measure and print a row, if it is one to run.
+fn row(name: &str, costs: impl FnOnce() -> [f64; 2]) {
+    if ROWS.get().into_iter().flatten().all(|rows| name == rows) {
+        let costs = costs();
+        println!("  {name:<28} {:>11.1} {:>12.1}", costs[0], costs[1]);
+    }
 }
 
 /// The rows for a counter behind a lock.
@@ -304,8 +322,7 @@ impl PerLock<Counter> for RunLocked<'_> {
     type Output = ();
     fn run<L: Lock<Value = Counter>>(self) {
         let runtime = self.runtime;
-        row(
-            "PlainLockPerLeaf",
+        row("PlainLockPerLeaf", || {
             per_access(runtime, async |per_call| {
                 let (lock, stats) = (L::new(Counter::default()), LockStats::new(false));
                 let mut source = LockEach(PollLock::new(&lock, &stats));
@@ -314,15 +331,14 @@ impl PerLock<Counter> for RunLocked<'_> {
                     last = plain_steps(&mut source, per_call).await;
                 }
                 black_box(last)
-            }),
-        );
+            })
+        });
         for (name, release, points) in [
             ("Call", Release::Never, false),
             ("Call, release points kept", Release::Never, true),
             ("CallRelease", Release::Always, true),
         ] {
-            row(
-                name,
+            row(name, || {
                 per_access(runtime, async |per_call| {
                     let (lock, stats) = (L::new(Counter::default()), LockStats::new(false));
                     let mut executor = Shared {
@@ -335,8 +351,8 @@ impl PerLock<Counter> for RunLocked<'_> {
                         last = executor.steps_unpin(per_call, points).await;
                     }
                     black_box(last)
-                }),
-            );
+                })
+            });
         }
     }
 }
@@ -364,15 +380,18 @@ fn sizes() {
     );
 }
 
-pub fn run(runtime: &Runtime) {
+/// Run the row named `rows`, or all of them, measuring `per_call` accesses
+/// per call, or both counts.
+pub fn run(runtime: &Runtime, rows: Option<&str>, per_call: Option<usize>) {
+    ROWS.set(rows.map(str::to_owned)).unwrap();
+    PER_CALL_ONLY.set(per_call).unwrap();
     println!(
         "mechanism: {ACCESSES} accesses to a counter, one task on current_thread, median of {REPEATS}; ns per access"
     );
     sizes();
     println!("  {:<28} {:>11} {:>12}", "", "1 per call", "16 per call");
     println!("exclusive");
-    row(
-        "Direct (no future)",
+    row("Direct (no future)", || {
         per_access(runtime, async |per_call| {
             let mut counter = Counter::default();
             let mut last = 0;
@@ -382,10 +401,9 @@ pub fn run(runtime: &Runtime) {
                 }
             }
             last
-        }),
-    );
-    row(
-        "Plain",
+        })
+    });
+    row("Plain", || {
         per_access(runtime, async |per_call| {
             let mut counter = Counter::default();
             let mut last = 0;
@@ -393,11 +411,10 @@ pub fn run(runtime: &Runtime) {
                 last = plain_steps(black_box(&mut counter), per_call).await;
             }
             last
-        }),
-    );
+        })
+    });
     for (name, points) in [("Call", false), ("Call, release points", true)] {
-        row(
-            name,
+        row(name, || {
             per_access(runtime, async |per_call| {
                 let mut counter = Counter::default();
                 let mut last = 0;
@@ -405,13 +422,12 @@ pub fn run(runtime: &Runtime) {
                     last = black_box(&mut counter).steps_unpin(per_call, points).await;
                 }
                 last
-            }),
-        );
+            })
+        });
     }
     println!("exclusive, a counter lent through a shared reference");
     for (name, points) in [("BoundCall", false), ("BoundCall, release points", true)] {
-        row(
-            name,
+        row(name, || {
             per_access(runtime, async |per_call| {
                 let mut counter = CellCounter::default();
                 let mut last = 0;
@@ -419,16 +435,15 @@ pub fn run(runtime: &Runtime) {
                     last = black_box(&mut counter).steps_unpin(per_call, points).await;
                 }
                 last
-            }),
-        );
+            })
+        });
     }
     for (name, releasable, points) in [
         ("Drive, ready", false, false),
         ("Drive, ready, release points", false, true),
         ("Drive, ready, released", true, true),
     ] {
-        row(
-            name,
+        row(name, || {
             per_access(runtime, async |per_call| {
                 let counter = CellCounter::default();
                 let mut last = 0;
@@ -440,12 +455,11 @@ pub fn run(runtime: &Runtime) {
                     last = drive(acquisition, Steps::new(per_call, points)).await;
                 }
                 last
-            }),
-        );
+            })
+        });
     }
     println!("synchronous steps, exclusive");
-    row(
-        "poll_fn + poll_access",
+    row("poll_fn + poll_access", || {
         per_access(runtime, async |per_call| {
             let mut counter = Counter::default();
             let mut last = 0;
@@ -462,10 +476,9 @@ pub fn run(runtime: &Runtime) {
                 .await;
             }
             last
-        }),
-    );
-    row(
-        "LentCall, with",
+        })
+    });
+    row("LentCall, with", || {
         per_access(runtime, async |per_call| {
             let mut counter = Counter::default();
             let mut last = 0;
@@ -475,10 +488,9 @@ pub fn run(runtime: &Runtime) {
                 last = poll_fn(|cx| call.as_mut().poll_return_with_views(view.as_mut(), cx)).await;
             }
             last
-        }),
-    );
-    row(
-        "LentCall, method",
+        })
+    });
+    row("LentCall, method", || {
         per_access(runtime, async |per_call| {
             let mut counter = Counter::default();
             let mut last = 0;
@@ -488,10 +500,9 @@ pub fn run(runtime: &Runtime) {
                 last = poll_fn(|cx| call.as_mut().poll_return_with_views(view.as_mut(), cx)).await;
             }
             last
-        }),
-    );
-    row(
-        "two, nested poll_access",
+        })
+    });
+    row("two, nested poll_access", || {
         per_access(runtime, async |per_call| {
             let (mut first, mut second) = (Counter::default(), Counter::default());
             let mut last = 0;
@@ -514,10 +525,9 @@ pub fn run(runtime: &Runtime) {
                 .await;
             }
             last
-        }),
-    );
-    row(
-        "two, tuple with",
+        })
+    });
+    row("two, tuple with", || {
         per_access(runtime, async |per_call| {
             let (mut first, mut second) = (Counter::default(), Counter::default());
             let mut last = 0;
@@ -534,8 +544,8 @@ pub fn run(runtime: &Runtime) {
                 .await;
             }
             last
-        }),
-    );
+        })
+    });
     for lock in [LockKind::Fair, LockKind::Unfair, LockKind::Blocking] {
         println!("{}", crate::lock_name(lock));
         with_lock(lock, RunLocked { runtime });

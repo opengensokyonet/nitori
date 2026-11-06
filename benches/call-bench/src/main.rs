@@ -47,7 +47,9 @@
 //!   bytes;
 //! - `holds`: also measure how long each side holds its locks, which adds
 //!   two clock reads to every acquisition;
-//! - `runtimes=A,B`: run only on these runtimes (see [`runtimes`]).
+//! - `runtimes=A,B`: run only on these runtimes (see [`runtimes`]);
+//! - `rows=NAME` (`mechanism`): run only the row named NAME;
+//! - `per_call=N` (`mechanism`): measure only calls of N accesses, 1 or 16.
 #![feature(impl_trait_in_assoc_type)]
 #![allow(clippy::multiple_bound_locations)]
 mod calls;
@@ -338,7 +340,14 @@ fn main() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        return mechanism::run(&runtime);
+        let rows = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("rows="));
+        let per_call = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("per_call="))
+            .map(|count| count.parse().expect("a number"));
+        return mechanism::run(&runtime, rows, per_call);
     }
     if scenario == "driver" {
         return driver::run();
