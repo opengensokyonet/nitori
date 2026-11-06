@@ -1,8 +1,9 @@
 //! `#[call]` for functions whose leading parameters are several accesses.
 use crate::{
     AccessBounds, AccessKind, Module, Options, RewriteYield, access_trait, arguments, camel_case,
-    collect_names, mentions, name_impl_traits, name_lifetimes, reject_hosted_lent, runtime,
-    split_generics, take_access_bounds, take_type_parameter,
+    collect_names, name_impl_traits, name_lifetimes, reject_access_mentions, reject_hosted_lent,
+    reject_undeclared_yield, require_async, runtime, split_generics, take_access_bounds,
+    take_type_parameter,
 };
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
@@ -123,16 +124,7 @@ pub(crate) fn expand(
     let emitter = Ident::new("__emitter", Span::mixed_site());
     match &options.yields {
         Some(_) => RewriteYield { emitter: &emitter }.visit_block_mut(&mut item.block),
-        None => {
-            let mut find = crate::FindYield(None);
-            syn::visit::Visit::visit_block(&mut find, &item.block);
-            if let Some(span) = find.0 {
-                return Err(Error::new(
-                    span,
-                    "declare the item type of `yield` with `#[call(yields = Type)]`",
-                ));
-            }
-        }
+        None => reject_undeclared_yield(&item.block)?,
     }
     if !matches!(options.module, Module::Default | Module::Current) {
         return Err(Error::new(
@@ -141,12 +133,7 @@ pub(crate) fn expand(
         ));
     }
     let signature = item.sig.clone();
-    if signature.asyncness.is_none() {
-        return Err(Error::new(
-            signature.span(),
-            "#[call] applies to async functions",
-        ));
-    }
+    require_async(&signature)?;
 
     let count = taken.len();
     let mut accesses = Vec::new();
@@ -190,20 +177,7 @@ pub(crate) fn expand(
                 replace.visit_where_predicate_mut(predicate);
             }
         }
-        let rest = &generics.where_clause;
-        let item = &yield_type;
-        for (tokens, what) in [
-            (quote!(#output), "the output"),
-            (quote!(#item), "the item type"),
-            (quote!(#rest), "the where clause"),
-        ] {
-            if mentions(tokens, &name.to_string()) {
-                return Err(Error::new(
-                    name.span(),
-                    format!("{what} may mention the access only as `{name}::Family`"),
-                ));
-            }
-        }
+        reject_access_mentions(name, &output, yield_type.as_ref(), &generics.where_clause)?;
     }
     for argument in &arguments {
         let ty = &argument.ty;
@@ -219,10 +193,17 @@ pub(crate) fn expand(
         let names_access_trait = names
             .iter()
             .any(|name| name == "ReceiverAccess" || name == "LentAccess");
-        if mentions_access || names_access_trait {
+        if mentions_access {
             return Err(Error::new(
                 ty.span(),
                 "with several accesses, the other arguments may not depend on them",
+            ));
+        }
+        if names_access_trait {
+            return Err(Error::new(
+                ty.span(),
+                "with several accesses, an access is a leading `&mut` parameter; \
+                 the other arguments may not name an access trait",
             ));
         }
     }

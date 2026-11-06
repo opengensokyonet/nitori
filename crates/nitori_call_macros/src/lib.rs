@@ -11,10 +11,10 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
 use syn::{
-    Error, Expr, FnArg, GenericArgument, GenericParam, Generics, Ident, ItemFn, ItemTrait,
-    Lifetime, LifetimeParam, Pat, Path, PathArguments, Result, ReturnType, Token, TraitItem,
-    TraitItemFn, Type, TypeParam, TypeParamBound, TypeReference, Visibility, WherePredicate,
-    parse_macro_input, parse_quote, parse_quote_spanned,
+    Block, Error, Expr, FnArg, GenericArgument, GenericParam, Generics, Ident, ItemFn, ItemTrait,
+    Lifetime, LifetimeParam, Pat, Path, PathArguments, Result, ReturnType, Signature, Token,
+    TraitItem, TraitItemFn, Type, TypeParam, TypeParamBound, TypeReference, Visibility,
+    WhereClause, WherePredicate, parse_macro_input, parse_quote, parse_quote_spanned,
     punctuated::Punctuated,
     spanned::Spanned,
     visit::{self, Visit},
@@ -884,24 +884,10 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
     let emitter = Ident::new("__emitter", Span::mixed_site());
     match &options.yields {
         Some(_) => RewriteYield { emitter: &emitter }.visit_block_mut(&mut item.block),
-        None => {
-            let mut find = FindYield(None);
-            find.visit_block(&item.block);
-            if let Some(span) = find.0 {
-                return Err(Error::new(
-                    span,
-                    "declare the item type of `yield` with `#[call(yields = Type)]`",
-                ));
-            }
-        }
+        None => reject_undeclared_yield(&item.block)?,
     }
     let signature = &item.sig.clone();
-    if signature.asyncness.is_none() {
-        return Err(Error::new(
-            signature.span(),
-            "#[call] applies to async functions",
-        ));
-    }
+    require_async(signature)?;
     let mut inputs = signature.inputs.iter();
     let Some(FnArg::Typed(access)) = inputs.next() else {
         return Err(Error::new(
@@ -983,30 +969,18 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
         replace.visit_type_mut(&mut output);
         if let Some(item) = &mut yield_type {
             replace.visit_type_mut(item);
-            if mentions(quote!(#item), &access_name.to_string()) {
-                return Err(Error::new(
-                    access_name.span(),
-                    format!("the item type may mention the access only as `{access_name}::Family`"),
-                ));
-            }
         }
         if let Some(clause) = &mut generics.where_clause {
             for predicate in clause.predicates.iter_mut() {
                 replace.visit_where_predicate_mut(predicate);
             }
         }
-        let rest = &generics.where_clause;
-        for (tokens, what) in [
-            (quote!(#output), "the output"),
-            (quote!(#rest), "the where clause"),
-        ] {
-            if mentions(tokens, &access_name.to_string()) {
-                return Err(Error::new(
-                    access_name.span(),
-                    format!("{what} may mention the access only as `{access_name}::Family`"),
-                ));
-            }
-        }
+        reject_access_mentions(
+            access_name,
+            &output,
+            yield_type.as_ref(),
+            &generics.where_clause,
+        )?;
         for argument in &mut arguments {
             replace.visit_type_mut(&mut argument.ty);
             let ty = &argument.ty;
@@ -1272,6 +1246,53 @@ fn collect_names(tokens: Tokens, names: &mut Vec<String>) {
         }
         previous_apostrophe = false;
     }
+}
+
+/// Rejects `yield` in the body of an operation that declares no item type.
+fn reject_undeclared_yield(block: &Block) -> Result<()> {
+    let mut find = FindYield(None);
+    find.visit_block(block);
+    match find.0 {
+        Some(span) => Err(Error::new(
+            span,
+            "declare the item type of `yield` with `#[call(yields = Type)]`",
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Rejects `#[call]` on a function that is not `async`.
+fn require_async(signature: &Signature) -> Result<()> {
+    match signature.asyncness {
+        Some(_) => Ok(()),
+        None => Err(Error::new(
+            signature.span(),
+            "#[call] applies to async functions",
+        )),
+    }
+}
+
+/// Rejects an output, item type or where clause that names `access` other
+/// than as `access::Family`, once that form has been replaced.
+fn reject_access_mentions(
+    access: &Ident,
+    output: &Type,
+    item: Option<&Type>,
+    rest: &Option<WhereClause>,
+) -> Result<()> {
+    for (tokens, what) in [
+        (quote!(#output), "the output"),
+        (quote!(#item), "the item type"),
+        (quote!(#rest), "the where clause"),
+    ] {
+        if mentions(tokens, &access.to_string()) {
+            return Err(Error::new(
+                access.span(),
+                format!("{what} may mention the access only as `{access}::Family`"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn mentions(tokens: Tokens, name: &str) -> bool {

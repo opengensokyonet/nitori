@@ -284,6 +284,21 @@ pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 /// }
 /// ```
 ///
+/// The other arguments neither depend on the accesses nor name an access
+/// trait in another form:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{ReceiverAccess, call};
+/// #[call]
+/// async fn wrapped(
+///     first: &mut impl ReceiverAccess<Family: Sized>,
+///     second: &mut impl ReceiverAccess<Family: Sized>,
+///     third: Option<&mut impl ReceiverAccess<Family: Sized>>,
+/// ) {
+/// }
+/// ```
+///
 /// Accesses come first:
 ///
 /// ```compile_fail
