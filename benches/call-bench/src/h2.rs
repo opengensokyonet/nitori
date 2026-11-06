@@ -238,10 +238,11 @@ async fn feed(
     for segment in input.bytes.chunks(1460) {
         pacer.admit(segment.len()).await;
         client.write_all(segment).await.unwrap();
-        if let Some((ticks, every)) = &control
-            && (written + segment.len()) / every > written / every
-        {
-            ticks.send(()).unwrap();
+        if let Some((ticks, every)) = &control {
+            // One tick for every multiple of `every` the segment crosses.
+            for _ in written / every..(written + segment.len()) / every {
+                ticks.send(()).unwrap();
+            }
         }
         written += segment.len();
         if input.trickle {

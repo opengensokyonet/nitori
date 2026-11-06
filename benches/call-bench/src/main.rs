@@ -45,7 +45,7 @@
 //!   bytes;
 //! - `holds`: also measure how long each side holds its locks, which adds
 //!   two clock reads to every acquisition.
-#![feature(impl_trait_in_assoc_type, yield_expr)]
+#![feature(impl_trait_in_assoc_type)]
 #![allow(clippy::multiple_bound_locations)]
 mod calls;
 mod codec;
@@ -477,10 +477,13 @@ mod tests {
                             variant,
                             lock,
                             input.clone(),
-                            Some(16 * 1024),
+                            // Less than a segment, so some segments cross
+                            // several multiples.
+                            Some(1000),
                             true,
                         );
                         assert!(!sample.waits.is_empty(), "{variant:?}");
+                        assert_eq!(sample.other.acquired, input.bytes.len() / 1000, "{variant:?}");
                         assert_eq!(sample.other.acquired, sample.waits.len(), "{variant:?}");
                         assert!(sample.locks.held.is_some(), "{variant:?}");
                     }
@@ -507,9 +510,10 @@ mod tests {
         );
         for (_, runtime) in &runtimes() {
             for lock in LOCK_KINDS {
-                // Reading releases before processing every frame, so each
-                // frame needs an acquisition of its own; writing
-                // releases before every field section.
+                // Reading releases before decoding every field section and
+                // processing every piece of DATA, so each frame needs an
+                // acquisition of its own; writing releases before every
+                // field section.
                 let read = h3::run_recv(
                     runtime,
                     h3::RecvVariant::CallRelease,

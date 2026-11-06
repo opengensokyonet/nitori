@@ -2,8 +2,8 @@
 //! that acquires a lock on the polls whose operations need the resource.
 //!
 //! The operations mark a release point before each computation that does not
-//! need the resource: processing a frame once its payload has been taken out
-//! of the source, and encoding a field section. Whether the executor releases
+//! need the resource: processing each piece of DATA once it has been taken
+//! out of the source, and decoding or encoding a field section. Whether the executor releases
 //! the view there is its [`Release`] policy.
 use crate::{
     common::{ByteSink, ByteSource, Held, Lock, LockStats, PollLock},
@@ -21,7 +21,7 @@ use std::{
     io,
     marker::PhantomData,
     ops::ControlFlow,
-    pin::{Pin, pin},
+    pin::Pin,
     sync::Arc,
     task::{Context, Poll, ready},
 };
@@ -76,14 +76,12 @@ pub trait Flush: ReceiverFamily {
         Self: 'visit;
 }
 
-/// Read one frame and yield its payload in pieces taken out of the source
-/// without copying; the final value is the frame's kind, or `None` at the end
-/// of the source.
-#[call(yields = BytesMut)]
-async fn read_frame<P: Protocol>(
-    io: &mut impl ReceiverAccess<Family: Consume + Take>,
+/// Read one frame's header, or `None` at the end of the source.
+#[call]
+async fn read_frame_header<P: Protocol>(
+    io: &mut impl ReceiverAccess<Family: Consume>,
     _protocol: P,
-) -> io::Result<Option<Kind>> {
+) -> io::Result<Option<FrameHeader>> {
     let mut header = [0u8; 16];
     let mut filled = 0;
     loop {
@@ -105,22 +103,14 @@ async fn read_frame<P: Protocol>(
         }
         filled += count;
     }
-    let FrameHeader { kind, length } = P::parse_header(&header[..filled]);
-    let mut remaining = length;
-    while remaining > 0 {
-        let piece = io.take(remaining).await?;
-        if piece.is_empty() {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        remaining -= piece.len();
-        yield piece;
-    }
-    Ok(Some(kind))
+    Ok(Some(P::parse_header(&header[..filled])))
 }
 
-/// Read every frame and return the total checksum. The pieces of a frame are
-/// kept until it ends; then, after a release point, a field section is copied
-/// into `block` and decoded into `fields`, and DATA is processed with `work`.
+/// Read every frame and return the total checksum. The payload is taken out
+/// of the source in pieces, as ordinary async takes it: a field section is
+/// copied into `block` piece by piece and, after a release point, decoded
+/// into `fields`; each piece of DATA is processed with `work` after a release
+/// point of its own.
 #[call]
 pub async fn read_all<P: Protocol>(
     io: &mut impl ReceiverAccess<Family: Consume + Take>,
@@ -129,35 +119,32 @@ pub async fn read_all<P: Protocol>(
     fields: &mut Fields,
     work: Work,
 ) -> io::Result<u64> {
-    let (mut total, mut pieces) = (0, Vec::new());
-    loop {
-        // The frame borrows the access until it ends.
-        let kind = {
-            let mut frame = pin!(io.read_frame(protocol));
-            loop {
-                match frame.as_mut().step().await {
-                    ControlFlow::Continue(piece) => pieces.push(piece),
-                    ControlFlow::Break(kind) => break kind?,
+    let mut total = 0;
+    while let Some(FrameHeader { kind, length }) = read_frame_header(io, protocol).await? {
+        let mut remaining = length;
+        block.clear();
+        while remaining > 0 {
+            let piece = io.take(remaining).await?;
+            if piece.is_empty() {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            remaining -= piece.len();
+            match kind {
+                Kind::Headers => block.extend_from_slice(&piece),
+                Kind::Data => {
+                    io.release_view().await;
+                    total += work.read(&piece);
                 }
             }
-        };
-        let Some(kind) = kind else {
-            return Ok(total);
-        };
-        io.release_view().await;
-        total += match kind {
-            Kind::Headers => {
-                block.clear();
-                for piece in pieces.drain(..) {
-                    block.extend_from_slice(&piece);
-                }
-                P::decode_fields(block, fields)
-                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-                fields.checksum()
-            }
-            Kind::Data => pieces.drain(..).map(|piece| work.read(&piece)).sum(),
-        };
+        }
+        if kind == Kind::Headers {
+            io.release_view().await;
+            P::decode_fields(block, fields)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            total += fields.checksum();
+        }
     }
+    Ok(total)
 }
 
 #[call]
