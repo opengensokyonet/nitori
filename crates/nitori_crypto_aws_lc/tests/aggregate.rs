@@ -4,9 +4,10 @@
 //! type implements each capability and never `TlsCrypto` itself.
 
 use nitori_crypto::{
-    BadSignature, Digest, ExpandLength, Hash, HashAlgorithm, Hkdf, Hmac, Issuer, KeyExchange,
-    KeyGenerationFailed, KeyShare, NamedGroup, Random, RandomError, RunningHash, Secret,
-    ServerShareError, SignatureScheme, SignatureVerify, StartedExchange, Supported, TagMismatch,
+    BadSignatureError, Digest, ExpandLength, Hash, HashAlgorithm, Hkdf, Hmac, Issuer, KeyExchange,
+    KeyGenerationFailedError, KeyShare, NamedGroup, Random, RandomError, RunningHash, Secret,
+    ServerShareError, SignatureScheme, SignatureVerify, StartedExchange, Supported,
+    TagMismatchError,
 };
 use nitori_crypto_aws_lc::AwsLcBackend;
 use nitori_crypto_ring::RingBackend;
@@ -79,7 +80,7 @@ impl<P: Hmac, K, V> Hmac for Delegating<P, K, V> {
         key: &[u8],
         message: &[u8],
         tag: &[u8],
-    ) -> Result<(), TagMismatch> {
+    ) -> Result<(), TagMismatchError> {
         Hmac::verify(&self.primitives, self.hash_of(algorithm), key, message, tag)
     }
 }
@@ -146,7 +147,7 @@ impl<P, K: KeyExchange, V> KeyExchange for Delegating<P, K, V> {
     fn start(
         &self,
         group: Supported<Self, NamedGroup>,
-    ) -> Result<Self::Started, KeyGenerationFailed> {
+    ) -> Result<Self::Started, KeyGenerationFailedError> {
         KeyExchange::start(&self.key_exchange, self.group_of(group))
     }
 }
@@ -171,7 +172,7 @@ impl<P, K, V: SignatureVerify> SignatureVerify for Delegating<P, K, V> {
         public_key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<(), BadSignature> {
+    ) -> Result<(), BadSignatureError> {
         // As for `hash_of`.
         let scheme = self
             .verify

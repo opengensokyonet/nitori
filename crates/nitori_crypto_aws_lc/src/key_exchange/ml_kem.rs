@@ -1,6 +1,6 @@
 use aws_lc_rs::kem::{Ciphertext, DecapsulationKey, EncapsulationKey, ML_KEM_768};
 use nitori_crypto::{
-    CompleteError, DecapsulationFailedSnafu, InvalidPeerShareSnafu, KeyGenerationFailed,
+    CompleteError, DecapsulationFailedSnafu, InvalidPeerShareSnafu, KeyGenerationFailedError,
     KeyGenerationFailedSnafu, KeyShare, NamedGroup, Secret, ServerShareError,
 };
 use snafu::{OptionExt, ensure};
@@ -18,7 +18,9 @@ pub(crate) struct MlKem768 {
 impl MlKem768 {
     /// A new decapsulation key and the share that carries its encapsulation
     /// key.
-    pub(super) fn generate(group: NamedGroup) -> Result<(Self, KeyShare), KeyGenerationFailed> {
+    pub(super) fn generate(
+        group: NamedGroup,
+    ) -> Result<(Self, KeyShare), KeyGenerationFailedError> {
         let key = DecapsulationKey::generate(&ML_KEM_768)
             .ok()
             .context(KeyGenerationFailedSnafu { group })?;

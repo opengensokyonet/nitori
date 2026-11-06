@@ -20,11 +20,11 @@ impl ExpandLength {
     /// # Errors
     ///
     /// Fails when `len` is 0 or above 64.
-    pub const fn new(len: u8) -> Result<Self, ExpandLengthOutOfRange> {
+    pub const fn new(len: u8) -> Result<Self, ExpandLengthOutOfRangeError> {
         if len >= Self::MIN.0 && len <= Self::MAX.0 {
             Ok(Self(len))
         } else {
-            Err(ExpandLengthOutOfRange { len })
+            Err(ExpandLengthOutOfRangeError { len })
         }
     }
 
@@ -51,11 +51,11 @@ impl ExpandLength {
     ExpandLength::MIN.get(),
     ExpandLength::MAX.get()
 ))]
-pub struct ExpandLengthOutOfRange {
+pub struct ExpandLengthOutOfRangeError {
     len: u8,
 }
 
-impl ExpandLengthOutOfRange {
+impl ExpandLengthOutOfRangeError {
     /// The length that was given, always 0 or above 64.
     #[must_use]
     pub fn requested_len(&self) -> u8 {

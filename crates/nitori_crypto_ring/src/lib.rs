@@ -12,8 +12,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 pub use hash::RingRunningHash;
 pub use key_exchange::RingStartedExchange;
 pub use signing::{
-    EcdsaKeyRejected, EcdsaSigningError, EcdsaSigningKey, Ed25519KeyRejected, Ed25519SigningKey,
-    RsaKeyRejected, RsaSigningError, RsaSigningKey,
+    EcdsaKeyRejectedError, EcdsaSigningError, EcdsaSigningKey, Ed25519KeyRejectedError,
+    Ed25519SigningKey, RsaKeyRejectedError, RsaSigningError, RsaSigningKey,
 };
 
 /// The capabilities of `nitori_crypto` that ring provides.

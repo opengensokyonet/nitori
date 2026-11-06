@@ -1,7 +1,7 @@
 use aws_lc_rs::agreement::{self, PrivateKey, PublicKey, UnparsedPublicKey};
 use nitori_crypto::{
-    InvalidPeerShare, InvalidPeerShareSnafu, KeyGenerationFailed, KeyGenerationFailedSnafu,
-    NamedGroup, Secret,
+    InvalidPeerShareError, InvalidPeerShareSnafu, KeyGenerationFailedError,
+    KeyGenerationFailedSnafu, NamedGroup, Secret,
 };
 use snafu::OptionExt;
 
@@ -15,7 +15,7 @@ impl Ecdh {
     pub(crate) fn generate(
         group: NamedGroup,
         algorithm: &'static agreement::Algorithm,
-    ) -> Result<(Self, PublicKey), KeyGenerationFailed> {
+    ) -> Result<(Self, PublicKey), KeyGenerationFailedError> {
         let key = PrivateKey::generate(algorithm)
             .ok()
             .context(KeyGenerationFailedSnafu { group })?;
@@ -26,7 +26,7 @@ impl Ecdh {
     pub(crate) fn from_key(
         group: NamedGroup,
         key: PrivateKey,
-    ) -> Result<(Self, PublicKey), KeyGenerationFailed> {
+    ) -> Result<(Self, PublicKey), KeyGenerationFailedError> {
         let public = key
             .compute_public_key()
             .ok()
@@ -43,7 +43,7 @@ impl Ecdh {
         group: NamedGroup,
         peer_share: &[u8],
         prefix: &[u8],
-    ) -> Result<Secret, InvalidPeerShare> {
+    ) -> Result<Secret, InvalidPeerShareError> {
         agreement::agree(
             &self.key,
             UnparsedPublicKey::new(self.key.algorithm(), peer_share),

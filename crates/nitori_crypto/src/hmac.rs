@@ -25,10 +25,15 @@ pub trait Hmac: Hash {
         key: &[u8],
         message: &[u8],
         tag: &[u8],
-    ) -> Result<(), TagMismatch>;
+    ) -> Result<(), TagMismatchError>;
 }
 
 /// A tag is not the HMAC of the message.
+///
+/// This covers a tag with the wrong value and a tag whose length differs from
+/// the hash output length. The cryptography libraries behind the backends
+/// report only one error without details for both cases, so this type does not
+/// tell them apart.
 #[derive(Debug, Snafu)]
 #[snafu(display("hmac tag does not match"))]
-pub struct TagMismatch;
+pub struct TagMismatchError;

@@ -1,7 +1,7 @@
 use aws_lc_rs::{digest, hkdf, hmac};
 use nitori_crypto::{
     Digest, ExpandLength, Hash, HashAlgorithm, Hkdf, Hmac, RunningHash, Secret, Supported,
-    TagMismatch,
+    TagMismatchError,
 };
 
 use crate::{AwsLcBackend, token::Token};
@@ -83,9 +83,9 @@ impl Hmac for AwsLcBackend {
         key: &[u8],
         message: &[u8],
         tag: &[u8],
-    ) -> Result<(), TagMismatch> {
+    ) -> Result<(), TagMismatchError> {
         let key = hmac::Key::new(hmac_algorithm(algorithm.algorithm()), key);
-        hmac::verify(&key, message, tag).map_err(|_| TagMismatch)
+        hmac::verify(&key, message, tag).map_err(|_| TagMismatchError)
     }
 }
 

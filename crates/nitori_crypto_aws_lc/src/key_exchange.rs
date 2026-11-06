@@ -5,7 +5,7 @@ mod ml_kem;
 use core::fmt;
 
 use nitori_crypto::{
-    CompleteError, KeyExchange, KeyGenerationFailed, KeyShare, NamedGroup, Secret,
+    CompleteError, KeyExchange, KeyGenerationFailedError, KeyShare, NamedGroup, Secret,
     ServerShareError, StartedExchange, Supported,
 };
 
@@ -133,7 +133,7 @@ impl KeyExchange for AwsLcBackend {
     fn start(
         &self,
         group: Supported<Self, NamedGroup>,
-    ) -> Result<Self::Started, KeyGenerationFailed> {
+    ) -> Result<Self::Started, KeyGenerationFailedError> {
         let mechanism = supported_mechanism(group);
         let group = group.algorithm();
         let (state, share) = match mechanism {

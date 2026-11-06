@@ -107,13 +107,19 @@ pub trait SignatureVerify: Issuer {
         public_key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<(), BadSignature>;
+    ) -> Result<(), BadSignatureError>;
 }
 
 /// A signature does not verify.
+///
+/// This covers a signature that is wrong for the message and key, one that is
+/// malformed or of a length the scheme does not accept, and a public key that
+/// is malformed or of a size the scheme does not accept. The cryptography
+/// libraries behind the backends report only one error without details for all
+/// of these cases, so this type does not tell them apart.
 #[derive(Debug, Snafu)]
 #[snafu(display("signature does not verify"))]
-pub struct BadSignature;
+pub struct BadSignatureError;
 
 /// The bytes of a signature, in the encoding TLS sends: DER for ECDSA.
 ///
@@ -184,7 +190,7 @@ pub trait SigningKey {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 #[snafu(display("signing key does not sign with {scheme:?}"))]
-pub struct SchemeNotForKey {
+pub struct SchemeNotForKeyError {
     /// The scheme that was asked for.
     pub scheme: SignatureScheme,
 }

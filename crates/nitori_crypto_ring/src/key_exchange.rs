@@ -1,7 +1,7 @@
 use nitori_crypto::{
-    CompleteError, InvalidPeerShare, InvalidPeerShareSnafu, KeyExchange, KeyGenerationFailed,
-    KeyGenerationFailedSnafu, KeyShare, NamedGroup, Secret, ServerShareError, StartedExchange,
-    Supported,
+    CompleteError, InvalidPeerShareError, InvalidPeerShareSnafu, KeyExchange,
+    KeyGenerationFailedError, KeyGenerationFailedSnafu, KeyShare, NamedGroup, Secret,
+    ServerShareError, StartedExchange, Supported,
 };
 use ring::{agreement, rand::SystemRandom};
 use snafu::OptionExt;
@@ -38,7 +38,9 @@ pub struct RingStartedExchange {
 }
 
 impl RingStartedExchange {
-    fn generate(group: Supported<RingBackend, NamedGroup>) -> Result<Self, KeyGenerationFailed> {
+    fn generate(
+        group: Supported<RingBackend, NamedGroup>,
+    ) -> Result<Self, KeyGenerationFailedError> {
         let algorithm = supported_algorithm(group);
         let group = group.algorithm();
         let key = agreement::EphemeralPrivateKey::generate(algorithm, &SystemRandom::new())
@@ -55,7 +57,7 @@ impl RingStartedExchange {
         })
     }
 
-    fn agree(self, peer_share: &[u8]) -> Result<Secret, InvalidPeerShare> {
+    fn agree(self, peer_share: &[u8]) -> Result<Secret, InvalidPeerShareError> {
         let group = self.group;
         let peer = agreement::UnparsedPublicKey::new(self.key.algorithm(), peer_share);
         // ring rejects shares of the wrong length, points off the curve and
@@ -107,7 +109,7 @@ impl KeyExchange for RingBackend {
     fn start(
         &self,
         group: Supported<Self, NamedGroup>,
-    ) -> Result<Self::Started, KeyGenerationFailed> {
+    ) -> Result<Self::Started, KeyGenerationFailedError> {
         RingStartedExchange::generate(group)
     }
 }

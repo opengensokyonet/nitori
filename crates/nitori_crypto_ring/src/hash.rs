@@ -1,6 +1,6 @@
 use nitori_crypto::{
     Digest, ExpandLength, Hash, HashAlgorithm, Hkdf, Hmac, RunningHash, Secret, Supported,
-    TagMismatch,
+    TagMismatchError,
 };
 use ring::{digest, hkdf, hmac};
 
@@ -83,9 +83,9 @@ impl Hmac for RingBackend {
         key: &[u8],
         message: &[u8],
         tag: &[u8],
-    ) -> Result<(), TagMismatch> {
+    ) -> Result<(), TagMismatchError> {
         let key = hmac::Key::new(hmac_algorithm(algorithm.algorithm()), key);
-        hmac::verify(&key, message, tag).map_err(|_| TagMismatch)
+        hmac::verify(&key, message, tag).map_err(|_| TagMismatchError)
     }
 }
 

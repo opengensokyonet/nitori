@@ -25,7 +25,7 @@ impl Secret {
     /// # Errors
     ///
     /// Fails when `bytes` is longer than [`Secret::CAPACITY`].
-    pub fn new(bytes: &[u8]) -> Result<Self, SecretTooLong> {
+    pub fn new(bytes: &[u8]) -> Result<Self, SecretTooLongError> {
         Self::from_parts(&[bytes])
     }
 
@@ -34,7 +34,7 @@ impl Secret {
     /// # Errors
     ///
     /// Fails when the parts together are longer than [`Secret::CAPACITY`].
-    pub fn from_parts(parts: &[&[u8]]) -> Result<Self, SecretTooLong> {
+    pub fn from_parts(parts: &[&[u8]]) -> Result<Self, SecretTooLongError> {
         let len: usize = parts.iter().map(|part| part.len()).sum();
         if len > Self::CAPACITY {
             return SecretTooLongSnafu { len }.fail();
@@ -104,11 +104,11 @@ impl fmt::Debug for Secret {
 /// The bytes given for a [`Secret`] are longer than [`Secret::CAPACITY`].
 #[derive(Debug, Snafu)]
 #[snafu(display("secret of {len} bytes exceeds {} bytes", Secret::CAPACITY))]
-pub struct SecretTooLong {
+pub struct SecretTooLongError {
     len: usize,
 }
 
-impl SecretTooLong {
+impl SecretTooLongError {
     /// The length that was given, always above [`Secret::CAPACITY`].
     #[must_use]
     pub fn requested_len(&self) -> usize {

@@ -48,7 +48,7 @@ impl Digest {
     ///
     /// Fails when the length of `bytes` is not the output length of
     /// `algorithm`.
-    pub fn new(algorithm: HashAlgorithm, bytes: &[u8]) -> Result<Self, DigestLengthMismatch> {
+    pub fn new(algorithm: HashAlgorithm, bytes: &[u8]) -> Result<Self, DigestLengthMismatchError> {
         let expected = algorithm.output_len();
         if bytes.len() != expected {
             return DigestLengthMismatchSnafu {
@@ -96,12 +96,12 @@ impl fmt::Debug for Digest {
     "digest of {len} bytes does not match the {} byte output of {algorithm:?}",
     algorithm.output_len()
 ))]
-pub struct DigestLengthMismatch {
+pub struct DigestLengthMismatchError {
     algorithm: HashAlgorithm,
     len: usize,
 }
 
-impl DigestLengthMismatch {
+impl DigestLengthMismatchError {
     /// The algorithm whose output length was expected.
     #[must_use]
     pub fn algorithm(&self) -> HashAlgorithm {
@@ -109,7 +109,7 @@ impl DigestLengthMismatch {
     }
 
     /// The length that was given, never the output length of
-    /// [`DigestLengthMismatch::algorithm`].
+    /// [`DigestLengthMismatchError::algorithm`].
     #[must_use]
     pub fn requested_len(&self) -> usize {
         self.len

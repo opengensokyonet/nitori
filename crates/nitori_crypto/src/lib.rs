@@ -10,18 +10,18 @@ mod secret;
 mod signature;
 mod supported;
 
-pub use hash::{Digest, DigestLengthMismatch, Hash, HashAlgorithm, RunningHash};
-pub use hkdf::{ExpandLength, ExpandLengthOutOfRange, Hkdf};
-pub use hmac::{Hmac, TagMismatch};
+pub use hash::{Digest, DigestLengthMismatchError, Hash, HashAlgorithm, RunningHash};
+pub use hkdf::{ExpandLength, ExpandLengthOutOfRangeError, Hkdf};
+pub use hmac::{Hmac, TagMismatchError};
 pub use key_exchange::{
-    CompleteError, DecapsulationFailed, DecapsulationFailedSnafu, InvalidPeerShare,
-    InvalidPeerShareSnafu, KeyExchange, KeyGenerationFailed, KeyGenerationFailedSnafu, KeyShare,
-    NamedGroup, ServerShareError, StartedExchange,
+    CompleteError, DecapsulationFailedError, DecapsulationFailedSnafu, InvalidPeerShareError,
+    InvalidPeerShareSnafu, KeyExchange, KeyGenerationFailedError, KeyGenerationFailedSnafu,
+    KeyShare, NamedGroup, ServerShareError, StartedExchange,
 };
 pub use random::{Random, RandomError};
-pub use secret::{Secret, SecretTooLong};
+pub use secret::{Secret, SecretTooLongError};
 pub use signature::{
-    BadSignature, SchemeNotForKey, SchemeNotForKeySnafu, Signature, SignatureScheme,
+    BadSignatureError, SchemeNotForKeyError, SchemeNotForKeySnafu, Signature, SignatureScheme,
     SignatureVerify, SigningKey,
 };
 pub use supported::{Issuer, Supported};

@@ -165,14 +165,14 @@ pub trait KeyExchange: Issuer {
     fn start(
         &self,
         group: Supported<Self, NamedGroup>,
-    ) -> Result<Self::Started, KeyGenerationFailed>;
+    ) -> Result<Self::Started, KeyGenerationFailedError>;
 }
 
 /// A key exchange's private key could not be generated.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 #[snafu(display("key generation for {group:?} failed"))]
-pub struct KeyGenerationFailed {
+pub struct KeyGenerationFailedError {
     /// The group of the key.
     pub group: NamedGroup,
 }
@@ -182,10 +182,14 @@ pub struct KeyGenerationFailed {
 /// This covers a share of the wrong length, a point not on the curve, an
 /// X25519 share whose shared secret is all zeros (RFC 8446 §7.4.2), and an
 /// ML-KEM encapsulation key that fails the check of FIPS 203 §7.2.
+///
+/// The cryptography libraries behind the backends report only one error
+/// without details for all of these cases, so this type does not tell them
+/// apart.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 #[snafu(display("peer share for {group:?} is invalid"))]
-pub struct InvalidPeerShare {
+pub struct InvalidPeerShareError {
     /// The group of the exchange.
     pub group: NamedGroup,
 }
@@ -197,7 +201,7 @@ pub struct InvalidPeerShare {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 #[snafu(display("decapsulation for {group:?} failed"))]
-pub struct DecapsulationFailed {
+pub struct DecapsulationFailedError {
     /// The group of the exchange.
     pub group: NamedGroup,
 }
@@ -209,13 +213,13 @@ pub enum ServerShareError {
     #[snafu(transparent)]
     KeyGeneration {
         /// The failure.
-        source: KeyGenerationFailed,
+        source: KeyGenerationFailedError,
     },
     /// The client's share is invalid.
     #[snafu(transparent)]
     InvalidPeerShare {
         /// The failure.
-        source: InvalidPeerShare,
+        source: InvalidPeerShareError,
     },
 }
 
@@ -226,12 +230,12 @@ pub enum CompleteError {
     #[snafu(transparent)]
     InvalidPeerShare {
         /// The failure.
-        source: InvalidPeerShare,
+        source: InvalidPeerShareError,
     },
     /// Decapsulation failed for a reason other than the share's length.
     #[snafu(transparent)]
     Decapsulation {
         /// The failure.
-        source: DecapsulationFailed,
+        source: DecapsulationFailedError,
     },
 }

@@ -1,4 +1,4 @@
-use nitori_crypto::{BadSignature, SignatureScheme, SignatureVerify, Supported};
+use nitori_crypto::{BadSignatureError, SignatureScheme, SignatureVerify, Supported};
 use ring::signature;
 
 use crate::{RingBackend, token::Token};
@@ -50,13 +50,13 @@ impl SignatureVerify for RingBackend {
         public_key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<(), BadSignature> {
+    ) -> Result<(), BadSignatureError> {
         // `RingBackend` issues `Supported` only for schemes that have an
         // algorithm here.
         let algorithm =
             verification_algorithm(scheme.algorithm()).expect("supported scheme has an algorithm");
         signature::UnparsedPublicKey::new(algorithm, public_key)
             .verify(message, signature)
-            .map_err(|_| BadSignature)
+            .map_err(|_| BadSignatureError)
     }
 }

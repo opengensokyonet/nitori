@@ -7,7 +7,7 @@
 
 use aws_lc_rs::agreement::X25519;
 use nitori_crypto::{
-    CompleteError, InvalidPeerShareSnafu, KeyGenerationFailed, KeyShare, NamedGroup, Secret,
+    CompleteError, InvalidPeerShareSnafu, KeyGenerationFailedError, KeyShare, NamedGroup, Secret,
     ServerShareError,
 };
 use snafu::ensure;
@@ -29,7 +29,9 @@ pub(crate) struct X25519MlKem768 {
 
 impl X25519MlKem768 {
     /// New private keys and the client's share.
-    pub(super) fn generate(group: NamedGroup) -> Result<(Self, KeyShare), KeyGenerationFailed> {
+    pub(super) fn generate(
+        group: NamedGroup,
+    ) -> Result<(Self, KeyShare), KeyGenerationFailedError> {
         let (ml_kem, mut share) = MlKem768::generate(group)?;
         let (x25519, x25519_share) = Ecdh::generate(group, &X25519)?;
         share.extend_from_slice(x25519_share.as_ref());

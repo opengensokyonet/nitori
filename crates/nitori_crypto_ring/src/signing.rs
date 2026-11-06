@@ -1,7 +1,7 @@
 use core::future::{Ready, ready};
 
 use nitori_crypto::{
-    SchemeNotForKey, SchemeNotForKeySnafu, Signature, SignatureScheme, SigningKey,
+    SchemeNotForKeyError, SchemeNotForKeySnafu, Signature, SignatureScheme, SigningKey,
 };
 use ring::{
     rand::SystemRandom,
@@ -12,7 +12,7 @@ use snafu::{OptionExt, ResultExt, Snafu, ensure};
 fn check_scheme(
     schemes: &[SignatureScheme],
     scheme: SignatureScheme,
-) -> Result<(), SchemeNotForKey> {
+) -> Result<(), SchemeNotForKeyError> {
     ensure!(schemes.contains(&scheme), SchemeNotForKeySnafu { scheme });
     Ok(())
 }
@@ -34,7 +34,7 @@ impl EcdsaSigningKey {
     ///
     /// Fails when the document is not an ECDSA private key over either
     /// curve.
-    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, EcdsaKeyRejected> {
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, EcdsaKeyRejectedError> {
         const CURVES: [(&signature::EcdsaSigningAlgorithm, &[SignatureScheme]); 2] = [
             (
                 &signature::ECDSA_P256_SHA256_ASN1_SIGNING,
@@ -66,7 +66,7 @@ impl EcdsaSigningKey {
 /// A PKCS#8 document is not an ECDSA private key over a supported curve.
 #[derive(Debug, Snafu)]
 #[snafu(display("pkcs#8 document is not an ecdsa p-256 or p-384 private key"))]
-pub struct EcdsaKeyRejected;
+pub struct EcdsaKeyRejectedError;
 
 /// A failure to sign with an [`EcdsaSigningKey`].
 #[derive(Debug, Snafu)]
@@ -76,7 +76,7 @@ pub enum EcdsaSigningError {
     #[snafu(transparent)]
     Scheme {
         /// The failure.
-        source: SchemeNotForKey,
+        source: SchemeNotForKeyError,
     },
     /// ring failed to produce the signature, for example because its
     /// random source failed.
@@ -125,7 +125,7 @@ impl Ed25519SigningKey {
     /// # Errors
     ///
     /// Fails when the document is not an Ed25519 private key.
-    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, Ed25519KeyRejected> {
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, Ed25519KeyRejectedError> {
         let key = signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8)
             .context(Ed25519KeyRejectedSnafu)?;
         Ok(Self { key })
@@ -141,13 +141,13 @@ impl Ed25519SigningKey {
 /// A PKCS#8 document is not an Ed25519 private key.
 #[derive(Debug, Snafu)]
 #[snafu(display("pkcs#8 document is not an ed25519 private key"))]
-pub struct Ed25519KeyRejected {
+pub struct Ed25519KeyRejectedError {
     source: ring::error::KeyRejected,
 }
 
 impl SigningKey for Ed25519SigningKey {
-    type Error = SchemeNotForKey;
-    type Signing<'a> = Ready<Result<Signature, SchemeNotForKey>>;
+    type Error = SchemeNotForKeyError;
+    type Signing<'a> = Ready<Result<Signature, SchemeNotForKeyError>>;
 
     fn schemes(&self) -> &[SignatureScheme] {
         ED25519_SCHEMES
@@ -195,7 +195,7 @@ impl RsaSigningKey {
     ///
     /// Fails when the document is not an RSA private key of a supported
     /// size.
-    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, RsaKeyRejected> {
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, RsaKeyRejectedError> {
         let key = signature::RsaKeyPair::from_pkcs8(pkcs8).context(RsaKeyRejectedSnafu)?;
         Ok(Self { key })
     }
@@ -210,7 +210,7 @@ impl RsaSigningKey {
 /// A PKCS#8 document is not an RSA private key of a supported size.
 #[derive(Debug, Snafu)]
 #[snafu(display("pkcs#8 document is not a supported rsa private key"))]
-pub struct RsaKeyRejected {
+pub struct RsaKeyRejectedError {
     source: ring::error::KeyRejected,
 }
 
@@ -222,7 +222,7 @@ pub enum RsaSigningError {
     #[snafu(transparent)]
     Scheme {
         /// The failure.
-        source: SchemeNotForKey,
+        source: SchemeNotForKeyError,
     },
     /// ring failed to produce the signature, for example because its
     /// random source failed.

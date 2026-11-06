@@ -1,6 +1,6 @@
 use aws_lc_rs::agreement::{PrivateKey, X25519};
 use nitori_crypto::{
-    Issuer, KeyExchange, KeyGenerationFailed, KeyGenerationFailedSnafu, KeyShare, NamedGroup,
+    Issuer, KeyExchange, KeyGenerationFailedError, KeyGenerationFailedSnafu, KeyShare, NamedGroup,
     Secret, ServerShareError, Supported,
 };
 use snafu::OptionExt;
@@ -25,7 +25,7 @@ impl FixedX25519 {
         Self { private_key }
     }
 
-    fn ecdh(&self) -> Result<(Ecdh, KeyShare), KeyGenerationFailed> {
+    fn ecdh(&self) -> Result<(Ecdh, KeyShare), KeyGenerationFailedError> {
         let group = NamedGroup::X25519;
         let key = PrivateKey::from_private_key(&X25519, &self.private_key)
             .ok()
@@ -82,7 +82,7 @@ impl KeyExchange for FixedX25519 {
     fn start(
         &self,
         group: Supported<Self, NamedGroup>,
-    ) -> Result<Self::Started, KeyGenerationFailed> {
+    ) -> Result<Self::Started, KeyGenerationFailedError> {
         let (ecdh, share) = self.ecdh()?;
         Ok(AwsLcStartedExchange::ecdh(group.algorithm(), ecdh, share))
     }
