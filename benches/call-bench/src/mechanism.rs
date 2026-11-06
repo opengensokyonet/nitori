@@ -20,9 +20,11 @@ use crate::{
 };
 use nitori_call::{
     BorrowedReceiver, Call, CallPoll, Lend, LentAccess, LentAccesses, LentCall, Receiver,
-    ReceiverAccess, ReceiverFamily, ViewLoan, call, capability, family_receiver,
+    ReceiverAccess, ReceiverFamily, ViewAcquisition, ViewLoan, call, capability, drive,
+    family_receiver,
 };
 use std::{
+    cell::Cell,
     future::poll_fn,
     hint::black_box,
     pin::{Pin, pin},
@@ -100,6 +102,63 @@ impl<L: Lock<Value = Counter>> Step for Locked<L> {
         Self: 'visit,
     {
         host.get_mut().0.step()
+    }
+}
+
+/// A counter stepped through a shared reference, so that the same view can
+/// be handed out on every acquisition.
+#[derive(Default)]
+pub struct CellCounter {
+    value: Cell<u64>,
+}
+impl CellCounter {
+    fn step(&self) -> u64 {
+        self.value.set(self.value.get() + 1);
+        self.value.get()
+    }
+}
+pub struct CellFamily;
+impl ReceiverFamily for CellFamily {
+    type ReceiverView<'visit> = &'visit CellCounter;
+}
+impl Receiver for CellCounter {
+    type Family = CellFamily;
+    fn view<'visit>(self: Pin<&'visit mut Self>) -> &'visit CellCounter
+    where
+        CellFamily: 'visit,
+    {
+        self.into_ref().get_ref()
+    }
+}
+impl Step for CellFamily {
+    fn poll_step<'visit>(host: Pin<&mut &'visit CellCounter>, _: &mut Context<'_>) -> Poll<u64>
+    where
+        Self: 'visit,
+    {
+        Poll::Ready(host.step())
+    }
+    #[inline]
+    fn advance<'visit>(host: Pin<&mut &'visit CellCounter>) -> u64
+    where
+        Self: 'visit,
+    {
+        host.step()
+    }
+}
+
+/// An acquisition that never waits: it hands out the counter at once, fixed
+/// or releasable.
+struct ReadyAcquisition<'p> {
+    counter: &'p CellCounter,
+    releasable: bool,
+}
+impl<'p> ViewAcquisition<'p> for ReadyAcquisition<'p> {
+    type Family = CellFamily;
+    fn poll_acquire(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Lend<&'p CellCounter>> {
+        Poll::Ready(match self.releasable {
+            false => Lend::Fixed(self.counter),
+            true => Lend::Releasable(self.counter),
+        })
     }
 }
 
@@ -282,10 +341,34 @@ impl PerLock<Counter> for RunLocked<'_> {
     }
 }
 
+/// The size of what each way polls for one call of `count` accesses.
+fn sizes() {
+    let (mut counter, cells) = (Counter::default(), CellCounter::default());
+    let lock = tokio::sync::Mutex::new(Counter::default());
+    let stats = LockStats::new(false);
+    let mut shared = Shared {
+        lock: &lock,
+        stats: &stats,
+        release: Release::Never,
+    };
+    let acquisition = ReadyAcquisition {
+        counter: &cells,
+        releasable: false,
+    };
+    let plain = size_of_val(&plain_steps(&mut counter, 1));
+    println!(
+        "sizes of an execution: Plain {plain}, BoundCall {}, Drive (ready) {}, Drive (tokio::sync::Mutex) {} bytes",
+        size_of_val(&Pin::new(&mut &mut counter).steps(1, false)),
+        size_of_val(&drive(acquisition, Steps::new(1, false))),
+        size_of_val(&Pin::new(&mut shared).steps(1, false)),
+    );
+}
+
 pub fn run(runtime: &Runtime) {
     println!(
         "mechanism: {ACCESSES} accesses to a counter, one task on current_thread, median of {REPEATS}; ns per access"
     );
+    sizes();
     println!("  {:<28} {:>11} {:>12}", "", "1 per call", "16 per call");
     println!("exclusive");
     row(
@@ -320,6 +403,41 @@ pub fn run(runtime: &Runtime) {
                 let mut last = 0;
                 for _ in 0..ACCESSES / per_call {
                     last = black_box(&mut counter).steps_unpin(per_call, points).await;
+                }
+                last
+            }),
+        );
+    }
+    println!("exclusive, a counter lent through a shared reference");
+    for (name, points) in [("BoundCall", false), ("BoundCall, release points", true)] {
+        row(
+            name,
+            per_access(runtime, async |per_call| {
+                let mut counter = CellCounter::default();
+                let mut last = 0;
+                for _ in 0..ACCESSES / per_call {
+                    last = black_box(&mut counter).steps_unpin(per_call, points).await;
+                }
+                last
+            }),
+        );
+    }
+    for (name, releasable, points) in [
+        ("Drive, ready", false, false),
+        ("Drive, ready, release points", false, true),
+        ("Drive, ready, released", true, true),
+    ] {
+        row(
+            name,
+            per_access(runtime, async |per_call| {
+                let counter = CellCounter::default();
+                let mut last = 0;
+                for _ in 0..ACCESSES / per_call {
+                    let acquisition = ReadyAcquisition {
+                        counter: black_box(&counter),
+                        releasable,
+                    };
+                    last = drive(acquisition, Steps::new(per_call, points)).await;
                 }
                 last
             }),
