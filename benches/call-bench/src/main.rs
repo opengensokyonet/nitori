@@ -14,7 +14,9 @@
 //!   connection; see [`encoder_stream`];
 //! - `fields`: the cost of encoding and decoding the field sections alone;
 //! - `mechanism`: the fixed cost of an access through each way, with no work
-//!   behind it; see [`mechanism`].
+//!   behind it; see [`mechanism`];
+//! - `driver`: many calls over one state, polled by a driver that lends it;
+//!   see [`driver`].
 //!
 //! Shared resources sit behind a fair async lock (`tokio::sync::Mutex`), an
 //! unfair async lock (`futures_util::lock::Mutex`) or a blocking lock
@@ -51,6 +53,7 @@
 mod calls;
 mod codec;
 mod common;
+mod driver;
 mod encoder_stream;
 mod fields;
 mod h2;
@@ -337,6 +340,9 @@ fn main() {
             .unwrap();
         return mechanism::run(&runtime);
     }
+    if scenario == "driver" {
+        return driver::run();
+    }
     if scenario == "fields" {
         return field_costs(&messages[..messages.len() / passes]);
     }
@@ -444,7 +450,7 @@ fn main() {
                 }
             }
             other => panic!(
-                "unknown scenario {other}; use h2-read, h2-write, h3-recv, h3-send, qpack-encoder-recv, qpack-encoder-send, fields or mechanism"
+                "unknown scenario {other}; use h2-read, h2-write, h3-recv, h3-send, qpack-encoder-recv, qpack-encoder-send, fields, mechanism or driver"
             ),
         }
     }
@@ -498,7 +504,11 @@ mod tests {
                             true,
                         );
                         assert!(!sample.waits.is_empty(), "{variant:?}");
-                        assert_eq!(sample.other.acquired, input.bytes.len() / 1000, "{variant:?}");
+                        assert_eq!(
+                            sample.other.acquired,
+                            input.bytes.len() / 1000,
+                            "{variant:?}"
+                        );
                         assert_eq!(sample.other.acquired, sample.waits.len(), "{variant:?}");
                         assert!(sample.locks.held.is_some(), "{variant:?}");
                     }
