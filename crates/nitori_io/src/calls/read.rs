@@ -1,7 +1,7 @@
 //! Read operations and their operation-specific failures.
 use crate::{
     Read as ReadHost, ReadChunk as ChunkHost, ReadChunkExt as _, ReadExt as _,
-    error::{self, Incomplete, InsufficientCapacity},
+    error::{self, DestinationFullError, IncompleteError, InsufficientCapacityError},
 };
 use bytes::{Buf, BufMut};
 use core::{num::NonZeroUsize, ops::ControlFlow, pin::pin};
@@ -24,12 +24,13 @@ where
         return Err(error::InsufficientCapacitySnafu {
             required: length,
             available,
-            completed: 0usize,
         }
         .build()
         .into());
     }
-    fill(io, destination, length).await?;
+    fill(io, destination, length)
+        .await
+        .map_err(ReadExactError::from_fill)?;
     Ok(())
 }
 
@@ -38,9 +39,9 @@ where
 #[snafu(module(read_exact_error), visibility(pub(crate)))]
 pub enum ReadExactError<E> {
     #[snafu(transparent)]
-    InsufficientCapacity { source: InsufficientCapacity },
+    InsufficientCapacity { source: InsufficientCapacityError },
     #[snafu(transparent)]
-    Incomplete { source: Incomplete },
+    Incomplete { source: IncompleteError },
     #[snafu(display("read failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -49,8 +50,9 @@ impl<E> ReadExactError<E> {
     /// Bytes completed by this operation before failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::InsufficientCapacity { source } => source.completed,
-            Self::Incomplete { source } => source.completed,
+            // The capacity check happens before any IO.
+            Self::InsufficientCapacity { .. } => 0,
+            Self::Incomplete { source } => source.completed(),
             Self::Receiver { completed, .. } => *completed,
         }
     }
@@ -64,8 +66,9 @@ impl<E> ReadExactError<E> {
     }
 }
 
-impl<E> From<ReadArrayError<E>> for ReadExactError<E> {
-    fn from(error: ReadArrayError<E>) -> Self {
+impl<E> ReadExactError<E> {
+    /// Convert a failure of the shared fill step.
+    fn from_fill(error: ReadArrayError<E>) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => source.into(),
             ReadArrayError::Receiver { source, completed } => {
@@ -122,13 +125,7 @@ where
     let mut completed = 0usize;
     loop {
         if destination.remaining_mut() == 0 {
-            return Err(error::InsufficientCapacitySnafu {
-                required: 1usize,
-                available: 0usize,
-                completed,
-            }
-            .build()
-            .into());
+            return Err(error::DestinationFullSnafu { completed }.build().into());
         }
         match io.read(&mut *destination).await {
             Ok(0) => return Ok(completed),
@@ -149,7 +146,7 @@ where
 #[snafu(module(read_to_end_error), visibility(pub(crate)))]
 pub enum ReadToEndError<E> {
     #[snafu(transparent)]
-    InsufficientCapacity { source: InsufficientCapacity },
+    DestinationFull { source: DestinationFullError },
     #[snafu(display("read failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -158,7 +155,7 @@ impl<E> ReadToEndError<E> {
     /// Bytes completed by this operation before failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::InsufficientCapacity { source } => source.completed,
+            Self::DestinationFull { source } => source.completed,
             Self::Receiver { completed, .. } => *completed,
         }
     }
@@ -167,7 +164,7 @@ impl<E> ReadToEndError<E> {
     pub fn host_error(&self) -> Option<&E> {
         match self {
             Self::Receiver { source, .. } => Some(source),
-            Self::InsufficientCapacity { .. } => None,
+            Self::DestinationFull { .. } => None,
         }
     }
 }
@@ -257,7 +254,7 @@ where
 #[snafu(module(read_chunks_exact_error), visibility(pub(crate)))]
 pub enum ReadChunksExactError<E> {
     #[snafu(transparent)]
-    Incomplete { source: Incomplete },
+    Incomplete { source: IncompleteError },
     #[snafu(display("read failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -266,7 +263,7 @@ impl<E> ReadChunksExactError<E> {
     /// Bytes completed by this operation before failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::Incomplete { source } => source.completed,
+            Self::Incomplete { source } => source.completed(),
             Self::Receiver { completed, .. } => *completed,
         }
     }
@@ -298,7 +295,7 @@ where
 #[snafu(module(read_array_error), visibility(pub(crate)))]
 pub enum ReadArrayError<E> {
     #[snafu(transparent)]
-    Incomplete { source: Incomplete },
+    Incomplete { source: IncompleteError },
     #[snafu(display("read failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -307,7 +304,7 @@ impl<E> ReadArrayError<E> {
     /// Bytes completed by this operation before failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::Incomplete { source } => source.completed,
+            Self::Incomplete { source } => source.completed(),
             Self::Receiver { completed, .. } => *completed,
         }
     }
@@ -331,7 +328,9 @@ where
 {
     let mut bytes = T::Bytes::default();
     let length = bytes.as_mut().len();
-    fill(io, &mut bytes.as_mut(), length).await?;
+    fill(io, &mut bytes.as_mut(), length)
+        .await
+        .map_err(ReadLeError::from_fill)?;
     Ok(T::from_le(bytes))
 }
 
@@ -340,7 +339,7 @@ where
 #[snafu(module(read_le_error), visibility(pub(crate)))]
 pub enum ReadLeError<E> {
     #[snafu(transparent)]
-    Incomplete { source: Incomplete },
+    Incomplete { source: IncompleteError },
     #[snafu(display("read failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -349,7 +348,7 @@ impl<E> ReadLeError<E> {
     /// Bytes completed by this operation before failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::Incomplete { source } => source.completed,
+            Self::Incomplete { source } => source.completed(),
             Self::Receiver { completed, .. } => *completed,
         }
     }
@@ -363,8 +362,9 @@ impl<E> ReadLeError<E> {
     }
 }
 
-impl<E> From<ReadArrayError<E>> for ReadLeError<E> {
-    fn from(error: ReadArrayError<E>) -> Self {
+impl<E> ReadLeError<E> {
+    /// Convert a failure of the shared fill step.
+    fn from_fill(error: ReadArrayError<E>) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => source.into(),
             ReadArrayError::Receiver { source, completed } => {
@@ -384,7 +384,9 @@ where
 {
     let mut bytes = T::Bytes::default();
     let length = bytes.as_mut().len();
-    fill(io, &mut bytes.as_mut(), length).await?;
+    fill(io, &mut bytes.as_mut(), length)
+        .await
+        .map_err(ReadBeError::from_fill)?;
     Ok(T::from_be(bytes))
 }
 
@@ -393,7 +395,7 @@ where
 #[snafu(module(read_be_error), visibility(pub(crate)))]
 pub enum ReadBeError<E> {
     #[snafu(transparent)]
-    Incomplete { source: Incomplete },
+    Incomplete { source: IncompleteError },
     #[snafu(display("read failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -402,7 +404,7 @@ impl<E> ReadBeError<E> {
     /// Bytes completed by this operation before failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::Incomplete { source } => source.completed,
+            Self::Incomplete { source } => source.completed(),
             Self::Receiver { completed, .. } => *completed,
         }
     }
@@ -416,8 +418,9 @@ impl<E> ReadBeError<E> {
     }
 }
 
-impl<E> From<ReadArrayError<E>> for ReadBeError<E> {
-    fn from(error: ReadArrayError<E>) -> Self {
+impl<E> ReadBeError<E> {
+    /// Convert a failure of the shared fill step.
+    fn from_fill(error: ReadArrayError<E>) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => source.into(),
             ReadArrayError::Receiver { source, completed } => {

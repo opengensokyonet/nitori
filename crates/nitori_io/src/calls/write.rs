@@ -2,7 +2,7 @@
 use crate::{
     Write as WriteHost, WriteExt as _,
     calls::EndianValue,
-    error::{self, WriteZero},
+    error::{self, WriteZeroError},
 };
 use bytes::Buf;
 use nitori_call::{ReceiverAccess, call};
@@ -46,7 +46,7 @@ where
 #[snafu(module(write_all_error), visibility(pub(crate)))]
 pub enum WriteAllError<E> {
     #[snafu(transparent)]
-    WriteZero { source: WriteZero },
+    WriteZero { source: WriteZeroError },
     #[snafu(display("write failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -78,7 +78,9 @@ pub async fn write_array<const LENGTH: usize, F>(
 where
     F: WriteHost,
 {
-    write_all(io, bytes.as_ref()).await?;
+    write_all(io, bytes.as_ref())
+        .await
+        .map_err(WriteArrayError::from_write_all)?;
     Ok(())
 }
 
@@ -87,7 +89,7 @@ where
 #[snafu(module(write_array_error), visibility(pub(crate)))]
 pub enum WriteArrayError<E> {
     #[snafu(transparent)]
-    WriteZero { source: WriteZero },
+    WriteZero { source: WriteZeroError },
     #[snafu(display("write failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -110,8 +112,9 @@ impl<E> WriteArrayError<E> {
     }
 }
 
-impl<E> From<WriteAllError<E>> for WriteArrayError<E> {
-    fn from(error: WriteAllError<E>) -> Self {
+impl<E> WriteArrayError<E> {
+    /// Convert a failure of the underlying `write_all`.
+    fn from_write_all(error: WriteAllError<E>) -> Self {
         match error {
             WriteAllError::WriteZero { source } => source.into(),
             WriteAllError::Receiver { source, completed } => {
@@ -131,7 +134,9 @@ where
     F: WriteHost,
 {
     let bytes = value.to_le();
-    write_all(io, bytes.as_ref()).await?;
+    write_all(io, bytes.as_ref())
+        .await
+        .map_err(WriteLeError::from_write_all)?;
     Ok(())
 }
 
@@ -140,7 +145,7 @@ where
 #[snafu(module(write_le_error), visibility(pub(crate)))]
 pub enum WriteLeError<E> {
     #[snafu(transparent)]
-    WriteZero { source: WriteZero },
+    WriteZero { source: WriteZeroError },
     #[snafu(display("write failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -163,8 +168,9 @@ impl<E> WriteLeError<E> {
     }
 }
 
-impl<E> From<WriteAllError<E>> for WriteLeError<E> {
-    fn from(error: WriteAllError<E>) -> Self {
+impl<E> WriteLeError<E> {
+    /// Convert a failure of the underlying `write_all`.
+    fn from_write_all(error: WriteAllError<E>) -> Self {
         match error {
             WriteAllError::WriteZero { source } => source.into(),
             WriteAllError::Receiver { source, completed } => {
@@ -184,7 +190,9 @@ where
     F: WriteHost,
 {
     let bytes = value.to_be();
-    write_all(io, bytes.as_ref()).await?;
+    write_all(io, bytes.as_ref())
+        .await
+        .map_err(WriteBeError::from_write_all)?;
     Ok(())
 }
 
@@ -193,7 +201,7 @@ where
 #[snafu(module(write_be_error), visibility(pub(crate)))]
 pub enum WriteBeError<E> {
     #[snafu(transparent)]
-    WriteZero { source: WriteZero },
+    WriteZero { source: WriteZeroError },
     #[snafu(display("write failed after {completed} bytes"))]
     Receiver { source: E, completed: usize },
 }
@@ -216,8 +224,9 @@ impl<E> WriteBeError<E> {
     }
 }
 
-impl<E> From<WriteAllError<E>> for WriteBeError<E> {
-    fn from(error: WriteAllError<E>) -> Self {
+impl<E> WriteBeError<E> {
+    /// Convert a failure of the underlying `write_all`.
+    fn from_write_all(error: WriteAllError<E>) -> Self {
         match error {
             WriteAllError::WriteZero { source } => source.into(),
             WriteAllError::Receiver { source, completed } => {

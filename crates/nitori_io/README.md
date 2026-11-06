@@ -26,16 +26,28 @@ capabilities.
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::ReadExactError, prelude::*};
+use nitori_io::{
+    calls::{ReadArrayError, ReadExactError},
+    prelude::*,
+};
+use snafu::{ResultExt, Snafu};
+
+#[derive(Debug, Snafu)]
+enum HeaderError<E> {
+    Tag { source: ReadArrayError<E> },
+    Body { source: ReadExactError<E> },
+}
 
 #[call(sync)]
 async fn header<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<[u8; 3], ReadExactError<F::Error>> {
-    let [tag] = io.read_array::<1>().await?;
+) -> Result<[u8; 3], HeaderError<F::Error>> {
+    let [tag] = io.read_array::<1>().await.context(TagSnafu)?;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
-    io.read_exact(&mut destination, 2).await?;
+    io.read_exact(&mut destination, 2)
+        .await
+        .context(BodySnafu)?;
     Ok([tag, bytes[0], bytes[1]])
 }
 
@@ -220,13 +232,16 @@ Resource registration and its cleanup remain the host's responsibility.
 `ReadExact` checks full destination capacity on its first poll, before touching
 the source, and limits subsequent reads to the remaining length. `ReadToEnd`
 reports only newly appended bytes. If its destination fills before EOF is
-confirmed, it reports capacity failure, even for an exactly fitting source; it
+confirmed, it reports a `DestinationFullError`, even for an exactly fitting source; it
 does not consume a probe byte.
 
 Each derived operation has its own error type in `calls`, defined alongside
 the operation and containing only failures that operation can produce.
-`Incomplete`, `InsufficientCapacity`, and `WriteZero` are reusable error primitives
-in `error`. Match operation error variants directly to recover their structured
+`IncompleteError`, `InsufficientCapacityError`, `DestinationFullError`, and
+`WriteZeroError` are reusable error primitives in `error`. `IncompleteError` and
+`InsufficientCapacityError` keep their fields private so that the completed count
+is always below the expected one and the available room below the required one;
+`IncompleteError::new` checks the former. Match operation error variants directly to recover their structured
 fields; `completed()` reports prior progress and
 `host_error()` borrows the original host failure. `ReadChunksError` always
 contains a host error, so its accessor returns `&E`; enum accessors return
@@ -243,7 +258,7 @@ Array/numeric failures report progress but do not return the partial array.
 `WriteAll` takes any `Buf` by value; pass `&mut buffer` to keep the cursor,
 which after a failure or cancellation holds the unaccepted tail. Its errors
 report the total accepted bytes. A nonempty successful zero write is a
-`WriteZero` failure. Accepted bytes do not imply flushing or remote delivery.
+`WriteZeroError` failure. Accepted bytes do not imply flushing or remote delivery.
 
 Derived operations retain progress across Pending. Dropping a call does not
 roll back earlier successful reads or writes. External borrowed cursors retain

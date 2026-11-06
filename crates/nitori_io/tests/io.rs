@@ -6,10 +6,11 @@ use nitori_io::PollReadExt as _;
 use nitori_io::{
     Read as ReadHost, ReadChunk as ChunkHost, Write as WriteHost,
     calls::*,
-    error::{Incomplete, InsufficientCapacity, WriteZero},
+    error::{DestinationFullError, IncompleteError, WriteZeroError},
     helpers::*,
     read, read_chunk, write,
 };
+use snafu::{ResultExt, Snafu};
 use std::{
     cell::Cell,
     future::Future,
@@ -210,16 +211,11 @@ fn exact_prechecks_capacity_and_limits_source() {
         ReadExact::new(&mut small.as_mut_slice(), 3),
     ))
     .unwrap_err();
-    assert!(matches!(
-        error,
-        ReadExactError::InsufficientCapacity {
-            source: InsufficientCapacity {
-                required: 3,
-                available: 2,
-                completed: 0
-            }
-        }
-    ));
+    assert_eq!(error.completed(), 0);
+    let ReadExactError::InsufficientCapacity { source: capacity } = error else {
+        panic!("expected insufficient capacity");
+    };
+    assert_eq!((capacity.required(), capacity.available()), (3, 2));
     assert_eq!(source.polls.get(), 0);
     let mut large = [0; 8];
     let mut out = large.as_mut_slice();
@@ -242,15 +238,10 @@ fn exact_errors_preserve_prefix_and_source_chain() {
         ReadExact::new(&mut out, 4),
     ))
     .unwrap_err();
-    assert!(matches!(
-        error,
-        ReadExactError::Incomplete {
-            source: Incomplete {
-                expected: 4,
-                completed: 2
-            }
-        }
-    ));
+    let ReadExactError::Incomplete { source: incomplete } = error else {
+        panic!("expected incomplete read");
+    };
+    assert_eq!((incomplete.expected(), incomplete.completed()), (4, 2));
     assert_eq!(out, b"ab");
     source = Source::new(b"abcdef");
     source.fail_at = Some(2);
@@ -289,10 +280,11 @@ fn read_to_end_appends_and_requires_confirmed_eof() {
     .unwrap_err();
     assert!(matches!(
         error,
-        ReadToEndError::InsufficientCapacity {
-            source: InsufficientCapacity { completed: 4, .. }
+        ReadToEndError::DestinationFull {
+            source: DestinationFullError { completed: 4 }
         }
     ));
+    assert_eq!(error.completed(), 4);
     assert_eq!(source.consumed, 4);
     assert_eq!(source.polls.get(), 4); // no EOF probe after filling the target
 }
@@ -384,7 +376,7 @@ fn write_ownership_borrowing_and_partial_errors() {
     assert!(matches!(
         result.unwrap_err(),
         WriteAllError::WriteZero {
-            source: WriteZero { completed: 0 }
+            source: WriteZeroError { completed: 0 }
         }
     ));
     assert_eq!(input, b"x"[..]);
@@ -453,12 +445,28 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
 #[call]
 async fn local_codec<A: ReceiverAccess<Family: ReadHost>>(
     io: &mut A,
-) -> Result<[u8; 3], nitori_io::calls::ReadExactError<<A::Family as ReadHost>::Error>> {
-    let [first] = io.read_array::<1>().await?;
+) -> Result<[u8; 3], LocalCodecError<<A::Family as ReadHost>::Error>> {
+    let [first] = io
+        .read_array::<1>()
+        .await
+        .context(local_codec_error::FirstSnafu)?;
     let mut rest = [0; 2];
     let mut destination = rest.as_mut_slice();
-    io.read_exact(&mut destination, 2).await?;
+    io.read_exact(&mut destination, 2)
+        .await
+        .context(local_codec_error::RestSnafu)?;
     Ok([first, rest[0], rest[1]])
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(module)]
+enum LocalCodecError<E> {
+    First {
+        source: nitori_io::calls::ReadArrayError<E>,
+    },
+    Rest {
+        source: nitori_io::calls::ReadExactError<E>,
+    },
 }
 #[call]
 async fn number_codec<A: ReceiverAccess<Family: ReadHost>>(
@@ -908,16 +916,10 @@ fn primitive_failures_do_not_require_host_diagnostics() {
                 .unwrap();
             assert_eq!(error.to_string(), "read incomplete after 0 of 2 bytes");
             match error {
-                $error::Incomplete {
-                    source:
-                        Incomplete {
-                            expected: 2,
-                            completed: 0,
-                        },
-                } => {}
-                $error::Incomplete { .. } | $error::Receiver { .. } => {
-                    panic!("expected incomplete read")
+                $error::Incomplete { source } => {
+                    assert_eq!((source.expected(), source.completed()), (2, 0));
                 }
+                $error::Receiver { .. } => panic!("expected incomplete read"),
             }
         };
     }
@@ -941,7 +943,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
     assert!(matches!(
         error,
         WriteAllError::WriteZero {
-            source: WriteZero { completed: 0 }
+            source: WriteZeroError { completed: 0 }
         }
     ));
     assert_eq!(error.to_string(), "write made no progress after 0 bytes");
@@ -1007,4 +1009,18 @@ fn local_validation_and_zero_length_composites_do_not_request_a_view() {
         empty.poll_return_with(None, &mut cx),
         CallPoll::Ready(Ok(()))
     ));
+}
+
+#[test]
+fn incomplete_error_requires_completed_below_expected() {
+    let incomplete = IncompleteError::new(4, 3).unwrap();
+    assert_eq!((incomplete.expected(), incomplete.completed()), (4, 3));
+    for completed in [4, 5] {
+        let rejected = IncompleteError::new(4, completed).unwrap_err();
+        assert_eq!((rejected.expected(), rejected.completed()), (4, completed));
+        assert_eq!(
+            rejected.to_string(),
+            format!("{completed} completed bytes are not below 4 expected bytes")
+        );
+    }
 }
