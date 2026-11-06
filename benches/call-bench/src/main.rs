@@ -44,7 +44,8 @@
 //!   reading it or before writing it, default 1; with 0 it only counts the
 //!   bytes;
 //! - `holds`: also measure how long each side holds its locks, which adds
-//!   two clock reads to every acquisition.
+//!   two clock reads to every acquisition;
+//! - `runtimes=A,B`: run only on these runtimes (see [`runtimes`]).
 #![feature(impl_trait_in_assoc_type)]
 #![allow(clippy::multiple_bound_locations)]
 mod calls;
@@ -63,24 +64,35 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use workload::Work;
 
-fn runtimes() -> [(&'static str, Runtime); 2] {
-    [
-        (
-            "current_thread",
-            tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .unwrap(),
-        ),
-        (
-            "multi_thread(2)",
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_time()
-                .build()
-                .unwrap(),
-        ),
-    ]
+/// The runtimes the scenarios run on, all of them or those `runtimes=`
+/// names: `current`, `multi2`, `multi4` and, built with `--cfg
+/// tokio_unstable`, `multi2-nolifo`. Without tokio's LIFO slot a task woken
+/// by another goes to the local queue, where other workers can steal it.
+fn runtimes(only: Option<&str>) -> Vec<(&'static str, Runtime)> {
+    let multi = |workers| {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(workers).enable_time();
+        builder
+    };
+    let mut current = tokio::runtime::Builder::new_current_thread();
+    current.enable_time();
+    #[allow(unused_mut)]
+    let mut all = vec![
+        ("current", "current_thread", current),
+        ("multi2", "multi_thread(2)", multi(2)),
+        ("multi4", "multi_thread(4)", multi(4)),
+    ];
+    #[cfg(tokio_unstable)]
+    all.push(("multi2-nolifo", "multi_thread(2), no LIFO slot", {
+        let mut builder = multi(2);
+        builder.disable_lifo_slot();
+        builder
+    }));
+    let chosen: Option<Vec<&str>> = only.map(|keys| keys.split(',').collect());
+    all.into_iter()
+        .filter(|(key, ..)| chosen.as_ref().is_none_or(|keys| keys.contains(key)))
+        .map(|(_, name, mut builder)| (name, builder.build().unwrap()))
+        .collect()
 }
 
 fn lock_name(kind: LockKind) -> &'static str {
@@ -235,7 +247,7 @@ fn field_costs(messages: &[workload::Message]) {
 }
 
 /// Receive or send the QPACK encoder stream of each connection.
-fn qpack_encoder(send: bool, input: encoder_stream::Input, holds: bool) {
+fn qpack_encoder(send: bool, input: encoder_stream::Input, holds: bool, only: Option<&str>) {
     let mut options = String::new();
     if let Pace::Rate(rate) = input.pace {
         options += &format!(", {} MB/s", rate / 1_000_000);
@@ -271,7 +283,7 @@ fn qpack_encoder(send: bool, input: encoder_stream::Input, holds: bool) {
             best.as_nanos() as f64 / input.instructions as f64,
         );
     }
-    for (name, runtime) in &runtimes() {
+    for (name, runtime) in &runtimes(only) {
         println!("\n== {name}");
         for lock in LOCK_KINDS {
             println!("{}", lock_name(lock));
@@ -301,6 +313,9 @@ fn main() {
     let scenario = arguments.first().map(String::as_str).unwrap_or("h3-recv");
     let trickle = has("trickle");
     let holds = has("holds");
+    let only = arguments
+        .iter()
+        .find_map(|argument| argument.strip_prefix("runtimes="));
     let streams = value("streams", 8);
     let chunk = value("chunk", 16 * 1024);
     let passes = value("passes", if trickle { 2 } else { 8 });
@@ -332,7 +347,7 @@ fn main() {
             other => panic!("unknown side {other}; use qpack-encoder-recv or qpack-encoder-send"),
         };
         let input = encoder_stream::Input::new(messages, streams, pace, trickle, update, capacity);
-        return qpack_encoder(send, input, holds);
+        return qpack_encoder(send, input, holds, only);
     }
     let frames: usize = messages
         .iter()
@@ -359,7 +374,7 @@ fn main() {
         "{scenario}: {} responses, {frames} frames, {bytes} body bytes, {streams} streams, chunk {chunk}{options}, {REPEATS} runs each, median (min–max)",
         messages.len(),
     );
-    for (name, runtime) in &runtimes() {
+    for (name, runtime) in &runtimes(only) {
         println!("\n== {name}");
         match scenario {
             "h2-read" => {
@@ -463,7 +478,7 @@ mod tests {
         let messages = workload::messages(1);
         for (streams, chunk, pace, trickle, _, work) in inputs() {
             let input = h2::Input::new(messages.clone(), streams, chunk, pace, trickle, work);
-            for (_, runtime) in &runtimes() {
+            for (_, runtime) in &runtimes(None) {
                 for variant in h2::READS {
                     h2::run_read(runtime, variant, input.clone());
                 }
@@ -508,7 +523,7 @@ mod tests {
             32 * 1024,
             Work::CHECK,
         );
-        for (_, runtime) in &runtimes() {
+        for (_, runtime) in &runtimes(None) {
             for lock in LOCK_KINDS {
                 // Reading releases before decoding every field section and
                 // processing every piece of DATA, so each frame needs an
@@ -547,7 +562,7 @@ mod tests {
                     update,
                     capacity,
                 );
-                for (_, runtime) in &runtimes() {
+                for (_, runtime) in &runtimes(None) {
                     for lock in LOCK_KINDS {
                         for variant in encoder_stream::RECVS {
                             encoder_stream::run_recv(runtime, variant, lock, input.clone(), false);
@@ -574,7 +589,7 @@ mod tests {
                 update,
                 work,
             );
-            for (_, runtime) in &runtimes() {
+            for (_, runtime) in &runtimes(None) {
                 for lock in LOCK_KINDS {
                     for variant in h3::RECVS {
                         h3::run_recv(runtime, variant, lock, input.clone(), false);
