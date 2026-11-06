@@ -7,6 +7,14 @@ It is experimental and requires the repository's pinned Rust nightly.
 
 ## Why calls?
 
+A poll hands a future only a context with a waker, so a future holds what it
+works on, or its way to reach it, from the moment it is constructed. A call
+stores the operation but not what the operation works on: the code that polls
+the call lends it a view, a borrow of the resource valid for that poll. This
+addresses two problems.
+
+### Who holds a resource in one operation
+
 Consider a buffer shared with the task that delivers bytes into it, such as the
 receive buffer of a QUIC stream implemented in user space, and a reader of
 frames made of a one-byte type, a one-byte length and the payload. An ordinary
@@ -71,6 +79,109 @@ at the first read of a poll, and the reads of every frame ready in that poll
 share the guard. When the bytes have not arrived, the poll ends and the lock is
 released, so the delivering task can append them. Ordinary async remains
 simpler when the operation owns its resource for its whole duration.
+
+### Many operations borrowing one state
+
+Consider a QUIC connection implemented in user space. Sending on each path,
+receiving, and each timer run as loops of their own, each waiting for its own
+events, and each of them reads or updates the connection's state. Futures that
+each hold a mutable borrow of that state from construction cannot coexist. The
+alternatives are to share the state with run-time borrow checks, as with
+`RefCell`, or to take the waits out of the loops and write a state machine, or
+one loop that selects over every event.
+
+Since a call does not store what it works on, the state can stay with one
+owner, which this README calls a driver. The driver keeps the calls next to
+the state and lends each call it polls a view of the state. It polls one call
+at a time, so each loan is exclusive and needs no run-time check. Operations
+that take a `LentAccess` run in a `LentCall`, which is lent every view on every
+poll (see [Synchronous access](#synchronous-access)), so their `.await`s wait
+only for events and the code between two of them runs with no other call in
+between. Here two calls of one operation stand in for the different loops:
+each waits on an inbox of its own and adds to one total.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{
+    Direct, DirectView, LentAccess, LentCall, Receiver, ReceiverFamily, call, capability,
+};
+use std::{
+    collections::VecDeque,
+    pin::{Pin, pin},
+    task::{Context, Poll, Waker},
+};
+
+#[capability]
+pub trait Inbox: ReceiverFamily {
+    fn poll_take<'v>(view: Pin<&mut Self::ReceiverView<'v>>, cx: &mut Context<'_>) -> Poll<u32>
+    where
+        Self: 'v;
+}
+#[capability]
+pub trait Tally: ReceiverFamily {
+    fn add<'v>(view: Pin<&mut Self::ReceiverView<'v>>, by: u32)
+    where
+        Self: 'v;
+}
+
+/// Adds each value that arrives in `inbox`, times `weight`, to `tally`.
+#[call]
+async fn accumulate<I: Inbox, T: Tally>(
+    inbox: &mut impl LentAccess<Family = I>,
+    tally: &mut impl LentAccess<Family = T>,
+    weight: u32,
+) {
+    loop {
+        let value = inbox.take().await; // Waits for this inbox only.
+        tally.add(value * weight);
+    }
+}
+
+// `Direct<T>` is the family whose view borrows a `T`. These inboxes are kept
+// short: they register no waker.
+impl Inbox for Direct<VecDeque<u32>> {
+    fn poll_take<'v>(view: Pin<&mut DirectView<'v, VecDeque<u32>>>, _: &mut Context<'_>) -> Poll<u32>
+    where
+        Self: 'v,
+    {
+        let inbox = view.get_pin_mut().get_mut();
+        inbox.pop_front().map_or(Poll::Pending, Poll::Ready)
+    }
+}
+impl Tally for Direct<u32> {
+    fn add<'v>(view: Pin<&mut DirectView<'v, u32>>, by: u32)
+    where
+        Self: 'v,
+    {
+        *view.get_pin_mut().get_mut() += by;
+    }
+}
+
+type Accumulating = LentCall<(Direct<VecDeque<u32>>, Direct<u32>), Accumulate>;
+
+fn main() {
+    // The state, owned by the driver, and the calls next to it.
+    let mut inboxes = [VecDeque::from([2]), VecDeque::from([3])];
+    let mut total = 0_u32;
+    let mut calls = [
+        pin!(Accumulating::new(Accumulate::new(1))),
+        pin!(Accumulating::new(Accumulate::new(10))),
+    ];
+    // One pass of the driver lends the total to each call in turn.
+    let mut cx = Context::from_waker(Waker::noop());
+    for (call, queue) in calls.iter_mut().zip(&mut inboxes) {
+        let mut inbox = pin!(Pin::new(queue).view());
+        let mut tally = pin!(Pin::new(&mut total).view());
+        let poll = call.as_mut().poll_with_views((inbox.as_mut(), tally.as_mut()), &mut cx);
+        assert!(poll.is_pending()); // Both wait for their inboxes again.
+    }
+    assert_eq!(total, 32); // 2 × 1 + 3 × 10
+}
+```
+
+A `LentCall` never waits for a view, so its operation sees the waker the call
+is polled with. A driver can therefore give each call a waker of its own and
+poll only the calls whose events woke them.
 
 ## Read a length-prefixed record
 
