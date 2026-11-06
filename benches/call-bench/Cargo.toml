@@ -10,7 +10,7 @@ bytes.workspace = true
 futures-core.workspace = true
 futures-sink.workspace = true
 futures-util = { workspace = true, features = ["std"] }
-nitori_call.workspace = true
+nitori_call = { workspace = true, features = ["futures-lock", "tokio-sync"] }
 tokio = { workspace = true, features = ["io-util", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 

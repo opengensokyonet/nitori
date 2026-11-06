@@ -505,6 +505,28 @@ pub fn with_lock<T: Progress + Send + 'static, P: PerLock<T>>(
     }
 }
 
+/// Evaluate `$body` with `$executor` bound to `$lock`, a `&L` for one of the
+/// lock types of [`with_lock`], at its concrete type, so that `$body` can use
+/// nitori_call's own executor for that lock type, `&Mutex<T>`. That executor
+/// is implemented for each lock type separately, so code generic over the
+/// lock type cannot name it.
+macro_rules! on_concrete_lock {
+    ($lock:expr, $value:ty, |$executor:ident| $body:expr) => {{
+        let lock: &dyn std::any::Any = $lock;
+        if let Some(mut $executor) = lock.downcast_ref::<tokio::sync::Mutex<$value>>() {
+            $body
+        } else if let Some(mut $executor) = lock.downcast_ref::<futures_util::lock::Mutex<$value>>()
+        {
+            $body
+        } else if let Some(mut $executor) = lock.downcast_ref::<std::sync::Mutex<$value>>() {
+            $body
+        } else {
+            unreachable!("not one of the lock types of with_lock")
+        }
+    }};
+}
+pub(crate) use on_concrete_lock;
+
 /// A lock attempt that may span several polls.
 pub struct PollLock<'a, L: Lock> {
     lock: &'a L,

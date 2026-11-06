@@ -19,12 +19,12 @@
 //! Holding a lock while waiting would keep the connection task from making
 //! progress, so no variant does.
 use crate::{
-    calls::{ReadAllHostExt as _, Release, Shared, WriteSlotHostExt as _},
+    calls::{Consume, ReadAllHostExt as _, Release, Shared, Take, Write, WriteSlotHostExt as _},
     codec::{FrameDecoder, FrameEncoder, Item, Processor},
     common::{
         ByteSink, ByteSource, Counters, Lock, LockKind, LockPerLeaf, Pace, Pacer, PerLock,
-        PollLock, Progress, Sample, TimedLock, counted, plain_frame_checksum, plain_write_all,
-        with_lock, woken,
+        PollLock, Progress, Sample, TimedLock, counted, on_concrete_lock, plain_frame_checksum,
+        plain_write_all, with_lock, woken,
     },
     fields::Fields,
     workload::{Frame, Http3, Message, Work, encode_all, slot_frames, total_checksum},
@@ -32,6 +32,7 @@ use crate::{
 use bytes::{Buf, BytesMut};
 use futures_sink::Sink;
 use futures_util::task::AtomicWaker;
+use nitori_call::{BorrowedReceiver, family_receiver};
 use std::{
     collections::VecDeque,
     future::poll_fn,
@@ -182,6 +183,35 @@ impl ByteSource for RecvStream {
         }
     }
 }
+// A stream is its own family, so that nitori_call's lock executors can run
+// the calls on it.
+family_receiver!(impl [] for RecvStream);
+impl Consume for RecvStream {
+    fn poll_consume<'visit, F: FnMut(&[u8]) + ?Sized>(
+        host: Pin<&mut BorrowedReceiver<'visit, Self>>,
+        cx: &mut Context<'_>,
+        maximum: usize,
+        visit: &mut F,
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        ByteSource::poll_consume(host.get_pin_mut().get_mut(), cx, maximum, visit)
+    }
+}
+impl Take for RecvStream {
+    fn poll_take<'visit>(
+        host: Pin<&mut BorrowedReceiver<'visit, Self>>,
+        cx: &mut Context<'_>,
+        maximum: usize,
+    ) -> Poll<io::Result<BytesMut>>
+    where
+        Self: 'visit,
+    {
+        ByteSource::poll_take(host.get_pin_mut().get_mut(), cx, maximum)
+    }
+}
+
 pub struct RecvConn<L> {
     pub streams: Vec<L>,
     limits: Vec<Arc<AtomicUsize>>,
@@ -294,14 +324,19 @@ pub enum RecvVariant {
     Call,
     /// The same, releasing the view at every release point.
     CallRelease,
+    /// The same operation run by nitori_call's own executor for the lock,
+    /// which releases at every release point too. It counts no
+    /// acquisitions.
+    CallLibrary,
     /// Lock, decode every item that is ready, and process them after
     /// unlocking.
     Codec,
 }
-pub const RECVS: [RecvVariant; 4] = [
+pub const RECVS: [RecvVariant; 5] = [
     RecvVariant::PlainLockPerLeaf,
     RecvVariant::Call,
     RecvVariant::CallRelease,
+    RecvVariant::CallLibrary,
     RecvVariant::Codec,
 ];
 
@@ -340,6 +375,12 @@ async fn receive<L: Lock<Value = RecvStream>>(
                 .await
                 .unwrap()
         }
+        RecvVariant::CallLibrary => on_concrete_lock!(stream, RecvStream, |executor| {
+            executor
+                .read_all_unpin(Http3, &mut block, &mut fields, work)
+                .await
+                .unwrap()
+        }),
         RecvVariant::Codec => {
             let mut codec = FrameDecoder::<Http3>::default();
             let mut processor = Processor::<Http3>::new(work);
@@ -528,6 +569,19 @@ impl ByteSink for SendStream {
         Poll::Ready(Ok(()))
     }
 }
+family_receiver!(impl [] for SendStream);
+impl Write for SendStream {
+    fn poll_write<'visit, I: Buf + ?Sized>(
+        host: Pin<&mut BorrowedReceiver<'visit, Self>>,
+        cx: &mut Context<'_>,
+        input: &mut I,
+    ) -> Poll<io::Result<usize>>
+    where
+        Self: 'visit,
+    {
+        ByteSink::poll_write(host.get_pin_mut().get_mut(), cx, input)
+    }
+}
 pub struct SendConn<L> {
     pub streams: Vec<L>,
     states: Vec<Arc<SendState>>,
@@ -682,6 +736,10 @@ pub enum SendVariant {
     Call,
     /// The same, releasing the view at every release point.
     CallRelease,
+    /// The same operation run by nitori_call's own executor for the lock,
+    /// which releases at every release point too. It counts no
+    /// acquisitions.
+    CallLibrary,
     /// The sans-IO way: encode frames ahead of the lock, then copy as many
     /// whole frames as fit into the stream buffer.
     CodecDirect,
@@ -689,10 +747,11 @@ pub enum SendVariant {
     /// its own buffer, written out whenever that reaches 8 KiB.
     CodecFramed,
 }
-pub const SENDS: [SendVariant; 5] = [
+pub const SENDS: [SendVariant; 6] = [
     SendVariant::PlainLockPerLeaf,
     SendVariant::Call,
     SendVariant::CallRelease,
+    SendVariant::CallLibrary,
     SendVariant::CodecDirect,
     SendVariant::CodecFramed,
 ];
@@ -807,6 +866,19 @@ async fn send<L: Lock<Value = SendStream>>(
                 .await
                 .unwrap()
         }
+        SendVariant::CallLibrary => on_concrete_lock!(stream, SendStream, |executor| {
+            executor
+                .write_slot_unpin(
+                    Http3,
+                    input.messages.clone(),
+                    index,
+                    input.streams,
+                    input.chunk,
+                    input.work,
+                )
+                .await
+                .unwrap()
+        }),
         SendVariant::CodecDirect => {
             let mut frames = frames;
             let mut staged = Staged::default();
