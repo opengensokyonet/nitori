@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+mod aead;
 #[cfg(feature = "fixed-x25519")]
 mod fixed;
 mod hash;
@@ -11,6 +12,7 @@ mod verify;
 use aws_lc_rs::rand;
 use nitori_crypto::{Issuer, Random, RandomError};
 
+pub use aead::AwsLcAeadKey;
 #[cfg(feature = "fixed-x25519")]
 pub use fixed::FixedX25519;
 pub use hash::AwsLcRunningHash;
@@ -23,6 +25,7 @@ pub use signing::{
 /// The capabilities of `nitori_crypto` that aws-lc-rs provides.
 ///
 /// - `Hash`, `Hmac` and `Hkdf` with SHA-256 and SHA-384.
+/// - `Aead` with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305.
 /// - `KeyExchange` with X25519MLKEM768, X25519, P-256, P-384, P-521 and
 ///   ML-KEM-768.
 /// - `SignatureVerify` with ECDSA over P-256, P-384 and P-521, Ed25519,

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+mod aead;
 mod hash;
 mod hkdf;
 mod hmac;
@@ -10,6 +11,10 @@ mod secret;
 mod signature;
 mod supported;
 
+pub use aead::{
+    Aead, AeadAlgorithm, AeadAuthenticationError, AeadInputTooLongError, AeadKey,
+    AeadKeyLengthMismatchError, AeadOpenError,
+};
 pub use hash::{Digest, DigestLengthMismatchError, Hash, HashAlgorithm, RunningHash};
 pub use hkdf::{ExpandLength, ExpandLengthOutOfRangeError, Hkdf};
 pub use hmac::{Hmac, TagMismatchError};

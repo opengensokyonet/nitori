@@ -13,6 +13,10 @@ crates. The crate has no implementations: `nitori_crypto_ring` and
   time.
 - `Hkdf` performs HKDF-Extract and HKDF-Expand. Constructions built on top,
   such as the TLS 1.3 `HKDF-Expand-Label`, belong to the protocol layer.
+- `Aead` makes an `AeadKey` for AES-128-GCM, AES-256-GCM or
+  ChaCha20-Poly1305. A key seals and opens in place and keeps the tag apart
+  from the text. The caller chooses the nonce, and a nonce must not be used
+  twice with one key.
 - `KeyExchange` exchanges keys by `NamedGroup`: the server in one step, the
   client in two, where completing consumes the started exchange.
 - `SignatureVerify` verifies signatures by `SignatureScheme`.

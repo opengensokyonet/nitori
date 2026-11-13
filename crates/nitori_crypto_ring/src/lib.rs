@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+mod aead;
 mod hash;
 mod key_exchange;
 mod signing;
@@ -9,6 +10,7 @@ mod verify;
 use nitori_crypto::{Issuer, Random, RandomError};
 use ring::rand::{SecureRandom, SystemRandom};
 
+pub use aead::RingAeadKey;
 pub use hash::RingRunningHash;
 pub use key_exchange::RingStartedExchange;
 pub use signing::{
@@ -19,6 +21,7 @@ pub use signing::{
 /// The capabilities of `nitori_crypto` that ring provides.
 ///
 /// - `Hash`, `Hmac` and `Hkdf` with SHA-256 and SHA-384.
+/// - `Aead` with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305.
 /// - `KeyExchange` with X25519, P-256 and P-384.
 /// - `SignatureVerify` with ECDSA over P-256 and P-384, Ed25519, RSA-PSS
 ///   and RSASSA-PKCS1-v1_5, for RSA moduli of 2048 to 8192 bits.

@@ -112,3 +112,21 @@ fn code_points_print_their_names() {
     );
     assert_eq!(SignatureScheme::new(0x0807), SignatureScheme::ED25519);
 }
+
+#[test]
+fn aead_input_limit_is_inclusive() {
+    use nitori_crypto::{AeadAlgorithm, AeadInputTooLongError};
+    for algorithm in [
+        AeadAlgorithm::Aes128Gcm,
+        AeadAlgorithm::Aes256Gcm,
+        AeadAlgorithm::ChaCha20Poly1305,
+    ] {
+        let max = AeadInputTooLongError::max_len(algorithm);
+        if let Ok(max) = usize::try_from(max) {
+            assert!(AeadInputTooLongError::check(algorithm, max).is_ok());
+            let error = AeadInputTooLongError::check(algorithm, max + 1).unwrap_err();
+            assert_eq!(error.algorithm(), algorithm);
+            assert_eq!(error.requested_len(), max + 1);
+        }
+    }
+}

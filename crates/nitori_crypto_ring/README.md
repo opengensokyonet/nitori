@@ -5,11 +5,12 @@ The capabilities of `nitori_crypto` implemented with
 stable Rust.
 
 `RingBackend` is a zero-sized type that implements `Hash`, `Hmac`, `Hkdf`,
-`KeyExchange`, `SignatureVerify` and `Random`:
+`Aead`, `KeyExchange`, `SignatureVerify` and `Random`:
 
 | Capability | Algorithms |
 | --- | --- |
 | `Hash`, `Hmac`, `Hkdf` | SHA-256, SHA-384 |
+| `Aead` | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 |
 | `KeyExchange` | x25519, secp256r1, secp384r1 |
 | `SignatureVerify` | ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384, ed25519, rsa_pss_rsae_sha256/384/512, rsa_pkcs1_sha256/384/512 |
 | `Random` | the operating system's generator |

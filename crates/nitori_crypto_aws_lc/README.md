@@ -6,11 +6,12 @@ and builds on stable Rust. aws-lc-rs compiles AWS-LC from C sources, which
 needs a C compiler and CMake.
 
 `AwsLcBackend` is a zero-sized type that implements `Hash`, `Hmac`, `Hkdf`,
-`KeyExchange`, `SignatureVerify` and `Random`:
+`Aead`, `KeyExchange`, `SignatureVerify` and `Random`:
 
 | Capability | Algorithms |
 | --- | --- |
 | `Hash`, `Hmac`, `Hkdf` | SHA-256, SHA-384 |
+| `Aead` | AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305 |
 | `KeyExchange` | X25519MLKEM768, x25519, secp256r1, secp384r1, secp521r1, MLKEM768 |
 | `SignatureVerify` | ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384, ecdsa_secp521r1_sha512, ed25519, rsa_pss_rsae_sha256/384/512, rsa_pkcs1_sha256/384/512 |
 | `Random` | AWS-LC's generator |
