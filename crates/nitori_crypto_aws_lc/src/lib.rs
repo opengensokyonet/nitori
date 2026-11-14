@@ -18,8 +18,9 @@ pub use fixed::FixedX25519;
 pub use hash::AwsLcRunningHash;
 pub use key_exchange::AwsLcStartedExchange;
 pub use signing::{
-    EcdsaKeyRejectedError, EcdsaSigningError, EcdsaSigningKey, Ed25519KeyRejectedError,
-    Ed25519SigningKey, RsaKeyRejectedError, RsaSigningError, RsaSigningKey,
+    EcdsaKeyDerError, EcdsaKeyRejectedError, EcdsaSigningError, EcdsaSigningKey,
+    Ed25519KeyDerError, Ed25519KeyRejectedError, Ed25519SigningKey, RsaKeyDerError,
+    RsaKeyRejectedError, RsaSigningError, RsaSigningKey,
 };
 
 /// The capabilities of `nitori_crypto` that aws-lc-rs provides.

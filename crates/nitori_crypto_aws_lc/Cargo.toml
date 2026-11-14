@@ -12,6 +12,7 @@ fixed-x25519 = []
 [dependencies]
 aws-lc-rs.workspace = true
 nitori_crypto.workspace = true
+rustls-pki-types.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

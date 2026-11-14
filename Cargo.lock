@@ -220,6 +220,7 @@ dependencies = [
  "nitori_crypto",
  "nitori_crypto_ring",
  "ring",
+ "rustls-pki-types",
  "snafu",
 ]
 
@@ -229,6 +230,7 @@ version = "0.0.0"
 dependencies = [
  "nitori_crypto",
  "ring",
+ "rustls-pki-types",
  "snafu",
 ]
 
@@ -297,6 +299,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys",
+]
+
+[[package]]
+name = "rustls-pki-types"
+version = "1.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
+dependencies = [
+ "zeroize",
 ]
 
 [[package]]

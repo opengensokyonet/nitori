@@ -14,8 +14,9 @@ pub use aead::RingAeadKey;
 pub use hash::RingRunningHash;
 pub use key_exchange::RingStartedExchange;
 pub use signing::{
-    EcdsaKeyRejectedError, EcdsaSigningError, EcdsaSigningKey, Ed25519KeyRejectedError,
-    Ed25519SigningKey, RsaKeyRejectedError, RsaSigningError, RsaSigningKey,
+    EcdsaKeyDerError, EcdsaKeyRejectedError, EcdsaSigningError, EcdsaSigningKey,
+    Ed25519KeyDerError, Ed25519KeyRejectedError, Ed25519SigningKey, RsaKeyDerError,
+    RsaKeyRejectedError, RsaSigningError, RsaSigningKey,
 };
 
 /// The capabilities of `nitori_crypto` that ring provides.

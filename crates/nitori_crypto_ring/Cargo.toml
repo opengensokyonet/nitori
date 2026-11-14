@@ -8,4 +8,5 @@ license = "Apache-2.0 OR MIT"
 [dependencies]
 nitori_crypto.workspace = true
 ring.workspace = true
+rustls-pki-types.workspace = true
 snafu.workspace = true
