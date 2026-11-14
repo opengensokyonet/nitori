@@ -84,10 +84,13 @@ pub struct EcdsaSigningKey {
 impl EcdsaSigningKey {
     /// The key in a PKCS#8 document, over P-256 or P-384.
     ///
+    /// ring needs the public key in the ECPrivateKey the document holds,
+    /// although the field is optional (RFC 5915 §3).
+    ///
     /// # Errors
     ///
     /// Fails when the document is not an ECDSA private key over either
-    /// curve.
+    /// curve with its public key.
     pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, EcdsaKeyRejectedError> {
         let random = SystemRandom::new();
         ECDSA_CURVES
@@ -103,8 +106,9 @@ impl EcdsaSigningKey {
     /// The key in a PKCS#8 or a SEC1 document, as a PEM file gives it under
     /// the label PRIVATE KEY or EC PRIVATE KEY.
     ///
-    /// ring needs the public key in the document: an ECPrivateKey without
-    /// its optional publicKey field (RFC 5915 §3) is rejected.
+    /// ring needs the public key in the document, in either format: an
+    /// ECPrivateKey without its optional publicKey field (RFC 5915 §3) is
+    /// rejected.
     ///
     /// # Errors
     ///
@@ -167,7 +171,7 @@ pub enum EcdsaKeyDerError {
 
 /// A PKCS#8 document is not an ECDSA private key over a supported curve.
 #[derive(Debug, Snafu)]
-#[snafu(display("pkcs#8 document is not an ecdsa p-256 or p-384 private key"))]
+#[snafu(display("pkcs#8 document is not an ecdsa p-256 or p-384 private key with its public key"))]
 pub struct EcdsaKeyRejectedError;
 
 /// A failure to sign with an [`EcdsaSigningKey`].
