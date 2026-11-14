@@ -103,10 +103,13 @@ impl EcdsaSigningKey {
     /// The key in a PKCS#8 or a SEC1 document, as a PEM file gives it under
     /// the label PRIVATE KEY or EC PRIVATE KEY.
     ///
+    /// ring needs the public key in the document: an ECPrivateKey without
+    /// its optional publicKey field (RFC 5915 §3) is rejected.
+    ///
     /// # Errors
     ///
     /// Fails when the document is in another format, or is not an ECDSA
-    /// private key over a supported curve.
+    /// private key over a supported curve with its public key.
     pub fn from_der(key: &PrivateKeyDer<'_>) -> Result<Self, EcdsaKeyDerError> {
         match key {
             PrivateKeyDer::Pkcs8(key) => Ok(Self::from_pkcs8(key.secret_pkcs8_der())?),
@@ -151,8 +154,11 @@ pub enum EcdsaKeyDerError {
         /// The failure.
         source: EcdsaKeyRejectedError,
     },
-    /// The SEC1 document is not a key over a supported curve.
-    #[snafu(display("sec1 document is not an ecdsa p-256 or p-384 private key"))]
+    /// The SEC1 document is not a key over a supported curve with its
+    /// public key.
+    #[snafu(display(
+        "sec1 document is not an ecdsa p-256 or p-384 private key with its public key"
+    ))]
     Sec1,
 }
 
@@ -410,5 +416,27 @@ impl SigningKey for RsaSigningKey {
                 .context(rsa_signing_error::SigningSnafu)?;
             Ok(Signature::from_slice(&out))
         })())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_der;
+
+    #[test]
+    fn der_lengths_use_the_shortest_form() {
+        for (len, header) in [
+            (0x7f, &[0x04, 0x7f][..]),
+            (0x80, &[0x04, 0x81, 0x80]),
+            (0xff, &[0x04, 0x81, 0xff]),
+            (0x100, &[0x04, 0x82, 0x01, 0x00]),
+            (0x1_0000, &[0x04, 0x83, 0x01, 0x00, 0x00]),
+        ] {
+            let contents = vec![0xaa; len];
+            let mut out = Vec::new();
+            push_der(&mut out, 0x04, &[&contents[..1], &contents[1..]]);
+            assert_eq!(&out[..header.len()], header, "{len:#x}");
+            assert_eq!(&out[header.len()..], &contents[..]);
+        }
     }
 }

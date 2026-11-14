@@ -260,3 +260,72 @@ fn key_documents_of_another_format_or_algorithm_are_rejected() {
         Err(RsaKeyDerError::Pkcs1 { .. })
     ));
 }
+
+/// Made by `openssl ecparam -name secp521r1 -genkey`.
+const ECDSA_P521_SEC1: &str = include_str!("data/ecdsa-p521.sec1.pem");
+/// `ECDSA_P256_SEC1` written by `openssl ec -no_public`: the ECPrivateKey
+/// without its optional publicKey field.
+const ECDSA_P256_SEC1_NO_PUBLIC: &str = include_str!("data/ecdsa-p256-no-public.sec1.pem");
+
+/// Reads one DER element's header: the tag, the length, and the header's
+/// size. Only the forms that SEC1 keys of these curves use.
+fn der_header(der: &[u8]) -> (u8, usize, usize) {
+    match der[1] {
+        len @ 0..=0x7f => (der[0], usize::from(len), 2),
+        0x81 => (der[0], usize::from(der[2]), 3),
+        _ => panic!("longer lengths do not occur here"),
+    }
+}
+
+/// `sec1` without its optional parameters field, the curve's name.
+fn without_parameters(sec1: &[u8]) -> Vec<u8> {
+    let (_, len, header) = der_header(sec1);
+    let mut contents = &sec1[header..header + len];
+    let mut kept = Vec::new();
+    while !contents.is_empty() {
+        let (tag, len, header) = der_header(contents);
+        let (element, rest) = contents.split_at(header + len);
+        if tag != 0xa0 {
+            kept.extend_from_slice(element);
+        }
+        contents = rest;
+    }
+    let len = u8::try_from(kept.len()).unwrap();
+    let mut out = if len < 0x80 {
+        vec![0x30, len]
+    } else {
+        vec![0x30, 0x81, len]
+    };
+    out.extend_from_slice(&kept);
+    out
+}
+
+fn sec1(der: Vec<u8>) -> PrivateKeyDer<'static> {
+    PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(der))
+}
+
+#[test]
+fn sec1_keys_load_without_parameters_but_need_the_public_key() {
+    let full = EcdsaSigningKey::from_der(&key_der(ECDSA_P256_SEC1)).unwrap();
+    // Without the curve's name the key is tried on each curve in turn.
+    let unnamed = EcdsaSigningKey::from_der(&sec1(without_parameters(
+        key_der(ECDSA_P256_SEC1).secret_der(),
+    )))
+    .unwrap();
+    assert_eq!(unnamed.public_key(), full.public_key());
+    assert_eq!(unnamed.schemes(), [SignatureScheme::ECDSA_SECP256R1_SHA256]);
+
+    let p384 = key_der(ECDSA_P384_SEC1);
+    let unnamed = EcdsaSigningKey::from_der(&sec1(without_parameters(p384.secret_der()))).unwrap();
+    assert_eq!(unnamed.schemes(), [SignatureScheme::ECDSA_SECP384R1_SHA384]);
+
+    // ring needs the public key, and does not sign over P-521.
+    assert!(matches!(
+        EcdsaSigningKey::from_der(&key_der(ECDSA_P256_SEC1_NO_PUBLIC)),
+        Err(EcdsaKeyDerError::Sec1)
+    ));
+    assert!(matches!(
+        EcdsaSigningKey::from_der(&key_der(ECDSA_P521_SEC1)),
+        Err(EcdsaKeyDerError::Sec1)
+    ));
+}

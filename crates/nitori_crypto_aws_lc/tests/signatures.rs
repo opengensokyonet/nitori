@@ -274,3 +274,74 @@ fn key_documents_of_another_format_or_algorithm_are_rejected() {
         Err(RsaKeyDerError::Pkcs1 { .. })
     ));
 }
+
+/// Made by `openssl ecparam -name secp521r1 -genkey`.
+const ECDSA_P521_SEC1: &str = include_str!("data/ecdsa-p521.sec1.pem");
+/// `ECDSA_P256_SEC1` written by `openssl ec -no_public`: the ECPrivateKey
+/// without its optional publicKey field.
+const ECDSA_P256_SEC1_NO_PUBLIC: &str = include_str!("data/ecdsa-p256-no-public.sec1.pem");
+
+/// Reads one DER element's header: the tag, the length, and the header's
+/// size. Only the forms that SEC1 keys of these curves use.
+fn der_header(der: &[u8]) -> (u8, usize, usize) {
+    match der[1] {
+        len @ 0..=0x7f => (der[0], usize::from(len), 2),
+        0x81 => (der[0], usize::from(der[2]), 3),
+        _ => panic!("longer lengths do not occur here"),
+    }
+}
+
+/// `sec1` without its optional parameters field, the curve's name.
+fn without_parameters(sec1: &[u8]) -> Vec<u8> {
+    let (_, len, header) = der_header(sec1);
+    let mut contents = &sec1[header..header + len];
+    let mut kept = Vec::new();
+    while !contents.is_empty() {
+        let (tag, len, header) = der_header(contents);
+        let (element, rest) = contents.split_at(header + len);
+        if tag != 0xa0 {
+            kept.extend_from_slice(element);
+        }
+        contents = rest;
+    }
+    let len = u8::try_from(kept.len()).unwrap();
+    let mut out = if len < 0x80 {
+        vec![0x30, len]
+    } else {
+        vec![0x30, 0x81, len]
+    };
+    out.extend_from_slice(&kept);
+    out
+}
+
+fn sec1(der: Vec<u8>) -> PrivateKeyDer<'static> {
+    PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(der))
+}
+
+#[test]
+fn sec1_keys_load_without_parameters_or_public_key_and_over_p521() {
+    let full = EcdsaSigningKey::from_der(&key_der(ECDSA_P256_SEC1)).unwrap();
+    // Without the curve's name the key is tried on each curve in turn.
+    let unnamed = EcdsaSigningKey::from_der(&sec1(without_parameters(
+        key_der(ECDSA_P256_SEC1).secret_der(),
+    )))
+    .unwrap();
+    assert_eq!(unnamed.public_key(), full.public_key());
+    assert_eq!(unnamed.schemes(), [SignatureScheme::ECDSA_SECP256R1_SHA256]);
+    // aws-lc-rs computes a missing public key.
+    let no_public = EcdsaSigningKey::from_der(&key_der(ECDSA_P256_SEC1_NO_PUBLIC)).unwrap();
+    assert_eq!(no_public.public_key(), full.public_key());
+
+    let p384 = key_der(ECDSA_P384_SEC1);
+    let unnamed = EcdsaSigningKey::from_der(&sec1(without_parameters(p384.secret_der()))).unwrap();
+    assert_eq!(unnamed.schemes(), [SignatureScheme::ECDSA_SECP384R1_SHA384]);
+
+    let p521 = EcdsaSigningKey::from_der(&key_der(ECDSA_P521_SEC1)).unwrap();
+    let scheme = SignatureScheme::ECDSA_SECP521R1_SHA512;
+    assert_eq!(p521.schemes(), [scheme]);
+    assert_verifies(
+        scheme,
+        p521.public_key(),
+        sign(&p521, scheme).unwrap().as_bytes(),
+    );
+}
