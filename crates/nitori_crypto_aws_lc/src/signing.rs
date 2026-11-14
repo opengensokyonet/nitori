@@ -100,6 +100,9 @@ impl EcdsaSigningKey {
 #[snafu(module)]
 pub enum EcdsaKeyDerError {
     /// The document is neither PKCS#8 nor SEC1.
+    ///
+    /// It does not say which format: the caller holds the document, and
+    /// `PrivateKeyDer` may gain formats.
     #[snafu(display("private key document is neither pkcs#8 nor sec1"))]
     UnsupportedFormat,
     /// The PKCS#8 document is not a key over a supported curve.
@@ -206,6 +209,9 @@ impl Ed25519SigningKey {
 #[snafu(module)]
 pub enum Ed25519KeyDerError {
     /// The document is not PKCS#8.
+    ///
+    /// It does not say which format: the caller holds the document, and
+    /// `PrivateKeyDer` may gain formats.
     #[snafu(display("private key document is not pkcs#8"))]
     UnsupportedFormat,
     /// The PKCS#8 document is not an Ed25519 key.
@@ -309,6 +315,9 @@ impl RsaSigningKey {
 #[snafu(module)]
 pub enum RsaKeyDerError {
     /// The document is neither PKCS#8 nor PKCS#1.
+    ///
+    /// It does not say which format: the caller holds the document, and
+    /// `PrivateKeyDer` may gain formats.
     #[snafu(display("private key document is neither pkcs#8 nor pkcs#1"))]
     UnsupportedFormat,
     /// The PKCS#8 document is not an RSA key of a supported size.
