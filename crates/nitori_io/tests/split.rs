@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use nitori_io::SplitTo;
+use nitori_io::{SplitTo, SplitToError};
 
 fn pieces<P: SplitTo + AsRef<[u8]>>(mut buffer: P, lengths: &[usize]) -> (Vec<Vec<u8>>, Vec<u8>) {
     let mut out = Vec::new();
@@ -87,4 +87,12 @@ fn bytes_split_beyond_the_length_fails_and_keeps_the_buffer() {
         "cannot cut 3 bytes off a buffer of 2 bytes"
     );
     assert_eq!(&buffer[..], b"ab");
+}
+
+#[test]
+fn the_check_fails_only_past_the_length() {
+    assert!(SplitToError::check(0, 0).is_ok());
+    assert!(SplitToError::check(2, 2).is_ok());
+    let error = SplitToError::check(3, 2).unwrap_err();
+    assert_eq!((error.at(), error.length()), (3, 2));
 }

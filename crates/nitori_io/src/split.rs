@@ -11,6 +11,16 @@ pub struct SplitToError {
 }
 
 impl SplitToError {
+    /// Check that `at` bytes can be cut off a buffer of `length` bytes.
+    ///
+    /// Fails exactly when `at` exceeds `length`. An implementation of
+    /// [`SplitTo`] outside this crate calls it before cutting, so that it
+    /// reports the same error as the implementations here.
+    pub fn check(at: usize, length: usize) -> Result<(), Self> {
+        ensure!(at <= length, SplitToSnafu { at, length });
+        Ok(())
+    }
+
     /// The number of bytes that was asked for.
     pub fn at(&self) -> usize {
         self.at
@@ -40,13 +50,7 @@ pub trait SplitTo: Sized {
 /// Zero-copy: both pieces share the allocation, and each is writable on its own.
 impl SplitTo for BytesMut {
     fn split_to(&mut self, at: usize) -> Result<Self, SplitToError> {
-        ensure!(
-            at <= self.len(),
-            SplitToSnafu {
-                at,
-                length: self.len()
-            }
-        );
+        SplitToError::check(at, self.len())?;
         Ok(BytesMut::split_to(self, at))
     }
 }
@@ -54,13 +58,7 @@ impl SplitTo for BytesMut {
 /// Zero-copy: both pieces share the allocation and are read-only.
 impl SplitTo for Bytes {
     fn split_to(&mut self, at: usize) -> Result<Self, SplitToError> {
-        ensure!(
-            at <= self.len(),
-            SplitToSnafu {
-                at,
-                length: self.len()
-            }
-        );
+        SplitToError::check(at, self.len())?;
         Ok(Bytes::split_to(self, at))
     }
 }
@@ -68,13 +66,7 @@ impl SplitTo for Bytes {
 /// The borrowed form: the piece and the rest are subslices of the same bytes.
 impl SplitTo for &[u8] {
     fn split_to(&mut self, at: usize) -> Result<Self, SplitToError> {
-        ensure!(
-            at <= self.len(),
-            SplitToSnafu {
-                at,
-                length: self.len()
-            }
-        );
+        SplitToError::check(at, self.len())?;
         let (head, tail) = self.split_at(at);
         *self = tail;
         Ok(head)
