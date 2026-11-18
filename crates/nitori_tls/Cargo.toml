@@ -1,0 +1,22 @@
+[package]
+name = "nitori_tls"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+description = "TLS 1.3 handshake messages, extensions, key schedule and handshake engines for QUIC"
+
+[dependencies]
+bytes.workspace = true
+nitori_call.workspace = true
+nitori_crypto.workspace = true
+nitori_io.workspace = true
+rustls-pki-types = { workspace = true, features = ["std"] }
+rustls-webpki.workspace = true
+smallvec.workspace = true
+snafu.workspace = true
+time = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+nitori_crypto_aws_lc = { workspace = true, features = ["fixed-x25519"] }
+rustls.workspace = true
