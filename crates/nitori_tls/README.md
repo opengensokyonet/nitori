@@ -8,6 +8,10 @@ The baseline is TLS 1.3 ([RFC 9846]) as QUIC version 1 uses it
 TLS record layer, and the handshake hands traffic secrets to QUIC packet
 protection.
 
+It builds without the standard library, with `alloc`. The default `std`
+feature adds `clock::SystemClock`, which reads the system's clock, and turns
+on the `std` features of `nitori_call`, `nitori_io` and `nitori_sync`.
+
 ## Modules
 
 - [`message`]: handshake messages, collected whole from the byte stream
@@ -89,6 +93,17 @@ the handshake, the connection and its ticket policy all agree.
 
 The engines do not yet open encrypted ClientHello layers or authenticate
 clients with certificates.
+
+## Shared state
+
+The ready-made capabilities that connections share through `&self`, such as
+the ticket stores of both roles, the memory of retried groups, the trust
+anchors, the distrusted keys, the CT log list and the manual clock, name no
+lock: each keeps its state in the wrapper of a `nitori_sync::Synchronization`
+family that the host chooses, `RefCellSynchronization` on one thread or, with
+the `std` feature, `MutexSynchronization`. Those that keep a hash table also
+take its hasher as a type parameter, `S: BuildHasher + Default`; none of their
+keys is chosen by the peer.
 
 [RFC 9846]: https://www.rfc-editor.org/rfc/rfc9846.html
 [RFC 9001]: https://www.rfc-editor.org/rfc/rfc9001.html
