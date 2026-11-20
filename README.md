@@ -8,16 +8,35 @@ This repository contains the experimental `nitori_call` mechanism, `nitori_io` b
 
 ## Layout
 
-- `crates/nitori_call`: calls written as ordinary async functions that do not store what they work on; the code polling a call lends it a view of its resource, or none, on each poll. That code can then acquire a shared resource only for the polls that use it, and an owner of shared state, such as a connection, can keep many calls next to the state and lend each call in turn a view of it. The crate provides operations, receiver accesses, composition, executors, and the `#[call]` and `#[capability]` macros. Executions are both futures of the final value and streams of yielded items. A caller that lends every view on every poll gets synchronous access to them, where `.await` and `yield` are the only points other work can run. See its [README](crates/nitori_call/README.md).
-- `crates/nitori_call_macros`: procedural macros used by `nitori_call`.
-- `crates/nitori_crypto`: cryptographic capabilities as traits, one per capability: hashing, HMAC, HKDF, AEAD, key exchange, signature verification, signing and random bytes, with the TLS code points that name their algorithms. An implementation answers which algorithms it supports with a `Supported` value when the algorithm is chosen, and operations that take one do not fail for lack of support. See its [README](crates/nitori_crypto/README.md).
-- `crates/nitori_crypto_ring`: the `nitori_crypto` capabilities that [ring](https://crates.io/crates/ring) provides, and local signing keys built from PKCS#8. See its [README](crates/nitori_crypto_ring/README.md).
-- `crates/nitori_crypto_aws_lc`: the `nitori_crypto` capabilities that [aws-lc-rs](https://crates.io/crates/aws-lc-rs) provides, adding P-521, ML-KEM-768 and the X25519MLKEM768 hybrid group, and local signing keys built from PKCS#8. The `fixed-x25519` feature adds an X25519 exchange with a given private key, for reproducing published traces. aws-lc-rs builds AWS-LC from C sources, which needs a C compiler and CMake. See its [README](crates/nitori_crypto_aws_lc/README.md).
-- `crates/nitori_tls`: the TLS 1.3 handshake layer for QUIC. It has the TLS code points (cipher suites with their hash and AEAD, extension types, handshake types, alert descriptions, protocol versions), the handshake messages (ClientHello, ServerHello and HelloRetryRequest, EncryptedExtensions, CertificateRequest, Certificate with X.509 certificates or a raw public key, CertificateVerify, Finished, NewSessionTicket, and the message_hash message of the transcript) with their extensions, and the collection of one whole handshake message from the bytes of an encryption level, under a limit for each message type. Messages are read from the bytes of one whole message as `nitori_call` operations, with variable-length fields as chunks of those bytes, and written back byte for byte; a recognized extension in a message that may not carry it is rejected, unknown extensions are kept, and every read failure names the TLS alert it calls for. The transcript and key schedule form one chain of values that move, with the role of a server or a client as a type parameter: each step consumes the one before, so the Handshake traffic secrets need the ServerHello, the 1-RTT secrets need the server's Finished, and a client reads the server's Finished only after the server has authenticated with a certificate or with the PSK it accepted. The chain derives the traffic secrets for QUIC packet protection, each with the hash of its suite, the Finished messages, PSK binders, 0-RTT secrets, the exporter and the PSKs of tickets, over a backend with the capabilities of `nitori_crypto`. The handshake engines of a server and of a client run in steps, given by a trait for each role that the engine's start state implements: each step takes the state before it by value and returns the traffic secrets or the completion of the handshake, with its exporter, together with the state of the next step. The states own the backend and the role's capabilities; a step reads and writes the CRYPTO bytes of the current encryption level through one access the connection lends on every poll and asks the connection for transport parameters through synchronous methods, and each step is also a `nitori_call` operation for every implementation of the trait; a server holds back the client's 1-RTT secret until it has verified the client's Finished, and admits 0-RTT only when the handshake, the connection and its ticket policy all agree. The engines do not yet open encrypted ClientHello layers or authenticate clients with certificates.
-- `crates/nitori_id`: identities unique within a process and never reused, each pairing the `TypeId` of its owning type with an opaque allocated value. See its [README](crates/nitori_id/README.md).
-- `crates/nitori_io`: generic byte IO capabilities, calls, and explicit conversion helpers; see its [README](crates/nitori_io/README.md).
-- `examples/data-frame-codec`: codec examples, behavioral tests, compiler boundary probes, and macro expansion tooling.
-- `benches/call-bench`: HTTP responses from a captured header corpus, read and written with ordinary async, tokio-util codecs, and `nitori_call`, each written the way that suits it best: HTTP/2 with HPACK over a Tokio duplex pipe, and HTTP/3 with QPACK over QUIC stream buffers in user space, each behind its own lock, with one task per stream. Field sections use the static table only, with Huffman-coded strings; separate scenarios receive and send the QPACK encoder stream that builds a dynamic table from the same corpus, whose instructions carry no length, so a reader finds where one ends only by parsing it. Shared resources sit behind a fair async, an unfair async, or a blocking mutex; the source's arrival rate, the flow control update threshold and the contention on the HTTP/2 connection are options, and the report counts queued and empty lock acquisitions on each side. The work the application does per DATA byte is an option too, and a `mechanism` scenario measures the fixed cost of an access with no work behind it. HTTP/3 also runs the calls through `nitori_call`'s own lock executors. A `driver` scenario runs many calls over one state the way a connection driver does, lending the state to each call it polls, against ordinary futures sharing it through `Rc<RefCell<_>>`. The scenarios run on a current-thread runtime and on multi-thread runtimes with two and four workers, and, built with `--cfg tokio_unstable`, with two workers and the LIFO slot turned off. Run `cargo run --release -p nitori-call-bench -- <h2-read|h2-write|h3-recv|h3-send|qpack-encoder-recv|qpack-encoder-send|fields|mechanism|driver>`; see the crate documentation for the options. `scripts/gen_tables.py` regenerates the static and Huffman tables from the RFC text.
+Each package documents itself in its own README or crate documentation. Dependencies are those on other packages in this repository.
+
+### Calls
+
+- [`crates/nitori_call`](crates/nitori_call/README.md): operations written as ordinary async functions that run on a resource their caller lends one poll at a time; depends on `nitori_call_macros`.
+- `crates/nitori_call_macros`: the `#[call]` and `#[capability]` procedural macros of `nitori_call`.
+
+### IO
+
+- [`crates/nitori_io`](crates/nitori_io/README.md): byte IO capabilities, operations and conversion helpers; depends on `nitori_call`.
+
+### Identity
+
+- [`crates/nitori_id`](crates/nitori_id/README.md): identities unique within a process and never reused; no dependencies.
+
+### Cryptography
+
+- [`crates/nitori_crypto`](crates/nitori_crypto/README.md): cryptographic capabilities as traits, with the TLS code points that name their algorithms; no dependencies.
+- [`crates/nitori_crypto_ring`](crates/nitori_crypto_ring/README.md): the `nitori_crypto` capabilities implemented with ring; depends on `nitori_crypto`.
+- [`crates/nitori_crypto_aws_lc`](crates/nitori_crypto_aws_lc/README.md): the `nitori_crypto` capabilities implemented with aws-lc-rs, including P-521 and ML-KEM; depends on `nitori_crypto`.
+
+### TLS
+
+- [`crates/nitori_tls`](crates/nitori_tls/README.md): the TLS 1.3 handshake for QUIC; depends on `nitori_call`, `nitori_io` and `nitori_crypto`.
+
+### Examples and benchmarks
+
+- `examples/data-frame-codec`: a QUIC VarInt and HTTP/3 DATA frame codec with tests, compiler boundary probes and macro expansion tooling; depends on `nitori_call` and `nitori_io`. See its crate documentation.
+- `benches/call-bench`: HTTP/2 and HTTP/3 benchmarks that compare ordinary async, tokio-util codecs and `nitori_call`; depends on `nitori_call`. See its crate documentation.
 
 ## Development
 
@@ -51,7 +70,7 @@ cargo run --locked -p nitori_io --example limited_read
 python3 examples/data-frame-codec/scripts/expand_example.py
 ```
 
-The boundary probes run offline after Cargo has fetched workspace dependencies. Consumers of `#[call]` do not need a direct pin-projection dependency. The codec demonstrates QUIC VarInt and single-frame HTTP/3 DATA processing; it does not implement complete HTTP/3 semantics.
+The boundary probes run offline after Cargo has fetched workspace dependencies. Consumers of `#[call]` do not need a direct pin-projection dependency.
 
 For local SNAFU development, an ignored `.cargo/config.toml` may patch both `snafu` and `snafu-derive` under `[patch."https://github.com/opengensokyonet/snafu"]` to a local checkout. Run `cargo metadata --format-version 1` to update the local lockfile and verify both manifest paths before using `--locked`. Keep that configuration and the resulting path-source lockfile changes out of commits; the committed lockfile records the public Git source.
 

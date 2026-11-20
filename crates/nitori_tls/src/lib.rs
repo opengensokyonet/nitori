@@ -1,45 +1,4 @@
-//! TLS 1.3 handshake messages, extensions, key schedule and handshake
-//! engines for QUIC.
-//!
-//! The baseline is TLS 1.3 ([RFC 9846]) as QUIC version 1 uses it
-//! ([RFC 9001]): handshake messages travel in CRYPTO frames, without the
-//! TLS record layer, and the handshake hands traffic secrets to QUIC packet
-//! protection.
-//!
-//! - [`message`]: handshake messages, collected whole from the byte stream
-//!   of an encryption level, with a reader and a writer for each type.
-//! - [`extension`]: the extensions of those messages.
-//! - [`schedule`]: the transcript and the key schedule as one chain of
-//!   values, for the [`role`] of a server and of a client, over a backend
-//!   with the capabilities of [`crypto::TlsCrypto`].
-//! - [`code_point`]: code point lists, such as cipher suites and groups.
-//! - [`cipher_suite`], [`version`], [`alert`]: cipher suites, protocol
-//!   versions and alert descriptions.
-//! - [`vector`]: failures shared by the length-prefixed fields.
-//! - [`clock`]: the current time, as a capability.
-//! - [`key_log`]: the secrets of a handshake, for debugging tools, as a
-//!   capability that logs nothing by default.
-//! - [`verify`]: verification of a server's certificate chain, with
-//!   rustls-webpki and Certificate Transparency.
-//! - [`server`], [`client`]: the capabilities each role's handshake
-//!   consults, such as the choice of parameters and what a ClientHello
-//!   offers, with implementations for plain Web connections, and each
-//!   role's handshake engine, [`server::engine`] and [`client::engine`].
-//! - [`engine`]: what the two engines share: the CRYPTO streams they read
-//!   and write at the current encryption level, and how a handshake fails.
-//!
-//! The contents of each message, once [`message::codec::read_handshake_message`]
-//! has collected it whole from its CRYPTO stream, are read and written by
-//! synchronous functions in the `codec` module of their type. The readers
-//! run on the bytes of a whole message, a [`bytes::Buf`] that splits with
-//! [`nitori_io::SplitTo`] such as `&[u8]` or `Bytes`, and their
-//! variable-length fields are pieces of those bytes, without copying; the
-//! writers write into a [`bytes::BufMut`]. `encoded_len` methods compute
-//! lengths without writing. Each read failure answers the TLS alert it calls
-//! for through `alert`.
-//!
-//! [RFC 9846]: https://www.rfc-editor.org/rfc/rfc9846.html
-//! [RFC 9001]: https://www.rfc-editor.org/rfc/rfc9001.html
+#![doc = include_str!("../README.md")]
 #![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
