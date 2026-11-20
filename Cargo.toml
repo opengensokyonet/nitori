@@ -15,17 +15,17 @@ resolver = "3"
 
 [workspace.dependencies]
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
-bytes = "1.12.1"
+bytes = { version = "1.12.1", default-features = false }
 futures-core = { version = "0.3.32", default-features = false }
 futures-io = "0.3.32"
 futures-sink = "0.3.32"
 futures-util = { version = "0.3.32", default-features = false }
-nitori_call = { path = "crates/nitori_call" }
+nitori_call = { path = "crates/nitori_call", default-features = false }
 nitori_call_macros = { path = "crates/nitori_call_macros" }
 nitori_crypto = { path = "crates/nitori_crypto" }
 nitori_crypto_aws_lc = { path = "crates/nitori_crypto_aws_lc" }
 nitori_crypto_ring = { path = "crates/nitori_crypto_ring" }
-nitori_io = { path = "crates/nitori_io" }
+nitori_io = { path = "crates/nitori_io", default-features = false }
 nitori_tls = { path = "crates/nitori_tls" }
 pin-project-lite = "0.2.17"
 proc-macro2 = "1.0.107"

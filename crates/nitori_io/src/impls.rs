@@ -1,5 +1,6 @@
 //! In-memory hosts and transparent pointer forwarding.
 use crate::{Read, ReadChunk, Write};
+use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{
     convert::Infallible,
@@ -8,7 +9,8 @@ use core::{
     task::{Context, Poll},
 };
 use nitori_call::Direct;
-use std::{collections::VecDeque, io::Cursor};
+#[cfg(feature = "std")]
+use std::io::Cursor;
 
 fn read_buffer<B: Buf + ?Sized, O: BufMut + ?Sized>(source: &mut B, mut out: &mut O) -> usize {
     let count = source.remaining().min(out.remaining_mut());
@@ -66,6 +68,7 @@ impl Write for Direct<VecDeque<u8>> {
         Poll::Ready(Ok(count))
     }
 }
+#[cfg(feature = "std")]
 impl<T: AsRef<[u8]> + Unpin> Read for Direct<Cursor<T>> {
     type Error = Infallible;
     fn poll_read<'visit, O: BufMut + ?Sized>(
@@ -80,6 +83,7 @@ impl<T: AsRef<[u8]> + Unpin> Read for Direct<Cursor<T>> {
         Poll::Ready(Ok(read_buffer(this.get_mut(), out)))
     }
 }
+#[cfg(feature = "std")]
 impl<T: Unpin> Write for Direct<Cursor<T>>
 where
     Cursor<T>: std::io::Write,

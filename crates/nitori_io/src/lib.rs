@@ -1,6 +1,16 @@
+#![cfg_attr(not(test), no_std)]
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
+#![warn(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::alloc_instead_of_core
+)]
+
+extern crate alloc;
+#[cfg(all(feature = "std", not(test)))]
+extern crate std;
 
 use bytes::{Buf, BufMut};
 use core::{
@@ -10,6 +20,7 @@ use core::{
 };
 
 pub mod adapters;
+#[cfg(feature = "std")]
 pub mod bridge;
 mod impls;
 

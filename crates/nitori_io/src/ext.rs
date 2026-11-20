@@ -1,12 +1,12 @@
 //! Synchronous capability polls on receivers.
 use crate::{Read, ReadChunk, Write};
 use bytes::{Buf, BufMut};
-use nitori_call::Receiver;
-use std::{
+use core::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
+use nitori_call::Receiver;
 
 pub trait PollReadExt: Receiver
 where
@@ -17,7 +17,7 @@ where
         cx: &mut Context<'_>,
         out: &mut B,
     ) -> Poll<Result<usize, <Self::Family as Read>::Error>> {
-        Self::Family::poll_read(std::pin::pin!(self.view()), cx, out)
+        Self::Family::poll_read(core::pin::pin!(self.view()), cx, out)
     }
     fn poll_read_chunk(
         self: Pin<&mut Self>,
@@ -27,7 +27,7 @@ where
     where
         Self::Family: ReadChunk,
     {
-        Self::Family::poll_read_chunk(std::pin::pin!(self.view()), cx, maximum)
+        Self::Family::poll_read_chunk(core::pin::pin!(self.view()), cx, maximum)
     }
 }
 impl<H: Receiver + ?Sized> PollReadExt for H where H::Family: Read {}
@@ -40,7 +40,7 @@ where
         cx: &mut Context<'_>,
         input: &mut B,
     ) -> Poll<Result<usize, <Self::Family as Write>::Error>> {
-        Self::Family::poll_write(std::pin::pin!(self.view()), cx, input)
+        Self::Family::poll_write(core::pin::pin!(self.view()), cx, input)
     }
 }
 impl<H: Receiver + ?Sized> PollWriteExt for H where H::Family: Write {}

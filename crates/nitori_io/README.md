@@ -116,7 +116,8 @@ be `Unpin`; this includes `Pin<&mut T>` and `Pin<Box<T>>`.
 
 The `bridge` module adapts external IO **into** nitori capabilities:
 
-- `bridge::Std<T>` accepts `std::io::Read` / `Write`, with no optional feature.
+- `bridge::Std<T>` accepts `std::io::Read` / `Write`, with the default `std`
+  feature.
   It executes synchronously and may block. `WouldBlock` and `Interrupted` remain
   their original errors; no readiness registration or retry loop is invented.
 - `bridge::Tokio<T>` accepts `tokio::io::AsyncRead` / `AsyncWrite` with feature
@@ -131,8 +132,10 @@ inside an operation. It reads through the access on each poll, buffers nothing,
 and converts the family's read errors into `std::io::Error`. Writing is not yet
 adapted, since flush and close are not part of `Write`.
 
-Default features are empty. Both optional features may be enabled together.
-The crate still requires std when default features are disabled. Async bridges
+The default feature is `std`, which adds the `bridge` module and the
+`std::io::Cursor` hosts; `tokio` and `futures` enable it. Without it the crate
+builds without the standard library, with `alloc`. Both optional features may
+be enabled together. Async bridges
 support pinned, borrowed, and non-Send hosts. Each wrapper provides `new`,
 `From<T>`, `get_ref`, `get_mut`, and `into_inner`; async wrappers additionally
 provide `get_pin_mut`, preserving the pinning of a `!Unpin` async host.

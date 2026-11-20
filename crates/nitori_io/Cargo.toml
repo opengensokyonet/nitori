@@ -6,9 +6,11 @@ publish = false
 license = "Apache-2.0 OR MIT"
 
 [features]
-default = []
-tokio = ["dep:tokio"]
-futures = ["dep:futures-io"]
+default = ["std"]
+# Adapters of `std::io` and the implementations for `std::io::Cursor`.
+std = ["nitori_call/std", "bytes/std"]
+tokio = ["std", "dep:tokio"]
+futures = ["std", "dep:futures-io"]
 
 [dependencies]
 tokio = { workspace = true, optional = true }
