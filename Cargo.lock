@@ -258,6 +258,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitori_sync"
+version = "0.0.0"
+
+[[package]]
 name = "nitori_tls"
 version = "0.0.0"
 dependencies = [

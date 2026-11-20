@@ -8,6 +8,7 @@ members = [
     "crates/nitori_crypto_ring",
     "crates/nitori_id",
     "crates/nitori_io",
+    "crates/nitori_sync",
     "crates/nitori_tls",
     "examples/data-frame-codec",
 ]
@@ -26,6 +27,7 @@ nitori_crypto = { path = "crates/nitori_crypto" }
 nitori_crypto_aws_lc = { path = "crates/nitori_crypto_aws_lc" }
 nitori_crypto_ring = { path = "crates/nitori_crypto_ring" }
 nitori_io = { path = "crates/nitori_io", default-features = false }
+nitori_sync = { path = "crates/nitori_sync", default-features = false }
 nitori_tls = { path = "crates/nitori_tls" }
 pin-project-lite = "0.2.17"
 proc-macro2 = "1.0.107"
