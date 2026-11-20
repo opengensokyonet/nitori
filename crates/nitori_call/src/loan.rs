@@ -1,6 +1,6 @@
 //! Pinned views whose inner lifetime is hidden behind a visit.
 use crate::{Access, ReceiverFamily};
-use std::{fmt, marker::PhantomData, pin::Pin};
+use core::{fmt, marker::PhantomData, pin::Pin};
 
 /// A synchronous operation on a view. Its result cannot borrow the view.
 pub trait ViewOperation<F: ReceiverFamily> {

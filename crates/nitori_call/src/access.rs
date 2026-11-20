@@ -1,6 +1,7 @@
 //! Access to the view lent for the current poll.
 use crate::{Compose, Composed, ReceiverFamily, ViewOperation, loan::RawViewLoan};
-use std::{
+use alloc::{boxed::Box, vec::Vec};
+use core::{
     cell::Cell,
     fmt,
     future::Future,
@@ -122,16 +123,33 @@ fn defer(branches: &Branches, branch: &Waker) {
 
 /// Identifies a thread while it runs: no two running threads share a mark.
 /// A call's lender is running for as long as its view is lent.
+#[cfg(feature = "std")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ThreadMark(*const u8);
-thread_local! {
+#[cfg(feature = "std")]
+std::thread_local! {
     static MARK: u8 = const { 0 };
 }
+#[cfg(feature = "std")]
 impl ThreadMark {
     pub(crate) const NONE: Self = Self(ptr::null());
     #[inline]
     pub(crate) fn current() -> Self {
         Self(MARK.with(ptr::from_ref))
+    }
+}
+/// Without `std` a slot is not `Send` and never leaves the thread polling
+/// its call, so every use of a view is on the lender's thread and there is
+/// nothing to tell apart.
+#[cfg(not(feature = "std"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThreadMark;
+#[cfg(not(feature = "std"))]
+impl ThreadMark {
+    pub(crate) const NONE: Self = Self;
+    #[inline]
+    pub(crate) fn current() -> Self {
+        Self
     }
 }
 
@@ -344,11 +362,12 @@ where
 /// `'s` is a branded lifetime: the operation must accept every `'s`, so the
 /// slot can neither be returned nor stored outside the operation.
 ///
-/// A slot is `Send`, so an operation that keeps one is `Send` whenever the
-/// rest of what it keeps is. Within a poll it may move to a scoped thread,
-/// which can ask for a view or offer it back; using the view itself there
-/// panics, since only the thread polling the call may use it. A slot is not
-/// `Sync`.
+/// With the `std` feature a slot is `Send`, so an operation that keeps one is
+/// `Send` whenever the rest of what it keeps is. Within a poll it may move to
+/// a scoped thread, which can ask for a view or offer it back; using the view
+/// itself there panics, since only the thread polling the call may use it.
+/// Without `std` there is no thread to check against, and a slot is not
+/// `Send`. A slot is not `Sync`.
 pub struct ReceiverSlot<'s, F: ReceiverFamily> {
     cell: *const ViewCell<F>,
     brand: PhantomData<fn(&'s ()) -> &'s ()>,
@@ -360,8 +379,21 @@ pub struct ReceiverSlot<'s, F: ReceiverFamily> {
 // returns; the lender clears the cell after that. The slot is not Sync and is
 // used through `&mut`, so one thread at a time uses the cell's request and
 // release state. The view itself is used only after checking that the
-// current thread lent it.
+// current thread lent it, which needs `std` to tell threads apart.
+#[cfg(feature = "std")]
 unsafe impl<F: ReceiverFamily> Send for ReceiverSlot<'_, F> {}
+// Without `std` a slot is not `Send`: the item below is ambiguous, and fails
+// to compile, if it is.
+#[cfg(not(feature = "std"))]
+const _: () = {
+    trait AmbiguousIfSend<A> {
+        fn some_item() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    struct IsSend;
+    impl<T: ?Sized + Send> AmbiguousIfSend<IsSend> for T {}
+    let _ = <ReceiverSlot<'static, crate::Direct<()>> as AmbiguousIfSend<_>>::some_item;
+};
 
 impl<F: ReceiverFamily> fmt::Debug for ReceiverSlot<'_, F> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

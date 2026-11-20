@@ -4,7 +4,8 @@ use crate::{
     Lend, ReceiverAccess, ReceiverFamily, ReceiverSlot, ViewLoan,
     access::{ThreadMark, ViewCell},
 };
-use std::{fmt, pin::Pin, task::Waker};
+use alloc::vec::Vec;
+use core::{fmt, pin::Pin, task::Waker};
 
 /// The receivers a call lends views of: one family, or a tuple of 2 to 12
 /// elements, each a family or such a tuple.

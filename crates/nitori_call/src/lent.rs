@@ -172,14 +172,14 @@ use crate::{
     Start, ViewOperation,
     access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
 };
-use receivers::{LentReceivers, LentViews};
-use std::{
+use core::{
     fmt,
     marker::PhantomData,
     ops::ControlFlow,
     pin::Pin,
     task::{Context, Poll},
 };
+use receivers::{LentReceivers, LentViews};
 
 /// An access whose call is lent a view on every poll, so that using the view
 /// neither waits nor can end the poll. Other work runs only at `.await` and
@@ -398,7 +398,7 @@ mod receivers {
     //! outside this crate: a family, or a tuple of them.
     use super::LentSlot;
     use crate::{Accesses, Lend, ReceiverFamily, Receivers, ViewLoan};
-    use std::pin::Pin;
+    use core::pin::Pin;
 
     /// Receivers lent on every poll.
     pub trait LentReceivers: Receivers {

@@ -165,9 +165,19 @@
 //! fn assert_send<T: Send>(_: T) {}
 //! assert_send(Call::<Direct<Vec<u8>>, _>::new(Hold));
 //! ```
+#![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![warn(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::alloc_instead_of_core
+)]
 #![cfg_attr(feature = "tokio-sync", feature(impl_trait_in_assoc_type))]
 #![cfg_attr(feature = "fn-operation", feature(async_fn_traits, unboxed_closures))]
+
+extern crate alloc;
+#[cfg(all(feature = "std", not(test)))]
+extern crate std;
 
 #[macro_use]
 mod tuples;
@@ -197,7 +207,9 @@ pub use driver::{
     Drive, ReceiverScope, ViewAcquisition, drive, drive_composed,
 };
 mod lock;
-pub use lock::{Guarded, Lock, LockAcquisition, Locked, StdMutexAcquire};
+#[cfg(feature = "std")]
+pub use lock::StdMutexAcquire;
+pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 
 /// Generate an operation and its conveniences from an async function taking a
 /// receiver access first.
@@ -422,14 +434,14 @@ pub use nitori_call_macros::capability;
 /// Support for generated code; not a stable interface.
 #[doc(hidden)]
 pub mod __private {
-    use std::{
+    use core::{
         future::Future,
         pin::pin,
         task::{Context, Poll, Waker},
     };
 
     /// An emitter for operations that emit nothing.
-    pub fn detached() -> crate::Emitter<'static, std::convert::Infallible> {
+    pub fn detached() -> crate::Emitter<'static, core::convert::Infallible> {
         crate::Emitter::detached()
     }
 

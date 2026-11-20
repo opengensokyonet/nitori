@@ -1,5 +1,6 @@
 //! Receiver identity and optional synchronous view construction.
-use std::{marker::PhantomData, pin::Pin};
+use alloc::{boxed::Box, vec::Vec};
+use core::{marker::PhantomData, pin::Pin};
 
 /// A resource, or a temporary view, with one canonical execution family.
 pub trait Receiver {
@@ -59,7 +60,8 @@ macro_rules! direct_receiver {
     };
 }
 direct_receiver!(impl [T] for Vec<T>);
-direct_receiver!(impl [T] for std::collections::VecDeque<T>);
+direct_receiver!(impl [T] for alloc::collections::VecDeque<T>);
+#[cfg(feature = "std")]
 direct_receiver!(impl [T] for std::io::Cursor<T>);
 direct_receiver!(impl ['data, T] for &'data [T]);
 direct_receiver!(impl ['data, T] for &'data mut [T]);
@@ -86,7 +88,7 @@ impl<T: Receiver + Unpin + ?Sized> Receiver for &mut T {
         Pin::new(&mut **self.get_mut()).view()
     }
 }
-impl<P: std::ops::DerefMut + Unpin> Receiver for Pin<P>
+impl<P: core::ops::DerefMut + Unpin> Receiver for Pin<P>
 where
     P::Target: Receiver,
 {
@@ -103,7 +105,7 @@ direct_receiver!(impl [] for u8);
 direct_receiver!(impl [] for u32);
 direct_receiver!(impl [] for u64);
 direct_receiver!(impl [] for i32);
-direct_receiver!(impl [T] for std::cell::Cell<T>);
+direct_receiver!(impl [T] for core::cell::Cell<T>);
 
 /// A pinned resource borrow that keeps the resource's canonical family.
 #[derive(Debug)]
@@ -141,5 +143,5 @@ macro_rules! family_receiver {
         }
     };
 }
-direct_receiver!(impl [T: ?Sized] for std::rc::Rc<T>);
+direct_receiver!(impl [T: ?Sized] for alloc::rc::Rc<T>);
 direct_receiver!(impl [] for bool);

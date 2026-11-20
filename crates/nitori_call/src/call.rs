@@ -4,7 +4,8 @@ use crate::{
     access::{RootWaker, polled_directly},
     receivers::{Single, cells::CellSet},
 };
-use std::{
+use alloc::{sync::Arc, task::Wake, vec::Vec};
+use core::{
     cell::{Cell, OnceCell, UnsafeCell},
     convert::Infallible,
     fmt,
@@ -14,9 +15,10 @@ use std::{
     ops::ControlFlow,
     pin::Pin,
     ptr,
-    sync::{Arc, Mutex, PoisonError},
-    task::{Context, Poll, Wake, Waker},
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Context, Poll, Waker},
 };
+use futures_util::task::AtomicWaker;
 
 /// What an operation produces over family `F`, or over the families of a
 /// tuple, independent of the access it runs with: neither type can carry the
@@ -214,17 +216,22 @@ impl<V> Lend<V> {
 }
 
 /// Clears the lent views at the end of a poll, and poisons the call when the
-/// poll panics.
+/// poll panics: a poll that returns ends it with `finish`, so it is dropped
+/// only while a panic unwinds.
 struct LendGuard<'a, R: Receivers> {
     cells: &'a R::Cells,
     poisoned: &'a Cell<bool>,
 }
+impl<R: Receivers> LendGuard<'_, R> {
+    fn finish(self) {
+        self.cells.clear();
+        mem::forget(self);
+    }
+}
 impl<R: Receivers> Drop for LendGuard<'_, R> {
     fn drop(&mut self) {
         self.cells.clear();
-        if std::thread::panicking() {
-            self.poisoned.set(true);
-        }
+        self.poisoned.set(true);
     }
 }
 
@@ -234,53 +241,44 @@ impl<R: Receivers> Drop for LendGuard<'_, R> {
 /// A branch that waits is not woken then: its slot keeps its waker, and the
 /// call wakes it when the slot is lent a view or answered, right before
 /// polling the operation. The executor then wakes the waker it was polled
-/// with; for this call that is the intercepting waker, which drops wakes
-/// caused by that replay, since the operation is polled next, and passes
-/// other wakes to the caller.
+/// with; for this call that is the intercepting waker, which drops the
+/// wakes that reach it while the call wakes those branches, since the
+/// operation is polled next, and passes other wakes to the caller.
 pub(crate) struct Intercept {
-    caller: Mutex<Option<Waker>>,
-}
-
-thread_local! {
-    /// The interception state of the call whose branches this thread is
-    /// waking before polling its operation; null otherwise.
-    static REPLAYING: Cell<*const Intercept> = const { Cell::new(ptr::null()) };
+    /// The caller's waker, taken by the first wake after a poll registers it.
+    caller: AtomicWaker,
+    /// Whether the call is waking its waiting branches. Both the replay and
+    /// every wake change it by read-modify-write, so the writes a wake made
+    /// before a dropped wake happen before the poll that follows the replay.
+    replaying: AtomicBool,
 }
 
 impl Intercept {
     fn new() -> Self {
         Self {
-            caller: Mutex::new(None),
+            caller: AtomicWaker::new(),
+            replaying: AtomicBool::new(false),
         }
     }
-    /// Wake `branches`. The wakes this causes synchronously at this call's
-    /// intercepting waker are dropped; wakes reaching other calls are not.
-    fn replay(self: &Arc<Self>, branches: Vec<Waker>) {
-        struct Restore(*const Intercept);
-        impl Drop for Restore {
+    /// Wake `branches`. Every wake reaching this call's intercepting waker
+    /// meanwhile, from this thread or another, is dropped: the operation is
+    /// polled right after, which satisfies it. Wakes reaching other calls
+    /// are not.
+    fn replay(&self, branches: Vec<Waker>) {
+        struct Done<'a>(&'a AtomicBool);
+        impl Drop for Done<'_> {
             fn drop(&mut self) {
-                REPLAYING.set(self.0);
+                self.0.swap(false, Ordering::AcqRel);
             }
         }
-        let _restore = Restore(REPLAYING.replace(Arc::as_ptr(self)));
+        self.replaying.swap(true, Ordering::AcqRel);
+        let _done = Done(&self.replaying);
         for branch in branches {
             branch.wake();
         }
     }
     fn set_caller(&self, waker: &Waker) {
-        let mut caller = self.caller.lock().unwrap_or_else(PoisonError::into_inner);
-        if !caller
-            .as_ref()
-            .is_some_and(|caller| caller.will_wake(waker))
-        {
-            *caller = Some(waker.clone());
-        }
-    }
-    fn wake_caller(&self) {
-        let caller = self.caller.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(caller) = &*caller {
-            caller.wake_by_ref();
-        }
+        self.caller.register(waker);
     }
 }
 impl Wake for Intercept {
@@ -288,8 +286,9 @@ impl Wake for Intercept {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        if !ptr::eq(REPLAYING.get(), Arc::as_ptr(self)) {
-            self.wake_caller();
+        // A read-modify-write that leaves the flag as it is.
+        if !self.replaying.fetch_or(false, Ordering::AcqRel) {
+            self.caller.wake();
         }
     }
 }
@@ -593,7 +592,7 @@ where
         // SAFETY: the state is a field of the pinned call.
         let poll =
             unsafe { step_operation(state, emitted, start, &mut Context::from_waker(waker)) };
-        drop(guard);
+        guard.finish();
         // Even a poll that emits an item may leave a branch waiting.
         if intercepting.is_none() && cells.waiting() {
             intercept.get_or_init(|| Arc::new(Intercept::new()));

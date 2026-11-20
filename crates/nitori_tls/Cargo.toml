@@ -19,4 +19,5 @@ time = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 nitori_crypto_aws_lc = { workspace = true, features = ["fixed-x25519"] }
+nitori_call = { workspace = true, features = ["std"] }
 rustls.workspace = true

@@ -3,8 +3,7 @@ use crate::{
     Accesses, Emitter, Operation, Start,
     call::{InPlace, ItemCell, State, remaining, step_operation},
 };
-use futures_core::{FusedFuture, FusedStream, Stream};
-use std::{
+use core::{
     fmt,
     future::Future,
     marker::PhantomPinned,
@@ -12,6 +11,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
+use futures_core::{FusedFuture, FusedStream, Stream};
 
 type Running<A, Op> = <Op as Start<'static, A>>::Fut;
 type Output<A, Op> = <Op as Operation<<A as Accesses>::Families>>::Output;
@@ -72,7 +72,7 @@ where
     pub fn next(
         mut self: Pin<&mut Self>,
     ) -> impl Future<Output = Option<ControlFlow<Output<A, Op>, Yield<A, Op>>>> {
-        std::future::poll_fn(move |cx| self.as_mut().poll_next(cx))
+        core::future::poll_fn(move |cx| self.as_mut().poll_next(cx))
     }
 
     /// Run the child one step, until it emits an item or returns its final
@@ -81,7 +81,7 @@ where
     pub fn step(
         mut self: Pin<&mut Self>,
     ) -> impl Future<Output = ControlFlow<Output<A, Op>, Yield<A, Op>>> {
-        std::future::poll_fn(move |cx| {
+        core::future::poll_fn(move |cx| {
             assert!(!self.finished, "`step` after the final value");
             self.as_mut().poll_step(false, cx)
         })

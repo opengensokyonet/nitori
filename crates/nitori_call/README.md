@@ -5,6 +5,13 @@ resource that their caller lends for one poll at a time. An operation can await
 other operations and ordinary futures, yield items, and return a final value.
 It is experimental and requires the repository's pinned Rust nightly.
 
+It builds without the standard library, with `alloc`. The default `std`
+feature makes slots and accesses `Send`, checked against the thread polling
+their call, and adds the executor of `std::sync::Mutex` and the receiver of
+`std::io::Cursor`. Without it there is no thread to check against, so a slot
+is not `Send`, and neither is a call whose operation keeps one across an
+await.
+
 ## Why calls?
 
 A poll hands a future only a context with a waker, so a future holds what it
@@ -451,9 +458,10 @@ lends it back for one capability call.
 `ReceiverAccess` is implemented by the slot a root operation receives, by
 `Composed`, and by `&mut A`; downstream crates do not implement it. Each use
 borrows the access mutably, so two operations cannot use it at the same time,
-and it never leaves the operation. An access is `Send` but not `Sync`: within
-a poll it may move to a scoped thread, which can ask for a view, but only the
-thread polling the call may use the view, and an access elsewhere panics.
+and it never leaves the operation. With the `std` feature an access is `Send` but
+not `Sync`: within a poll it may move to a scoped thread, which can ask for a
+view, but only the thread polling the call may use the view, and an access
+elsewhere panics. Without `std` an access is neither `Send` nor `Sync`.
 Hand-written leaf operations call `poll_access`, which lends the current view
 to a callback:
 
@@ -485,8 +493,8 @@ no view.
 delivers each event, `poll_return_with` only the final value. Its
 type can be named, so a call can be a field of a connection that lends another
 of its fields on each poll; successive polls may lend views of different
-resources. A call is `Send` when everything its operation keeps apart from the
-access is `Send`, even if the resource is not. `DynCall` is its dyn-compatible
+resources. With the `std` feature, a call is `Send` when everything its operation keeps
+apart from the access is `Send`, even if the resource is not. `DynCall` is its dyn-compatible
 form. `is_terminated` tells whether the call has delivered its final value.
 
 A call over several receivers, `Call<(F1, F2), Op>`, gives its operation a
@@ -814,7 +822,7 @@ fn main() {
 }
 ```
 
-`&std::sync::Mutex<T>` is an executor whenever `T` is an `Unpin` receiver;
+With the `std` feature, `&std::sync::Mutex<T>` is an executor whenever `T` is an `Unpin` receiver;
 it blocks the polling thread while another thread holds the lock and panics
 when the lock is poisoned. The `tokio-sync` feature adds
 `&tokio::sync::Mutex<T>`, which needs nightly for its lock future, and the

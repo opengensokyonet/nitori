@@ -9,13 +9,19 @@ license = "Apache-2.0 OR MIT"
 pin-project-lite.workspace = true
 futures-core.workspace = true
 nitori_call_macros.workspace = true
+futures-util.workspace = true
 
 [features]
+default = ["std"]
+# The parts that need the standard library: slots that are `Send`, checked
+# against the thread polling their call, and the implementations for
+# `std::sync::Mutex` and `std::io::Cursor`.
+std = []
 bytes = ["dep:bytes"]
 # Run operations on values behind `tokio::sync::Mutex`; needs nightly.
 tokio-sync = ["dep:tokio", "tokio/sync"]
 # Run operations on values behind `futures::lock::Mutex`.
-futures-lock = ["dep:futures-util", "futures-util/std"]
+futures-lock = ["futures-util/std"]
 # Write operations as async closures with `fn_operation`; needs nightly.
 fn-operation = []
 
@@ -24,10 +30,6 @@ workspace = true
 optional = true
 
 [dependencies.tokio]
-workspace = true
-optional = true
-
-[dependencies.futures-util]
 workspace = true
 optional = true
 

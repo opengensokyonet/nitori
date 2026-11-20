@@ -883,6 +883,71 @@ fn a_wrapper_that_substitutes_the_waker_is_not_woken_by_requests() {
     assert_eq!(output, b"ok");
 }
 
+/// Polls its future with a waker of its own, which forwards each wake from
+/// another thread.
+struct SubstituteAcrossThreads<F>(F);
+impl<F: Future> Future for SubstituteAcrossThreads<F> {
+    type Output = F::Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        struct Forward(Waker);
+        impl Wake for Forward {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                std::thread::scope(|scope| {
+                    scope.spawn(|| self.0.wake_by_ref());
+                });
+            }
+        }
+        let waker = Waker::from(Arc::new(Forward(cx.waker().clone())));
+        // SAFETY: the future is a pinned field, never moved.
+        unsafe { self.map_unchecked_mut(|this| &mut this.0) }.poll(&mut Context::from_waker(&waker))
+    }
+}
+
+#[call]
+async fn read_record_substituted_across_threads(
+    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    output: &mut Vec<u8>,
+) -> Record {
+    SubstituteAcrossThreads(read_record(io, output)).await
+}
+
+#[test]
+fn a_wake_from_another_thread_while_branches_are_woken_is_dropped() {
+    let mut feed = Feed::new(b"\x02");
+    let (wakes, waker) = WakeCount::new();
+    let mut cx = Context::from_waker(&waker);
+    let mut output = Vec::new();
+    {
+        let mut call = pin!(Call::new(ReadRecordSubstitutedAcrossThreads::new(
+            &mut output
+        )));
+        let mut lend =
+            |mut call: Pin<&mut Call<Direct<Feed>, ReadRecordSubstitutedAcrossThreads>>,
+             feed: &mut Feed| {
+                match call.as_mut().poll_return_with(None, &mut cx) {
+                    CallPoll::NeedsView => call
+                        .poll_return_with(Some(Lend::Fixed(pin!(Pin::new(feed).view()))), &mut cx),
+                    poll => poll,
+                }
+            };
+        assert_eq!(lend(call.as_mut(), &mut feed), CallPoll::Pending);
+        assert_eq!(wakes.get(), 1);
+        // A wake from another thread outside a replay reaches the caller.
+        feed.data.extend(*b"ok");
+        feed.waker.take().unwrap().wake();
+        assert_eq!(wakes.get(), 2);
+        // Lending the view wakes the waiting branch, whose waker wakes the
+        // call from another thread: the operation is polled right after, so
+        // that wake is dropped too.
+        assert_eq!(lend(call.as_mut(), &mut feed), CallPoll::Ready(Ok(2)));
+        assert_eq!(wakes.get(), 2);
+    }
+    assert_eq!(output, b"ok");
+}
+
 #[call]
 async fn read_release_read(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
     let [first] = read_array::<1, _>(io).await?;

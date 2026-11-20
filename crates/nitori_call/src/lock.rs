@@ -1,11 +1,12 @@
 //! Locks as executors: an operation runs on the value behind a lock, which
 //! is locked only on polls whose operation uses it.
+use crate::{Compose, Lend, Receiver, ReceiverFamily, ViewAcquisition, call::InPlace};
+#[cfg(any(feature = "std", feature = "tokio-sync", feature = "futures-lock"))]
 use crate::{
-    Compose, Drive, Lend, Receiver, ReceiverFamily, RootOperation, ViewAcquisition,
-    call::InPlace,
+    Drive, RootOperation,
     driver::{CallExecutor, Composing, drive_composed},
 };
-use std::{
+use core::{
     fmt,
     future::Future,
     marker::PhantomData,
@@ -17,9 +18,9 @@ use std::{
 /// A lock whose guard gives exclusive access to its value, acquired by a
 /// future.
 ///
-/// Implemented for `std::sync::Mutex`, for `tokio::sync::Mutex` with the
-/// `tokio-sync` feature and for `futures::lock::Mutex` with the
-/// `futures-lock` feature. `std::sync::Mutex` blocks the polling thread while
+/// Implemented for `std::sync::Mutex` with the `std` feature, for
+/// `tokio::sync::Mutex` with the `tokio-sync` feature and for
+/// `futures::lock::Mutex` with the `futures-lock` feature. `std::sync::Mutex` blocks the polling thread while
 /// another thread holds it, and a poisoned one panics.
 pub trait Lock {
     type Value: ?Sized;
@@ -112,6 +113,7 @@ where
 }
 
 /// The execution of an operation on the value behind a lock.
+#[cfg(any(feature = "std", feature = "tokio-sync", feature = "futures-lock"))]
 type OnLock<'lock, L, Op> = Drive<'lock, LockAcquisition<'lock, L>, Op, Composing<Guarded>>;
 
 macro_rules! lock_executor {
@@ -150,8 +152,10 @@ macro_rules! lock_executor {
 /// The acquisition of a `std::sync::Mutex`: it locks when polled, and holds
 /// no guard before, so an acquisition waiting for it can move to another
 /// thread.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct StdMutexAcquire<'a, T: ?Sized>(&'a std::sync::Mutex<T>);
+#[cfg(feature = "std")]
 impl<'a, T: ?Sized> Future for StdMutexAcquire<'a, T> {
     type Output = std::sync::MutexGuard<'a, T>;
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
@@ -159,6 +163,7 @@ impl<'a, T: ?Sized> Future for StdMutexAcquire<'a, T> {
     }
 }
 lock_executor!(
+    #[cfg(feature = "std")]
     std::sync::Mutex,
     std::sync::MutexGuard<'a, T>,
     StdMutexAcquire<'a, T>,

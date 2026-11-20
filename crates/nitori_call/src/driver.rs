@@ -7,8 +7,7 @@ use crate::{
     RootOperation, ViewLoan,
     call::{InPlace, remaining},
 };
-use futures_core::{FusedFuture, FusedStream, Stream};
-use std::{
+use core::{
     fmt,
     future::Future,
     marker::PhantomData,
@@ -16,6 +15,7 @@ use std::{
     pin::{Pin, pin},
     task::{Context, Poll, ready},
 };
+use futures_core::{FusedFuture, FusedStream, Stream};
 
 type ViewOf<'view, F> = <F as ReceiverFamily>::ReceiverView<'view>;
 
@@ -279,7 +279,7 @@ mod hosts {
     //! The receivers a `BoundCall` constructs views of. Unnameable outside
     //! this crate: a receiver, or a tuple of them.
     use crate::{CallPoll, Lend, Receiver, Receivers, RootOperation, ViewLoan};
-    use std::{
+    use core::{
         ops::ControlFlow,
         pin::{Pin, pin},
         task::Context,
@@ -482,7 +482,7 @@ mod lend {
     //! How `Drive` lends what its acquisitions delivered. Unnameable outside
     //! this crate: lending each view as it is, or composing it first.
     use crate::{Compose, Lend, ReceiverFamily, ViewLoan};
-    use std::pin::{Pin, pin};
+    use core::pin::{Pin, pin};
 
     /// Continues with the lend of one slot.
     pub trait SlotVisitor<F: ReceiverFamily> {
@@ -618,7 +618,7 @@ mod source {
     //! outside this crate.
     use super::{Constructed, ViewAcquisition, ViewOf};
     use crate::{Lend, Receiver, ReceiverFamily};
-    use std::{
+    use core::{
         pin::{Pin, pin},
         task::{Context, Poll},
     };

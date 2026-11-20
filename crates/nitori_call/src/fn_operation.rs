@@ -1,6 +1,6 @@
 //! Operations written as async closures.
 use crate::{Emitter, Operation, Receivers, Start};
-use std::{convert::Infallible, fmt, marker::PhantomData, ops::AsyncFnOnce};
+use core::{convert::Infallible, fmt, marker::PhantomData, ops::AsyncFnOnce};
 
 /// An operation that runs an async closure over the slots of `R`; see
 /// [`fn_operation`].

@@ -3,7 +3,7 @@ use crate::{
     LentAccess, ReceiverAccess, ReceiverFamily, ViewOperation,
     access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
 };
-use std::{
+use core::{
     marker::PhantomData,
     ops::DerefMut,
     pin::{Pin, pin},
