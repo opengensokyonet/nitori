@@ -1,3 +1,9 @@
+#![cfg_attr(not(test), no_std)]
+#![warn(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::alloc_instead_of_core
+)]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
