@@ -6,6 +6,7 @@
 //! that X.509 uses, and keeps every element's exact bytes, so that a
 //! structure can be rebuilt from its parts unchanged.
 
+use alloc::vec::Vec;
 use snafu::Snafu;
 use time::UtcDateTime;
 

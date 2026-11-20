@@ -13,7 +13,9 @@
 //! [`CertifiedKey::from_pem_chain`] reads the chain from PEM.
 
 use crate::{alert::AlertDescription, server::targets::SelectedTarget};
+use alloc::vec::Vec;
 use bytes::Bytes;
+use core::fmt;
 use nitori_crypto::{SignatureScheme, SigningKey};
 use rustls_pki_types::pem::{self, PemObject, SectionKind};
 use snafu::{ResultExt, Snafu};
@@ -145,6 +147,35 @@ impl<K> CertifiedKey<K> {
 #[snafu(display("certificate chain is empty"))]
 pub struct EmptyChainError;
 
+/// A failure of the PEM reader of rustls-pki-types, as an error with or
+/// without the standard library.
+///
+/// rustls-pki-types implements the error trait of the standard library for
+/// it only with its `std` feature; this type implements
+/// `core::error::Error` for it, and shows it as rustls-pki-types does.
+pub struct PemError(pem::Error);
+
+impl PemError {
+    /// The PEM reader's failure.
+    pub fn get(&self) -> &pem::Error {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PemError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for PemError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl core::error::Error for PemError {}
+
 /// A certificate chain in PEM cannot make a [`CertifiedKey`].
 #[derive(Debug, Snafu)]
 pub enum PemChainError {
@@ -152,7 +183,8 @@ pub enum PemChainError {
     #[snafu(display("malformed PEM"))]
     Malformed {
         /// The PEM reader's failure.
-        source: pem::Error,
+        #[snafu(source(from(pem::Error, PemError)))]
+        source: PemError,
     },
     /// The text has no CERTIFICATE section.
     #[snafu(display("no certificate in PEM"))]

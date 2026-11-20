@@ -15,6 +15,7 @@ use crate::{
     version::ProtocolVersion,
     width::Width,
 };
+use alloc::vec::Vec;
 use nitori_crypto::NamedGroup;
 use snafu::{ResultExt, Snafu};
 
@@ -422,6 +423,7 @@ pub mod codec {
         version::ProtocolVersion,
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_crypto::NamedGroup;
     use nitori_io::{SplitTo, error::IncompleteError};

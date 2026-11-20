@@ -12,6 +12,7 @@
 //! writes both.
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
+use alloc::vec::Vec;
 use nitori_crypto::{NamedGroup, SignatureScheme};
 use snafu::Snafu;
 
@@ -251,6 +252,7 @@ pub mod codec {
         vector::{read_length, write_length},
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};

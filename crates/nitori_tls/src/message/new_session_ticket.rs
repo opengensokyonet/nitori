@@ -9,6 +9,7 @@ use crate::{
     vector::LengthOutOfRangeError,
     width::Width,
 };
+use alloc::vec::Vec;
 use snafu::{ResultExt, Snafu};
 
 /// The lengths an extension block of a NewSessionTicket may have.
@@ -261,6 +262,7 @@ pub mod codec {
         },
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};

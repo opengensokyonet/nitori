@@ -34,6 +34,7 @@ use nitori_call::{LentCall, Receiver};
 use nitori_crypto::AeadAlgorithm;
 use nitori_crypto::{ExpandLength, NamedGroup};
 use nitori_crypto_aws_lc::AwsLcBackend;
+use nitori_sync::MutexSynchronization;
 use nitori_tls::schedule::TrafficSecret;
 use nitori_tls::{
     cipher_suite::CipherSuite,
@@ -76,6 +77,7 @@ use rustls::{
 };
 use std::{
     collections::HashMap,
+    hash::RandomState,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -305,8 +307,14 @@ mod server_engine {
 
     /// What the server keeps across connections.
     struct Server {
-        clock: Arc<ManualClock>,
-        tickets: ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
+        clock: Arc<ManualClock<MutexSynchronization>>,
+        tickets: ZeroRttOnceTicketTable<
+            &'static str,
+            AwsLcBackend,
+            Arc<ManualClock<MutexSynchronization>>,
+            MutexSynchronization,
+            RandomState,
+        >,
         groups: Vec<NamedGroup>,
         group_preference: GroupPreference,
     }
@@ -528,8 +536,14 @@ mod client_engine {
 
     /// What the client keeps across connections.
     struct Client {
-        clock: Arc<ManualClock>,
-        tickets: Arc<TakeOnceTicketMap<Arc<ManualClock>>>,
+        clock: Arc<ManualClock<MutexSynchronization>>,
+        tickets: Arc<
+            TakeOnceTicketMap<
+                Arc<ManualClock<MutexSynchronization>>,
+                MutexSynchronization,
+                RandomState,
+            >,
+        >,
         key_shares: Vec<NamedGroup>,
     }
 
@@ -599,7 +613,7 @@ mod client_engine {
         let key_log = Arc::new(Secrets::default());
         let engine = ClientHandshake::new(
             AwsLcBackend,
-            PreferenceOffering::new(
+            PreferenceOffering::<MutexSynchronization, RandomState>::new(
                 vec![
                     CipherSuite::TLS_AES_128_GCM_SHA256,
                     CipherSuite::TLS_AES_256_GCM_SHA384,

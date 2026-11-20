@@ -15,12 +15,12 @@ use crate::{
     cipher_suite::{CipherSuite, SupportedSuite},
     client::ServerTarget,
 };
+use alloc::{vec, vec::Vec};
+use core::{fmt, hash::BuildHasher};
+use hashbrown::HashMap;
 use nitori_crypto::{Hash, KeyExchange, NamedGroup, SignatureScheme, SignatureVerify, Supported};
+use nitori_sync::{SharedState as _, Synchronization};
 use snafu::{Snafu, ensure};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, PoisonError},
-};
 
 /// What a certificate verifier accepts, which the ClientHello states.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -219,19 +219,43 @@ pub trait OfferAttempt<C> {
 /// configured key share groups that the backend supports, or, when none
 /// is, to the first offered group. Clones share the memory, which holds at
 /// most [`PreferenceOffering::MEMORY_CAPACITY`] targets.
-#[derive(Clone, Debug)]
-pub struct PreferenceOffering {
+///
+/// The memory is shared state of the family `Y`, its targets hashed by `S`.
+pub struct PreferenceOffering<Y: Synchronization, S> {
     suites: Vec<CipherSuite>,
     groups: Vec<NamedGroup>,
     key_share_groups: Vec<NamedGroup>,
-    retried: Arc<Mutex<HashMap<ServerTarget, NamedGroup>>>,
+    retried: Y::SharedState<HashMap<ServerTarget, NamedGroup, S>>,
 }
 
-impl PreferenceOffering {
+impl<Y: Synchronization, S> Clone for PreferenceOffering<Y, S> {
+    fn clone(&self) -> Self {
+        Self {
+            suites: self.suites.clone(),
+            groups: self.groups.clone(),
+            key_share_groups: self.key_share_groups.clone(),
+            retried: self.retried.clone(),
+        }
+    }
+}
+
+impl<Y: Synchronization, S> fmt::Debug for PreferenceOffering<Y, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreferenceOffering")
+            .field("suites", &self.suites)
+            .field("groups", &self.groups)
+            .field("key_share_groups", &self.key_share_groups)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Y: Synchronization, S> PreferenceOffering<Y, S> {
     /// The most targets whose retried group the memory holds; past it, a
     /// new target replaces an arbitrary one.
     pub const MEMORY_CAPACITY: usize = 1024;
+}
 
+impl<Y: Synchronization, S: BuildHasher + Default> PreferenceOffering<Y, S> {
     /// Offers `suites` and `groups`, most preferred first, with key shares
     /// for `key_share_groups`.
     ///
@@ -253,13 +277,14 @@ impl PreferenceOffering {
             suites,
             groups,
             key_share_groups,
-            retried: Arc::default(),
+            retried: Y::share(HashMap::default()),
         })
     }
+}
 
+impl<Y: Synchronization, S: BuildHasher> PreferenceOffering<Y, S> {
     fn remembered(&self, target: &ServerTarget) -> Option<NamedGroup> {
-        let memory = self.retried.lock().unwrap_or_else(PoisonError::into_inner);
-        memory.get(target).copied()
+        self.retried.with(|memory| memory.get(target).copied())
     }
 }
 
@@ -277,15 +302,20 @@ impl KeyShareNotListedError {
     }
 }
 
-impl<C: Hash + KeyExchange + SignatureVerify> Offering<C> for PreferenceOffering {
-    type Attempt = PreferenceAttempt;
+impl<C, Y, S> Offering<C> for PreferenceOffering<Y, S>
+where
+    C: Hash + KeyExchange + SignatureVerify,
+    Y: Synchronization,
+    S: BuildHasher,
+{
+    type Attempt = PreferenceAttempt<Y, S>;
 
     fn offer(
         &self,
         backend: &C,
         target: &ServerTarget,
         verifier: &VerifierSupport,
-    ) -> Result<(Offer<C>, PreferenceAttempt), InvalidOfferError> {
+    ) -> Result<(Offer<C>, PreferenceAttempt<Y, S>), InvalidOfferError> {
         let suites = self
             .suites
             .iter()
@@ -327,7 +357,7 @@ impl<C: Hash + KeyExchange + SignatureVerify> Offering<C> for PreferenceOffering
             verifier.signed_certificate_timestamps(),
         )?;
         let attempt = PreferenceAttempt {
-            retried: Arc::clone(&self.retried),
+            retried: self.retried.clone(),
             target: target.clone(),
         };
         Ok((offer, attempt))
@@ -336,22 +366,31 @@ impl<C: Hash + KeyExchange + SignatureVerify> Offering<C> for PreferenceOffering
 
 /// One offer of a [`PreferenceOffering`]: a HelloRetryRequest it reports
 /// becomes the target's remembered group.
-#[derive(Debug)]
-pub struct PreferenceAttempt {
-    retried: Arc<Mutex<HashMap<ServerTarget, NamedGroup>>>,
+pub struct PreferenceAttempt<Y: Synchronization, S> {
+    retried: Y::SharedState<HashMap<ServerTarget, NamedGroup, S>>,
     target: ServerTarget,
 }
 
-impl<C> OfferAttempt<C> for PreferenceAttempt {
+impl<Y: Synchronization, S> fmt::Debug for PreferenceAttempt<Y, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreferenceAttempt")
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<C, Y: Synchronization, S: BuildHasher> OfferAttempt<C> for PreferenceAttempt<Y, S> {
     fn retried(self, group: Supported<C, NamedGroup>) {
-        let mut memory = self.retried.lock().unwrap_or_else(PoisonError::into_inner);
-        if memory.len() >= PreferenceOffering::MEMORY_CAPACITY
-            && !memory.contains_key(&self.target)
-            && let Some(evicted) = memory.keys().next().cloned()
-        {
-            memory.remove(&evicted);
-        }
-        memory.insert(self.target, group.algorithm());
+        let Self { retried, target } = self;
+        retried.with(|memory| {
+            if memory.len() >= PreferenceOffering::<Y, S>::MEMORY_CAPACITY
+                && !memory.contains_key(&target)
+                && let Some(evicted) = memory.keys().next().cloned()
+            {
+                memory.remove(&evicted);
+            }
+            memory.insert(target, group.algorithm());
+        });
     }
 }
 
@@ -367,9 +406,13 @@ mod tests {
     };
     use nitori_crypto::{KeyExchange, NamedGroup, SignatureScheme, SignatureVerify};
     use nitori_crypto_aws_lc::AwsLcBackend;
+    use nitori_sync::RefCellSynchronization;
+    use std::hash::RandomState;
 
-    fn offering() -> PreferenceOffering {
-        PreferenceOffering::new(
+    type Preferences = PreferenceOffering<RefCellSynchronization, RandomState>;
+
+    fn offering() -> Preferences {
+        Preferences::new(
             vec![
                 CipherSuite::TLS_AES_128_GCM_SHA256,
                 CipherSuite::TLS_AES_128_CCM_SHA256,
@@ -448,7 +491,7 @@ mod tests {
             [NamedGroup::SECP256R1]
         );
         // No retry this time: the memory stays.
-        drop::<super::PreferenceAttempt>(attempt);
+        drop::<super::PreferenceAttempt<RefCellSynchronization, RandomState>>(attempt);
         let (offer, _) = offering
             .clone()
             .offer(&backend, &target, &verifier())
@@ -464,7 +507,7 @@ mod tests {
     #[test]
     fn key_shares_are_of_listed_groups() {
         assert_eq!(
-            PreferenceOffering::new(
+            Preferences::new(
                 vec![],
                 vec![NamedGroup::X25519],
                 vec![NamedGroup::SECP256R1]
@@ -511,7 +554,7 @@ mod tests {
 
     #[test]
     fn without_a_supported_key_share_group_the_first_group_carries_one() {
-        let offering = PreferenceOffering::new(
+        let offering = Preferences::new(
             vec![CipherSuite::TLS_AES_128_GCM_SHA256],
             vec![NamedGroup::SECP384R1, NamedGroup::new(0x9999)],
             vec![NamedGroup::new(0x9999)],

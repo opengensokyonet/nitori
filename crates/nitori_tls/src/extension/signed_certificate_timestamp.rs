@@ -6,6 +6,7 @@
 //! certificate, which this crate does not interpret.
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
+use alloc::vec::Vec;
 
 /// A nonempty list of serialized SCTs, each of 1 to 65535 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -57,6 +58,7 @@ pub mod codec {
         vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};

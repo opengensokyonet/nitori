@@ -18,12 +18,12 @@ use crate::clock::elapsed;
 use crate::extension::signed_certificate_timestamp::codec::{
     ReadSignedCertificateTimestampListError, read_signed_certificate_timestamp_list,
 };
+use alloc::sync::Arc;
+use alloc::{string::String, vec::Vec};
+use core::{fmt, time::Duration};
 use nitori_crypto::{Hash, HashAlgorithm, RunningHash, SignatureScheme, SignatureVerify};
+use nitori_sync::{SharedState as _, Synchronization};
 use snafu::{ResultExt, Snafu};
-use std::{
-    sync::{Arc, PoisonError, RwLock},
-    time::Duration,
-};
 use time::UtcDateTime;
 
 /// The extension that holds the embedded SCT list,
@@ -211,15 +211,25 @@ pub enum StaleLogListAction {
 /// The list can be replaced while the policy is in use. Once it is older
 /// than the maximum age, the policy acts by its [`StaleLogListAction`]: by
 /// default it rejects every certificate, and the maximum age is
-/// [`EmbeddedSctPolicy::CHROME_MAX_LIST_AGE`].
-#[derive(Debug)]
-pub struct EmbeddedSctPolicy {
-    list: RwLock<Arc<LogList>>,
+/// [`EmbeddedSctPolicy::CHROME_MAX_LIST_AGE`]. The list is shared state of
+/// the family `Y`.
+pub struct EmbeddedSctPolicy<Y: Synchronization> {
+    list: Y::SharedState<Arc<LogList>>,
     max_list_age: Duration,
     when_stale: StaleLogListAction,
 }
 
-impl EmbeddedSctPolicy {
+impl<Y: Synchronization> fmt::Debug for EmbeddedSctPolicy<Y> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmbeddedSctPolicy")
+            .field("list", &self.list())
+            .field("max_list_age", &self.max_list_age)
+            .field("when_stale", &self.when_stale)
+            .finish()
+    }
+}
+
+impl<Y: Synchronization> EmbeddedSctPolicy<Y> {
     /// The age past which Chrome stops checking CT: 70 days.
     pub const CHROME_MAX_LIST_AGE: Duration = Duration::from_secs(70 * 86_400);
 
@@ -240,7 +250,7 @@ impl EmbeddedSctPolicy {
         when_stale: StaleLogListAction,
     ) -> Self {
         Self {
-            list: RwLock::new(Arc::new(list)),
+            list: Y::share(Arc::new(list)),
             max_list_age,
             when_stale,
         }
@@ -249,15 +259,18 @@ impl EmbeddedSctPolicy {
     /// Replaces the log list; checks in progress keep the list they began
     /// with.
     pub fn replace_list(&self, list: LogList) {
-        *self.list.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(list);
+        let list = Arc::new(list);
+        self.list.with(|current| *current = list);
     }
 
     fn list(&self) -> Arc<LogList> {
-        Arc::clone(&self.list.read().unwrap_or_else(PoisonError::into_inner))
+        self.list.with(|list| Arc::clone(list))
     }
 }
 
-impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
+impl<C: Hash + SignatureVerify, Y: Synchronization> super::Transparency<C>
+    for EmbeddedSctPolicy<Y>
+{
     type Error = TransparencyError;
 
     fn check(

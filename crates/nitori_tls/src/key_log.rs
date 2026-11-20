@@ -13,6 +13,7 @@
 //! implementation's.
 
 use crate::message::HelloRandom;
+use alloc::sync::Arc;
 
 /// Receives the secrets of a handshake as the engine derives them.
 pub trait KeyLog {
@@ -64,7 +65,7 @@ impl<Log: KeyLog + ?Sized> KeyLog for &Log {
     }
 }
 
-impl<Log: KeyLog + ?Sized> KeyLog for std::sync::Arc<Log> {
+impl<Log: KeyLog + ?Sized> KeyLog for Arc<Log> {
     fn log(&self, label: KeyLogLabel, client_random: &HelloRandom, secret: &[u8]) {
         (**self).log(label, client_random, secret);
     }

@@ -38,6 +38,7 @@ use crate::{
     extension::early_data::MaxEarlyDataSize,
     message::{LegacySessionId, codec::ReadHandshakeMessageError},
 };
+use alloc::vec::Vec;
 use core::{convert::Infallible, pin::Pin};
 use nitori_call::capability;
 use nitori_io::{

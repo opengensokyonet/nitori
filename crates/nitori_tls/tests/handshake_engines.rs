@@ -31,6 +31,7 @@ use nitori_call::{LentCall, Receiver};
 use nitori_crypto::{ExpandLength, NamedGroup};
 use nitori_crypto::{Hash as _, HashAlgorithm, KeyExchange, SignatureScheme, StartedExchange as _};
 use nitori_crypto_aws_lc::AwsLcBackend;
+use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     alert::AlertDescription,
     cipher_suite::CipherSuite,
@@ -86,6 +87,7 @@ use nitori_tls::{
 };
 use std::{
     collections::VecDeque,
+    hash::RandomState,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -243,10 +245,22 @@ fn run<SE, SF, CE, CF>(
 
 /// What both sides keep across connections.
 struct Endpoints {
-    clock: Arc<ManualClock>,
-    server_tickets: ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
-    client_tickets: Arc<TakeOnceTicketMap<Arc<ManualClock>>>,
-    offering: PreferenceOffering,
+    clock: Arc<ManualClock<MutexSynchronization>>,
+    server_tickets: ZeroRttOnceTicketTable<
+        &'static str,
+        AwsLcBackend,
+        Arc<ManualClock<MutexSynchronization>>,
+        MutexSynchronization,
+        RandomState,
+    >,
+    client_tickets: Arc<
+        TakeOnceTicketMap<
+            Arc<ManualClock<MutexSynchronization>>,
+            MutexSynchronization,
+            RandomState,
+        >,
+    >,
+    offering: PreferenceOffering<MutexSynchronization, RandomState>,
     server_protocols: Vec<ProtocolName<Bytes>>,
     group_preference: GroupPreference,
     server_groups: Vec<NamedGroup>,
@@ -285,7 +299,7 @@ fn h3() -> ProtocolName<Bytes> {
     ProtocolName::new(Bytes::from_static(b"h3")).unwrap()
 }
 
-fn offering(key_shares: &[NamedGroup]) -> PreferenceOffering {
+fn offering(key_shares: &[NamedGroup]) -> PreferenceOffering<MutexSynchronization, RandomState> {
     PreferenceOffering::new(
         vec![
             CipherSuite::TLS_AES_128_GCM_SHA256,
@@ -540,6 +554,31 @@ fn alert_of<T, F: nitori_tls::alert::CallsForAlert, E: core::fmt::Debug>(
     }
 }
 
+/// With the family of mutexes, the ready-made capabilities that connections
+/// share can be shared between threads.
+#[test]
+fn the_shared_capabilities_of_the_mutex_family_are_send_and_sync() {
+    use nitori_tls::verify::{AnchorStore, SpkiDistrustList, transparency::EmbeddedSctPolicy};
+    type Clock = Arc<ManualClock<MutexSynchronization>>;
+    fn shared<T: Send + Sync>() {}
+    shared::<ManualClock<MutexSynchronization>>();
+    shared::<TakeOnceTicketMap<Clock, MutexSynchronization, RandomState>>();
+    shared::<PreferenceOffering<MutexSynchronization, RandomState>>();
+    shared::<
+        ZeroRttOnceTicketTable<
+            &'static str,
+            AwsLcBackend,
+            Clock,
+            MutexSynchronization,
+            RandomState,
+        >,
+    >();
+    shared::<PreopenedLayers<PassThroughLayers, MutexSynchronization>>();
+    shared::<AnchorStore<MutexSynchronization>>();
+    shared::<SpkiDistrustList<MutexSynchronization>>();
+    shared::<EmbeddedSctPolicy<MutexSynchronization>>();
+}
+
 #[test]
 fn the_calls_of_both_engines_are_send() {
     fn assert_send<T: Send>(_: &T) {}
@@ -756,7 +795,10 @@ fn a_deciding_server_hands_its_openings_to_the_engine_across_a_retry() {
     let firsts = Arc::new(Mutex::new(Vec::new()));
     let server = server_handshake!(
         &endpoints,
-        PreopenedLayers::new(opened, RecordingLayers(Arc::clone(&firsts))),
+        PreopenedLayers::<_, MutexSynchronization>::new(
+            opened,
+            RecordingLayers(Arc::clone(&firsts))
+        ),
         PreselectedTarget::new(selected)
     );
     fn assert_send<T: Send>(_: &T) {}

@@ -9,6 +9,7 @@ use crate::{
     },
     width::Width,
 };
+use alloc::vec::Vec;
 use nitori_crypto::NamedGroup;
 
 /// An EncryptedExtensions message: the extensions of the server that are
@@ -168,6 +169,7 @@ pub mod codec {
         vector::{ExcessBytesError, write_header, write_length},
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};

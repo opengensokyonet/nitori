@@ -53,6 +53,7 @@ use crate::{
     vector::LengthOutOfRangeError,
     width::Width,
 };
+use alloc::vec::Vec;
 use bytes::Bytes;
 use core::marker::PhantomData;
 use nitori_crypto::{

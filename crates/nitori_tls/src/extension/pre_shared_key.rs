@@ -10,6 +10,7 @@
 //! the bytes before [`OfferedPsks::binders_len`] and writes them in place.
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
+use alloc::vec::Vec;
 use snafu::{ResultExt, Snafu};
 
 /// One offered identity: an opaque label, such as a ticket, and the
@@ -218,6 +219,7 @@ pub mod codec {
         vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};

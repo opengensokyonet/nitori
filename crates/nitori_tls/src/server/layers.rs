@@ -25,7 +25,7 @@ use core::{
     convert::Infallible,
     future::{Future, Ready, ready},
 };
-use std::sync::{Mutex, PoisonError};
+use nitori_sync::{SharedState as _, Synchronization};
 
 /// The ClientHello a handshake continues with, after its layers.
 pub trait AcceptedHello {
@@ -102,32 +102,30 @@ impl HelloLayers for PassThroughLayers {
 /// The first [`HelloLayers::open`] hands that opening over and ignores the
 /// ClientHello it is given, which is the one already opened. A second
 /// ClientHello, after a HelloRetryRequest, is opened by `L` with the first
-/// opening, as the handshake hands it over.
-pub struct PreopenedLayers<L: HelloLayers> {
-    preopened: Mutex<Option<L::Accepted>>,
+/// opening, as the handshake hands it over. The opening waits as shared
+/// state of the family `Y`.
+pub struct PreopenedLayers<L: HelloLayers, Y: Synchronization> {
+    preopened: Y::SharedState<Option<L::Accepted>>,
     layers: L,
 }
 
-impl<L: HelloLayers> PreopenedLayers<L> {
+impl<L: HelloLayers, Y: Synchronization> PreopenedLayers<L, Y> {
     /// Layers that hand over `preopened` first, and open with `layers`
     /// after.
     pub fn new(preopened: L::Accepted, layers: L) -> Self {
         Self {
-            preopened: Mutex::new(Some(preopened)),
+            preopened: Y::share(Some(preopened)),
             layers,
         }
     }
 
     /// The opening made before the handshake, until it is handed over.
     fn take(&self) -> Option<L::Accepted> {
-        self.preopened
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        self.preopened.with(Option::take)
     }
 }
 
-impl<L: HelloLayers> HelloLayers for PreopenedLayers<L> {
+impl<L: HelloLayers, Y: Synchronization> HelloLayers for PreopenedLayers<L, Y> {
     type Accepted = L::Accepted;
     type Error = L::Error;
     type Opening<'a>
@@ -205,7 +203,10 @@ mod tests {
         let first_bytes = client_hello(&extension(43, VERSIONS));
         let (encoded, hello) = received_client_hello(&first_bytes);
         let Ok(preopened) = ready_now(PassThroughLayers.open(encoded, hello, None));
-        let layers = PreopenedLayers::new(preopened, RecordingLayers::default());
+        let layers = PreopenedLayers::<_, nitori_sync::RefCellSynchronization>::new(
+            preopened,
+            RecordingLayers::default(),
+        );
 
         // The first ClientHello is the one opened before: the wrapped layers
         // are not asked.

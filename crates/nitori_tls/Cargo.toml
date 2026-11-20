@@ -6,18 +6,25 @@ publish = false
 license = "Apache-2.0 OR MIT"
 description = "TLS 1.3 handshake messages, extensions, key schedule and handshake engines for QUIC"
 
+[features]
+default = ["std"]
+# `SystemClock`, and the `std` features of nitori_call, nitori_io and
+# nitori_sync.
+std = ["nitori_call/std", "nitori_io/std", "nitori_sync/std", "time/std"]
+
 [dependencies]
 bytes.workspace = true
+hashbrown.workspace = true
 nitori_call.workspace = true
 nitori_crypto.workspace = true
 nitori_io.workspace = true
-rustls-pki-types = { workspace = true, features = ["std"] }
+nitori_sync.workspace = true
+rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
-time = { workspace = true, features = ["std"] }
+time.workspace = true
 
 [dev-dependencies]
 nitori_crypto_aws_lc = { workspace = true, features = ["fixed-x25519"] }
-nitori_call = { workspace = true, features = ["std"] }
 rustls.workspace = true

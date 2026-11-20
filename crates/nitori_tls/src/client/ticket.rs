@@ -16,12 +16,11 @@ use crate::{
     schedule::ResumptionPsk,
     verify::SubjectPublicKey,
 };
+use alloc::{collections::VecDeque, sync::Arc};
 use bytes::Bytes;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Mutex, PoisonError},
-    time::Duration,
-};
+use core::{hash::BuildHasher, time::Duration};
+use hashbrown::HashMap;
+use nitori_sync::{SharedState as _, Synchronization};
 use time::UtcDateTime;
 
 /// A ticket a client received, with what it needs to resume with it.
@@ -100,7 +99,7 @@ impl<S: ClientTicketStore + ?Sized> ClientTicketStore for &S {
     }
 }
 
-impl<S: ClientTicketStore + ?Sized> ClientTicketStore for std::sync::Arc<S> {
+impl<S: ClientTicketStore + ?Sized> ClientTicketStore for Arc<S> {
     fn take(&self, target: &ServerTarget) -> Option<StoredTicket> {
         (**self).take(target)
     }
@@ -118,17 +117,21 @@ impl<S: ClientTicketStore + ?Sized> ClientTicketStore for std::sync::Arc<S> {
 /// keeps at most a fixed number of tickets, the oldest going first, and
 /// the store keeps at most [`TakeOnceTicketMap::TARGET_CAPACITY`] targets,
 /// a new one replacing an arbitrary one past it.
-pub struct TakeOnceTicketMap<K> {
+///
+/// The table is shared state of the family `Y`, its targets hashed by `S`.
+pub struct TakeOnceTicketMap<K, Y: Synchronization, S> {
     clock: K,
     max_age: Duration,
     per_target: usize,
-    tickets: Mutex<HashMap<ServerTarget, VecDeque<StoredTicket>>>,
+    tickets: Y::SharedState<HashMap<ServerTarget, VecDeque<StoredTicket>, S>>,
 }
 
-impl<K> TakeOnceTicketMap<K> {
+impl<K, Y: Synchronization, S> TakeOnceTicketMap<K, Y, S> {
     /// The most targets the store keeps tickets for.
     pub const TARGET_CAPACITY: usize = 1024;
+}
 
+impl<K, Y: Synchronization, S: BuildHasher + Default> TakeOnceTicketMap<K, Y, S> {
     /// A store that hands out tickets younger than `max_age` and keeps at
     /// most `per_target` of them for each target.
     pub fn new(clock: K, max_age: Duration, per_target: usize) -> Self {
@@ -136,40 +139,44 @@ impl<K> TakeOnceTicketMap<K> {
             clock,
             max_age,
             per_target,
-            tickets: Mutex::default(),
+            tickets: Y::share(HashMap::default()),
         }
     }
 }
 
-impl<K: Clock> ClientTicketStore for TakeOnceTicketMap<K> {
+impl<K: Clock, Y: Synchronization, S: BuildHasher> ClientTicketStore
+    for TakeOnceTicketMap<K, Y, S>
+{
     fn take(&self, target: &ServerTarget) -> Option<StoredTicket> {
         let now = self.clock.now();
-        let mut tickets = self.tickets.lock().unwrap_or_else(PoisonError::into_inner);
-        let queue = tickets.get_mut(target)?;
-        let found = core::iter::from_fn(|| queue.pop_back())
-            .find(|ticket| ticket.usable_at(now, self.max_age));
-        if queue.is_empty() {
-            tickets.remove(target);
-        }
-        found
+        self.tickets.with(|tickets| {
+            let queue = tickets.get_mut(target)?;
+            let found = core::iter::from_fn(|| queue.pop_back())
+                .find(|ticket| ticket.usable_at(now, self.max_age));
+            if queue.is_empty() {
+                tickets.remove(target);
+            }
+            found
+        })
     }
 
     fn store(&self, target: &ServerTarget, ticket: StoredTicket) {
         if self.per_target == 0 {
             return;
         }
-        let mut tickets = self.tickets.lock().unwrap_or_else(PoisonError::into_inner);
-        if tickets.len() >= Self::TARGET_CAPACITY
-            && !tickets.contains_key(target)
-            && let Some(evicted) = tickets.keys().next().cloned()
-        {
-            tickets.remove(&evicted);
-        }
-        let queue = tickets.entry(target.clone()).or_default();
-        if queue.len() >= self.per_target {
-            queue.pop_front();
-        }
-        queue.push_back(ticket);
+        self.tickets.with(|tickets| {
+            if tickets.len() >= Self::TARGET_CAPACITY
+                && !tickets.contains_key(target)
+                && let Some(evicted) = tickets.keys().next().cloned()
+            {
+                tickets.remove(&evicted);
+            }
+            let queue = tickets.entry(target.clone()).or_default();
+            if queue.len() >= self.per_target {
+                queue.pop_front();
+            }
+            queue.push_back(ticket);
+        });
     }
 }
 
@@ -182,9 +189,14 @@ mod tests {
         verify::SubjectPublicKey,
     };
     use bytes::Bytes;
+    use core::time::Duration;
     use nitori_crypto::Secret;
-    use std::time::Duration;
+    use nitori_sync::RefCellSynchronization;
+    use std::hash::RandomState;
     use time::UtcDateTime;
+
+    type Store<K> = TakeOnceTicketMap<K, RefCellSynchronization, RandomState>;
+    type TestClock = ManualClock<RefCellSynchronization>;
 
     /// An Ed25519 SubjectPublicKeyInfo.
     const ED25519_SPKI: &[u8] = &[
@@ -218,7 +230,7 @@ mod tests {
 
     #[test]
     fn a_ticket_is_taken_once_and_only_for_its_target() {
-        let store = TakeOnceTicketMap::new(ManualClock::new(start()), Duration::from_secs(3600), 4);
+        let store = Store::new(TestClock::new(start()), Duration::from_secs(3600), 4);
         store.store(&target("example.com"), ticket(1, start()));
         store.store(&target("example.com"), ticket(2, start()));
         assert!(store.take(&target("example.net")).is_none());
@@ -229,12 +241,12 @@ mod tests {
 
     #[test]
     fn a_ticket_past_its_lifetime_or_the_maximum_age_is_dropped() {
-        let clock = ManualClock::new(start());
-        let store = TakeOnceTicketMap::new(&clock, Duration::from_secs(300), 4);
+        let clock = TestClock::new(start());
+        let store = Store::new(&clock, Duration::from_secs(300), 4);
         store.store(&target("example.com"), ticket(1, start()));
         clock.advance(Duration::from_secs(300));
         assert!(store.take(&target("example.com")).is_none());
-        let long = TakeOnceTicketMap::new(&clock, Duration::from_secs(3600), 4);
+        let long = Store::new(&clock, Duration::from_secs(3600), 4);
         long.store(&target("example.com"), ticket(1, start()));
         long.store(
             &target("example.com"),
@@ -248,7 +260,7 @@ mod tests {
 
     #[test]
     fn each_target_keeps_its_newest_tickets() {
-        let store = TakeOnceTicketMap::new(ManualClock::new(start()), Duration::from_secs(3600), 2);
+        let store = Store::new(TestClock::new(start()), Duration::from_secs(3600), 2);
         for byte in 1..=3 {
             store.store(&target("example.com"), ticket(byte, start()));
         }

@@ -2,17 +2,16 @@
 //!
 //! Ticket lifetimes and certificate validity depend on the calendar time,
 //! which comes from a [`Clock`] given when an endpoint is built:
-//! [`SystemClock`] reads the system's clock, and [`ManualClock`] holds a
+//! [`SystemClock`], with the `std` feature, reads the system's clock, and [`ManualClock`] holds a
 //! time that is set by hand, so that tests and recorded traces can fix it.
 //!
 //! The time is a [`UtcDateTime`]: certificates name calendar dates, and
 //! tickets outlive the process that issued them. It is not the monotonic
 //! time a connection measures its timers with.
 
-use std::{
-    sync::{Arc, Mutex, PoisonError},
-    time::Duration,
-};
+use alloc::sync::Arc;
+use core::{fmt, time::Duration};
+use nitori_sync::{SharedState as _, Synchronization};
 use time::UtcDateTime;
 
 /// A source of the current calendar time.
@@ -34,9 +33,11 @@ impl<K: Clock + ?Sized> Clock for Arc<K> {
 }
 
 /// The system's clock.
+#[cfg(feature = "std")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct SystemClock;
 
+#[cfg(feature = "std")]
 impl Clock for SystemClock {
     fn now(&self) -> UtcDateTime {
         UtcDateTime::now()
@@ -44,34 +45,42 @@ impl Clock for SystemClock {
 }
 
 /// A clock whose time moves only when it is set or advanced.
-#[derive(Debug)]
-pub struct ManualClock {
-    time: Mutex<UtcDateTime>,
+///
+/// The time is shared state of the family `Y`.
+pub struct ManualClock<Y: Synchronization> {
+    time: Y::SharedState<UtcDateTime>,
 }
 
-impl ManualClock {
+impl<Y: Synchronization> ManualClock<Y> {
     /// A clock that reads `time`.
     pub fn new(time: UtcDateTime) -> Self {
         Self {
-            time: Mutex::new(time),
+            time: Y::share(time),
         }
     }
 
     /// Sets the time to `time`.
     pub fn set(&self, time: UtcDateTime) {
-        *self.time.lock().unwrap_or_else(PoisonError::into_inner) = time;
+        self.time.with(|now| *now = time);
     }
 
     /// Moves the time forward by `by`.
     pub fn advance(&self, by: Duration) {
-        let mut time = self.time.lock().unwrap_or_else(PoisonError::into_inner);
-        *time += by;
+        self.time.with(|now| *now += by);
     }
 }
 
-impl Clock for ManualClock {
+impl<Y: Synchronization> Clock for ManualClock<Y> {
     fn now(&self) -> UtcDateTime {
-        *self.time.lock().unwrap_or_else(PoisonError::into_inner)
+        self.time.with(|now| *now)
+    }
+}
+
+impl<Y: Synchronization> fmt::Debug for ManualClock<Y> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManualClock")
+            .field("time", &self.now())
+            .finish()
     }
 }
 
@@ -83,20 +92,26 @@ pub(crate) fn elapsed(earlier: UtcDateTime, later: UtcDateTime) -> Option<Durati
 
 #[cfg(test)]
 mod tests {
-    use super::{Clock, ManualClock, SystemClock, elapsed};
-    use std::time::Duration;
+    use super::{Clock, ManualClock, elapsed};
+    use core::time::Duration;
+    use nitori_sync::RefCellSynchronization;
     use time::UtcDateTime;
 
     #[test]
     fn a_manual_clock_moves_when_told() {
         let start = UtcDateTime::from_unix_timestamp(1_800_000_000).unwrap();
-        let clock = ManualClock::new(start);
+        let clock = ManualClock::<RefCellSynchronization>::new(start);
         assert_eq!(clock.now(), start);
         clock.advance(Duration::from_secs(5));
         assert_eq!(Clock::now(&&clock), start + Duration::from_secs(5));
         clock.set(start);
         assert_eq!(clock.now(), start);
-        assert!(SystemClock.now() > UtcDateTime::UNIX_EPOCH);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_system_clock_is_past_the_epoch() {
+        assert!(super::SystemClock.now() > UtcDateTime::UNIX_EPOCH);
     }
 
     #[test]

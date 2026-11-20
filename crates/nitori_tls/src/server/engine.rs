@@ -124,6 +124,7 @@ use crate::{
     vector::LengthOutOfRangeError,
     version::ProtocolVersion,
 };
+use alloc::{vec, vec::Vec};
 use bytes::Bytes;
 use core::{convert::Infallible, pin::Pin, time::Duration};
 use nitori_call::{LentAccess, ReceiverAccess, ReceiverFamily, call, capability};

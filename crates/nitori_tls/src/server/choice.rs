@@ -16,6 +16,7 @@ use crate::{
     message::client_hello::ClientHello,
     server::targets::SelectedTarget,
 };
+use alloc::vec::Vec;
 use nitori_crypto::{Hash, KeyExchange, NamedGroup, Supported};
 use smallvec::SmallVec;
 use snafu::Snafu;

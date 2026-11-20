@@ -15,6 +15,7 @@ use crate::{
     vector::LengthOutOfRangeError,
     width::Width,
 };
+use alloc::vec::Vec;
 use snafu::{ResultExt, Snafu};
 
 /// The form of the entries of a Certificate message.
@@ -287,6 +288,7 @@ pub mod codec {
         },
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};

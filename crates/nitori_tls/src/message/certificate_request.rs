@@ -9,6 +9,7 @@ use crate::{
     vector::LengthOutOfRangeError,
     width::Width,
 };
+use alloc::vec::Vec;
 use nitori_crypto::SignatureScheme;
 use snafu::{ResultExt, Snafu};
 
@@ -180,6 +181,7 @@ pub mod codec {
         },
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};

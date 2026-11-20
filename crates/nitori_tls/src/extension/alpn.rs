@@ -5,6 +5,7 @@
 //! [`ProtocolName`] the server selected.
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
+use alloc::vec::Vec;
 use snafu::Snafu;
 
 /// An application protocol name: 1 to 255 bytes.
@@ -103,6 +104,7 @@ pub mod codec {
         vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};

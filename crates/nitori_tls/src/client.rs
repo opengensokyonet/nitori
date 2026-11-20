@@ -14,6 +14,7 @@
 //! A client connects to a [`ServerTarget`]; the capabilities answer per
 //! target.
 
+use alloc::{borrow::ToOwned, string::String};
 use rustls_pki_types::DnsName;
 use snafu::Snafu;
 

@@ -33,23 +33,22 @@ use crate::{
     clock::Clock,
     message::certificate::CertificateEntry,
 };
+use alloc::{boxed::Box, collections::BTreeSet, sync::Arc, vec::Vec};
 use bytes::Bytes;
 use core::{
     cell::RefCell,
     convert::Infallible,
+    fmt,
     future::{Future, Ready, ready},
     time::Duration,
 };
 use nitori_crypto::{Hash, SignatureScheme, SignatureVerify, Supported};
+use nitori_sync::{SharedState as _, Synchronization};
 use rustls_pki_types::{
     AlgorithmIdentifier, CertificateDer, InvalidSignature, ServerName,
     SignatureVerificationAlgorithm, TrustAnchor, UnixTime, alg_id,
 };
 use snafu::{ResultExt, Snafu};
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, PoisonError, RwLock},
-};
 use time::UtcDateTime;
 use webpki::{EndEntityCert, KeyUsage, VerifiedPath};
 
@@ -137,9 +136,27 @@ pub trait Transparency<C> {
 }
 
 /// Trust anchors loaded at run time, replaced as a whole.
-#[derive(Debug, Default)]
-pub struct AnchorStore {
-    anchors: RwLock<Arc<[TrustAnchor<'static>]>>,
+///
+/// The anchors are shared state of the family `Y`.
+pub struct AnchorStore<Y: Synchronization> {
+    anchors: Y::SharedState<Arc<[TrustAnchor<'static>]>>,
+}
+
+/// No anchors.
+impl<Y: Synchronization> Default for AnchorStore<Y> {
+    fn default() -> Self {
+        Self {
+            anchors: Y::share(Arc::from([])),
+        }
+    }
+}
+
+impl<Y: Synchronization> fmt::Debug for AnchorStore<Y> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnchorStore")
+            .field("anchors", &self.snapshot().as_ref())
+            .finish()
+    }
 }
 
 /// The anchors of an [`AnchorStore`] at one moment.
@@ -152,7 +169,7 @@ impl AsRef<[TrustAnchor<'static>]> for AnchorSnapshot {
     }
 }
 
-impl AnchorStore {
+impl<Y: Synchronization> AnchorStore<Y> {
     /// The anchors of `certificates`, DER certificates of trusted roots.
     ///
     /// # Errors
@@ -162,7 +179,7 @@ impl AnchorStore {
         certificates: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Self, InvalidAnchorError> {
         Ok(Self {
-            anchors: RwLock::new(anchors(certificates)?),
+            anchors: Y::share(anchors(certificates)?),
         })
     }
 
@@ -178,7 +195,7 @@ impl AnchorStore {
         certificates: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<(), InvalidAnchorError> {
         let anchors = anchors(certificates)?;
-        *self.anchors.write().unwrap_or_else(PoisonError::into_inner) = anchors;
+        self.anchors.with(|current| *current = anchors);
         Ok(())
     }
 }
@@ -197,22 +214,51 @@ fn anchors<'a>(
         .collect()
 }
 
-impl TrustAnchors for AnchorStore {
+impl<Y: Synchronization> TrustAnchors for AnchorStore<Y> {
     type Snapshot<'a> = AnchorSnapshot;
 
     fn snapshot(&self) -> AnchorSnapshot {
-        AnchorSnapshot(Arc::clone(
-            &self.anchors.read().unwrap_or_else(PoisonError::into_inner),
-        ))
+        AnchorSnapshot(self.anchors.with(|anchors| Arc::clone(anchors)))
     }
 }
+
+/// A failure of rustls-webpki, as an error with or without the standard
+/// library.
+///
+/// webpki implements the error trait of the standard library only with its
+/// `std` feature; this type implements `core::error::Error` for it, and
+/// shows it as webpki does.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WebPkiError(webpki::Error);
+
+impl WebPkiError {
+    /// webpki's failure.
+    pub fn get(&self) -> &webpki::Error {
+        &self.0
+    }
+}
+
+impl fmt::Debug for WebPkiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for WebPkiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl core::error::Error for WebPkiError {}
 
 /// A certificate given as a trust anchor cannot be read as one.
 #[derive(Debug, Snafu)]
 #[snafu(display("trust anchor {index} invalid"))]
 pub struct InvalidAnchorError {
     index: usize,
-    source: webpki::Error,
+    #[snafu(source(from(webpki::Error, WebPkiError)))]
+    source: WebPkiError,
 }
 
 impl InvalidAnchorError {
@@ -224,40 +270,54 @@ impl InvalidAnchorError {
 
 /// Public keys refused by their DER SubjectPublicKeyInfo, loaded and
 /// updated at run time.
-#[derive(Debug, Default)]
-pub struct SpkiDistrustList {
-    keys: RwLock<BTreeSet<Box<[u8]>>>,
+///
+/// The list is shared state of the family `Y`.
+pub struct SpkiDistrustList<Y: Synchronization> {
+    keys: Y::SharedState<BTreeSet<Box<[u8]>>>,
 }
 
-impl SpkiDistrustList {
+/// No keys.
+impl<Y: Synchronization> Default for SpkiDistrustList<Y> {
+    fn default() -> Self {
+        Self {
+            keys: Y::share(BTreeSet::new()),
+        }
+    }
+}
+
+impl<Y: Synchronization> fmt::Debug for SpkiDistrustList<Y> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.keys.with(|keys| {
+            f.debug_struct("SpkiDistrustList")
+                .field("keys", keys)
+                .finish()
+        })
+    }
+}
+
+impl<Y: Synchronization> SpkiDistrustList<Y> {
     /// The list of `keys`, DER SubjectPublicKeyInfos.
     pub fn new<'a>(keys: impl IntoIterator<Item = &'a [u8]>) -> Self {
         Self {
-            keys: RwLock::new(keys.into_iter().map(Box::from).collect()),
+            keys: Y::share(keys.into_iter().map(Box::from).collect()),
         }
     }
 
     /// Adds `key`.
     pub fn insert(&self, key: &[u8]) {
-        self.keys
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(Box::from(key));
+        self.keys.with(|keys| keys.insert(Box::from(key)));
     }
 
     /// Replaces the list with `keys`.
     pub fn replace<'a>(&self, keys: impl IntoIterator<Item = &'a [u8]>) {
-        *self.keys.write().unwrap_or_else(PoisonError::into_inner) =
-            keys.into_iter().map(Box::from).collect();
+        let replacement = keys.into_iter().map(Box::from).collect();
+        self.keys.with(|keys| *keys = replacement);
     }
 }
 
-impl Distrust for SpkiDistrustList {
+impl<Y: Synchronization> Distrust for SpkiDistrustList<Y> {
     fn contains(&self, spki: &[u8]) -> bool {
-        self.keys
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(spki)
+        self.keys.with(|keys| keys.contains(spki))
     }
 }
 
@@ -527,7 +587,9 @@ where
                 Some(Refusal::Transparency(source)) => {
                     VerifyCertificateChainError::Transparency { source }
                 }
-                None => VerifyCertificateChainError::Path { source: error },
+                None => VerifyCertificateChainError::Path {
+                    source: WebPkiError(error),
+                },
             });
         }
         end_entity
@@ -625,13 +687,15 @@ where
     #[snafu(display("end entity certificate invalid"))]
     EndEntity {
         /// webpki's failure.
-        source: webpki::Error,
+        #[snafu(source(from(webpki::Error, WebPkiError)))]
+        source: WebPkiError,
     },
     /// No path to a trust anchor verifies.
     #[snafu(display("no valid certificate path"))]
     Path {
         /// webpki's failure.
-        source: webpki::Error,
+        #[snafu(source(from(webpki::Error, WebPkiError)))]
+        source: WebPkiError,
     },
     /// A path verified, but holds a distrusted key.
     #[snafu(display("distrusted key at {position:?}"))]
@@ -655,7 +719,8 @@ where
     #[snafu(display("certificate not valid for the target"))]
     Name {
         /// webpki's failure.
-        source: webpki::Error,
+        #[snafu(source(from(webpki::Error, WebPkiError)))]
+        source: WebPkiError,
     },
     /// The certificate's key is not one this crate verifies with.
     #[snafu(display("end entity key unsupported"))]
@@ -678,7 +743,7 @@ where
     pub fn alert(&self) -> AlertDescription {
         match self {
             Self::NoCertificate => AlertDescription::DECODE_ERROR,
-            Self::Path { source } => match source {
+            Self::Path { source } => match source.get() {
                 webpki::Error::CertExpired { .. } | webpki::Error::CertNotValidYet { .. } => {
                     AlertDescription::CERTIFICATE_EXPIRED
                 }

@@ -32,14 +32,15 @@ use crate::{
     width::Width,
 };
 use bytes::Bytes;
-use core::future::{Future, Ready, ready};
-use nitori_crypto::{Digest, Random, RandomError, Secret};
-use snafu::{ResultExt, Snafu};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, PoisonError},
+use core::{
+    future::{Future, Ready, ready},
+    hash::BuildHasher,
     time::Duration,
 };
+use hashbrown::HashMap;
+use nitori_crypto::{Digest, Random, RandomError, Secret};
+use nitori_sync::{SharedState as _, Synchronization};
+use snafu::{ResultExt, Snafu};
 use time::UtcDateTime;
 
 /// What a resumed connection must find again, as the handshake knows it
@@ -230,13 +231,17 @@ const TICKET_LEN: usize = 16;
 /// 0-RTT. Clones share the table, which holds at most a fixed number of
 /// entries: past it, sealing fails once the expired ones are gone.
 ///
-/// `R` generates the tickets and `K` tells the time.
-pub struct ZeroRttOnceTicketTable<T, R, K> {
-    entries: Arc<Mutex<HashMap<[u8; TICKET_LEN], Entry<T>>>>,
+/// `R` generates the tickets and `K` tells the time. The table is shared
+/// state of the family `Y`, its tickets hashed by `S`.
+pub struct ZeroRttOnceTicketTable<T, R, K, Y: Synchronization, S> {
+    entries: Y::SharedState<Entries<T, S>>,
     random: R,
     clock: K,
     settings: TableSettings,
 }
+
+/// The entries of a [`ZeroRttOnceTicketTable`], by ticket.
+type Entries<T, S> = HashMap<[u8; TICKET_LEN], Entry<T>, S>;
 
 /// The fixed choices of a [`ZeroRttOnceTicketTable`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,7 +282,7 @@ impl<T> Entry<T> {
     }
 }
 
-impl<T, R, K> ZeroRttOnceTicketTable<T, R, K> {
+impl<T, R, K, Y: Synchronization, S: BuildHasher + Default> ZeroRttOnceTicketTable<T, R, K, Y, S> {
     /// A table that issues `tickets_per_connection` tickets valid for
     /// `lifetime`, which allow 0-RTT when `early_data`, and holds at most
     /// `capacity` of them.
@@ -290,7 +295,7 @@ impl<T, R, K> ZeroRttOnceTicketTable<T, R, K> {
         capacity: usize,
     ) -> Self {
         Self {
-            entries: Arc::default(),
+            entries: Y::share(HashMap::default()),
             random,
             clock,
             settings: TableSettings {
@@ -301,14 +306,13 @@ impl<T, R, K> ZeroRttOnceTicketTable<T, R, K> {
             },
         }
     }
+}
 
+impl<T, R, K, Y: Synchronization, S> ZeroRttOnceTicketTable<T, R, K, Y, S> {
     /// The number of tickets the table holds, expired ones included until
     /// they are found or swept.
     pub fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.entries.with(|entries| entries.len())
     }
 
     /// Whether the table holds no ticket.
@@ -317,10 +321,10 @@ impl<T, R, K> ZeroRttOnceTicketTable<T, R, K> {
     }
 }
 
-impl<T, R: Clone, K: Clone> Clone for ZeroRttOnceTicketTable<T, R, K> {
+impl<T, R: Clone, K: Clone, Y: Synchronization, S> Clone for ZeroRttOnceTicketTable<T, R, K, Y, S> {
     fn clone(&self) -> Self {
         Self {
-            entries: Arc::clone(&self.entries),
+            entries: self.entries.clone(),
             random: self.random.clone(),
             clock: self.clock.clone(),
             settings: self.settings,
@@ -328,17 +332,22 @@ impl<T, R: Clone, K: Clone> Clone for ZeroRttOnceTicketTable<T, R, K> {
     }
 }
 
-impl<T: Clone, R: Random + Clone, K: Clock + Clone> TicketPolicy<T>
-    for ZeroRttOnceTicketTable<T, R, K>
+impl<T, R, K, Y, S> TicketPolicy<T> for ZeroRttOnceTicketTable<T, R, K, Y, S>
+where
+    T: Clone,
+    R: Random + Clone,
+    K: Clock + Clone,
+    Y: Synchronization,
+    S: BuildHasher,
 {
-    type Issuing = TableIssuing<T, R, K>;
-    type Opened = TableOpened<T>;
+    type Issuing = TableIssuing<T, R, K, Y, S>;
+    type Opened = TableOpened<T, Y, S>;
     type Opening<'a, B: 'a>
-        = Ready<Option<(PskIndex, TableOpened<T>)>>
+        = Ready<Option<(PskIndex, TableOpened<T, Y, S>)>>
     where
         Self: 'a;
 
-    fn issuing(&self, session: &Resumable<T>) -> TableIssuing<T, R, K> {
+    fn issuing(&self, session: &Resumable<T>) -> TableIssuing<T, R, K, Y, S> {
         TableIssuing {
             table: self.clone(),
             resumable: session.clone(),
@@ -351,44 +360,52 @@ impl<T: Clone, R: Random + Clone, K: Clock + Clone> TicketPolicy<T>
         offered: &'a OfferedPsks<B>,
     ) -> Self::Opening<'a, B> {
         let now = self.clock.now();
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = offered
-            .identities()
-            .iter()
-            .enumerate()
-            .find_map(|(index, identity)| {
-                let key = <[u8; TICKET_LEN]>::try_from(identity.identity().as_ref()).ok()?;
-                let entry = entries.get(&key)?;
-                if entry.expired(now) {
-                    entries.remove(&key);
-                    return None;
-                }
-                // invariant: `PreSharedKey` holds at most 65535 bytes of
-                // identities, so the index fits in `u16`.
-                let index = PskIndex::new(u16::try_from(index).expect("index of an identity"));
-                let opened = TableOpened {
-                    entries: Arc::clone(&self.entries),
-                    key,
-                    psk: entry.psk.copy(),
-                    state: entry.state.clone(),
-                };
-                Some((index, opened))
-            });
+        let found = self.entries.with(|entries| {
+            offered
+                .identities()
+                .iter()
+                .enumerate()
+                .find_map(|(index, identity)| {
+                    let key = <[u8; TICKET_LEN]>::try_from(identity.identity().as_ref()).ok()?;
+                    let entry = entries.get(&key)?;
+                    if entry.expired(now) {
+                        entries.remove(&key);
+                        return None;
+                    }
+                    // invariant: `PreSharedKey` holds at most 65535 bytes of
+                    // identities, so the index fits in `u16`.
+                    let index = PskIndex::new(u16::try_from(index).expect("index of an identity"));
+                    let opened = TableOpened {
+                        entries: self.entries.clone(),
+                        key,
+                        psk: entry.psk.copy(),
+                        state: entry.state.clone(),
+                    };
+                    Some((index, opened))
+                })
+        });
         ready(found)
     }
 }
 
 /// The issuing of a [`ZeroRttOnceTicketTable`] on one connection.
-pub struct TableIssuing<T, R, K> {
-    table: ZeroRttOnceTicketTable<T, R, K>,
+pub struct TableIssuing<T, R, K, Y: Synchronization, S> {
+    table: ZeroRttOnceTicketTable<T, R, K, Y, S>,
     resumable: Resumable<T>,
     remaining: usize,
 }
 
-impl<T: Clone, R: Random + Clone, K: Clock + Clone> Issuing for TableIssuing<T, R, K> {
-    type Slot = TableSlot<T, R, K>;
+impl<T, R, K, Y, S> Issuing for TableIssuing<T, R, K, Y, S>
+where
+    T: Clone,
+    R: Random + Clone,
+    K: Clock + Clone,
+    Y: Synchronization,
+    S: BuildHasher,
+{
+    type Slot = TableSlot<T, R, K, Y, S>;
     type Next<'a>
-        = Ready<Option<TableSlot<T, R, K>>>
+        = Ready<Option<TableSlot<T, R, K, Y, S>>>
     where
         Self: 'a;
 
@@ -405,12 +422,14 @@ impl<T: Clone, R: Random + Clone, K: Clock + Clone> Issuing for TableIssuing<T, 
 }
 
 /// One ticket of a [`ZeroRttOnceTicketTable`], stored when it is sealed.
-pub struct TableSlot<T, R, K> {
-    table: ZeroRttOnceTicketTable<T, R, K>,
+pub struct TableSlot<T, R, K, Y: Synchronization, S> {
+    table: ZeroRttOnceTicketTable<T, R, K, Y, S>,
     resumable: Resumable<T>,
 }
 
-impl<T, R: Random, K: Clock> TicketSlot for TableSlot<T, R, K> {
+impl<T, R: Random, K: Clock, Y: Synchronization, S: BuildHasher> TicketSlot
+    for TableSlot<T, R, K, Y, S>
+{
     type Error = SealTicketError;
     type Sealing = Ready<Result<Ticket, SealTicketError>>;
 
@@ -424,7 +443,7 @@ impl<T, R: Random, K: Clock> TicketSlot for TableSlot<T, R, K> {
     }
 }
 
-impl<T, R: Random, K: Clock> TableSlot<T, R, K> {
+impl<T, R: Random, K: Clock, Y: Synchronization, S: BuildHasher> TableSlot<T, R, K, Y, S> {
     fn store(self, psk: ResumptionPsk, ticket_age_add: u32) -> Result<Ticket, SealTicketError> {
         let key: [u8; TICKET_LEN] = self
             .table
@@ -433,17 +452,6 @@ impl<T, R: Random, K: Clock> TableSlot<T, R, K> {
             .context(seal_ticket_error::RandomSnafu)?;
         let settings = self.table.settings;
         let now = self.table.clock.now();
-        let mut entries = self
-            .table
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if entries.len() >= settings.capacity {
-            entries.retain(|_, entry| !entry.expired(now));
-        }
-        if entries.len() >= settings.capacity {
-            return seal_ticket_error::TableFullSnafu.fail();
-        }
         let state = TicketState {
             resumable: self.resumable,
             ticket_age_add,
@@ -451,13 +459,22 @@ impl<T, R: Random, K: Clock> TableSlot<T, R, K> {
             lifetime: settings.lifetime,
             early_data: settings.early_data,
         };
-        entries.insert(
-            key,
-            Entry {
-                psk: psk.into(),
-                state,
-            },
-        );
+        self.table.entries.with(|entries| {
+            if entries.len() >= settings.capacity {
+                entries.retain(|_, entry| !entry.expired(now));
+            }
+            if entries.len() >= settings.capacity {
+                return seal_ticket_error::TableFullSnafu.fail();
+            }
+            entries.insert(
+                key,
+                Entry {
+                    psk: psk.into(),
+                    state,
+                },
+            );
+            Ok(())
+        })?;
         // invariant: the key is 16 bytes, within 1..=65535.
         Ok(Ticket::new(
             settings.lifetime,
@@ -484,14 +501,14 @@ pub enum SealTicketError {
 }
 
 /// A ticket of a [`ZeroRttOnceTicketTable`] that a ClientHello offered.
-pub struct TableOpened<T> {
-    entries: Arc<Mutex<HashMap<[u8; TICKET_LEN], Entry<T>>>>,
+pub struct TableOpened<T, Y: Synchronization, S> {
+    entries: Y::SharedState<Entries<T, S>>,
     key: [u8; TICKET_LEN],
     psk: ResumptionPsk,
     state: TicketState<T>,
 }
 
-impl<T> Opened<T> for TableOpened<T> {
+impl<T, Y: Synchronization, S: BuildHasher> Opened<T> for TableOpened<T, Y, S> {
     type Admitting = Ready<bool>;
 
     fn psk(&self) -> &ResumptionPsk {
@@ -503,8 +520,9 @@ impl<T> Opened<T> for TableOpened<T> {
     }
 
     fn admit_early_data(self, _hello: &ClientHelloKey) -> Ready<bool> {
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let spent = entries.remove(&self.key).is_some();
+        let spent = self
+            .entries
+            .with(|entries| entries.remove(&self.key).is_some());
         ready(spent && self.state.early_data)
     }
 }
@@ -523,15 +541,25 @@ mod tests {
         schedule::ResumptionPsk,
         test_support::ready_now as now,
     };
+    use alloc::sync::Arc;
     use bytes::Bytes;
+    use core::time::Duration;
     use nitori_crypto::{Digest, HashAlgorithm, Secret};
     use nitori_crypto_aws_lc::AwsLcBackend;
-    use std::{sync::Arc, time::Duration};
+    use nitori_sync::MutexSynchronization;
+    use std::hash::RandomState;
     use time::UtcDateTime;
 
-    type Table = ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>;
+    type TestClock = ManualClock<MutexSynchronization>;
+    type Table = ZeroRttOnceTicketTable<
+        &'static str,
+        AwsLcBackend,
+        Arc<TestClock>,
+        MutexSynchronization,
+        RandomState,
+    >;
 
-    fn table(clock: &Arc<ManualClock>, early_data: bool, capacity: usize) -> Table {
+    fn table(clock: &Arc<TestClock>, early_data: bool, capacity: usize) -> Table {
         ZeroRttOnceTicketTable::new(
             AwsLcBackend,
             Arc::clone(clock),
@@ -542,8 +570,8 @@ mod tests {
         )
     }
 
-    fn clock() -> Arc<ManualClock> {
-        Arc::new(ManualClock::new(
+    fn clock() -> Arc<TestClock> {
+        Arc::new(TestClock::new(
             UtcDateTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
         ))
     }

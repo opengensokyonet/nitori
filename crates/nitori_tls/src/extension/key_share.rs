@@ -5,6 +5,7 @@
 //! a HelloRetryRequest it is the `NamedGroup` the server selected.
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
+use alloc::vec::Vec;
 use nitori_crypto::NamedGroup;
 use snafu::{ResultExt, Snafu};
 
@@ -153,6 +154,7 @@ pub mod codec {
         },
         width::Width,
     };
+    use alloc::vec::Vec;
     use bytes::{Buf, BufMut};
     use nitori_crypto::NamedGroup;
     use nitori_io::{SplitTo, error::IncompleteError};

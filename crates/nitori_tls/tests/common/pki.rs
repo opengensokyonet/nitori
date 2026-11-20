@@ -5,6 +5,7 @@
 use super::ready;
 use nitori_crypto::{SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use nitori_sync::MutexSynchronization;
 use nitori_tls::{
     clock::ManualClock,
     verify::{
@@ -141,14 +142,14 @@ pub fn leaf() -> Vec<u8> {
 
 pub type Verifier = WebPkiVerifier<
     AwsLcBackend,
-    AnchorStore,
-    SpkiDistrustList,
+    AnchorStore<MutexSynchronization>,
+    SpkiDistrustList<MutexSynchronization>,
     NoRevocationCheck,
-    EmbeddedSctPolicy,
-    Arc<ManualClock>,
+    EmbeddedSctPolicy<MutexSynchronization>,
+    Arc<ManualClock<MutexSynchronization>>,
 >;
 
-pub fn verifier(clock: &Arc<ManualClock>) -> Verifier {
+pub fn verifier(clock: &Arc<ManualClock<MutexSynchronization>>) -> Verifier {
     // The certificates carry no SCTs: a log list past its age skips the CT
     // check.
     let transparency = EmbeddedSctPolicy::with_list_age(

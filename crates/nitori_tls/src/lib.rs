@@ -1,7 +1,17 @@
+#![cfg_attr(not(test), no_std)]
 #![doc = include_str!("../README.md")]
 #![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(
+    clippy::std_instead_of_core,
+    clippy::std_instead_of_alloc,
+    clippy::alloc_instead_of_core
+)]
+
+extern crate alloc;
+#[cfg(all(feature = "std", not(test)))]
+extern crate std;
 
 pub mod alert;
 pub mod cipher_suite;

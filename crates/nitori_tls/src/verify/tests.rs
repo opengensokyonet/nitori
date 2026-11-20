@@ -34,9 +34,10 @@ use crate::{
 };
 use bytes::Bytes;
 use core::convert::Infallible;
+use core::time::Duration;
 use nitori_crypto::{Hash, HashAlgorithm, RunningHash, SignatureScheme};
 use nitori_crypto_aws_lc::AwsLcBackend;
-use std::time::Duration;
+use nitori_sync::RefCellSynchronization;
 use time::UtcDateTime;
 
 const LEAF: &[u8] = include_bytes!("../../testdata/docsrs/docsrs-com.der");
@@ -97,16 +98,18 @@ fn spki(certificate: &[u8]) -> &[u8] {
     fields.expect(der::SEQUENCE).unwrap().encoded
 }
 
+type Policy = EmbeddedSctPolicy<RefCellSynchronization>;
+
 type Verifier = WebPkiVerifier<
     AwsLcBackend,
-    AnchorStore,
-    SpkiDistrustList,
+    AnchorStore<RefCellSynchronization>,
+    SpkiDistrustList<RefCellSynchronization>,
     NoRevocationCheck,
-    EmbeddedSctPolicy,
-    ManualClock,
+    Policy,
+    ManualClock<RefCellSynchronization>,
 >;
 
-fn verifier(policy: EmbeddedSctPolicy, now: UtcDateTime) -> Verifier {
+fn verifier(policy: Policy, now: UtcDateTime) -> Verifier {
     WebPkiVerifier::new(
         AwsLcBackend,
         AnchorStore::from_certificates([ROOT]).unwrap(),
@@ -117,8 +120,8 @@ fn verifier(policy: EmbeddedSctPolicy, now: UtcDateTime) -> Verifier {
     )
 }
 
-fn policy() -> EmbeddedSctPolicy {
-    EmbeddedSctPolicy::new(LogList::new(logs(), at(PUBLISHED)))
+fn policy() -> Policy {
+    Policy::new(LogList::new(logs(), at(PUBLISHED)))
 }
 
 fn target(name: &str) -> ServerTarget {
@@ -183,10 +186,9 @@ fn an_expired_certificate_fails() {
     let error = verify(&verifier(policy(), at(NOT_AFTER + 1)), "docsrs.com").unwrap_err();
     assert!(
         matches!(
-            error,
-            VerifyCertificateChainError::Path {
-                source: webpki::Error::CertExpired { .. }
-            }
+            &error,
+            VerifyCertificateChainError::Path { source }
+                if matches!(source.get(), webpki::Error::CertExpired { .. })
         ),
         "{error:?}"
     );
@@ -238,10 +240,9 @@ fn an_unknown_root_fails() {
     let error = verify(&verifier, "docsrs.com").unwrap_err();
     assert!(
         matches!(
-            error,
-            VerifyCertificateChainError::Path {
-                source: webpki::Error::UnknownIssuer
-            }
+            &error,
+            VerifyCertificateChainError::Path { source }
+                if matches!(source.get(), webpki::Error::UnknownIssuer)
         ),
         "{error:?}"
     );
@@ -251,7 +252,7 @@ fn an_unknown_root_fails() {
     assert_eq!(error.alert(), AlertDescription::DECODE_ERROR);
 }
 
-fn transparency_error(policy: EmbeddedSctPolicy, now: UtcDateTime) -> TransparencyError {
+fn transparency_error(policy: Policy, now: UtcDateTime) -> TransparencyError {
     match verify(&verifier(policy, now), "docsrs.com").unwrap_err() {
         VerifyCertificateChainError::Transparency { source } => source,
         error => panic!("{error:?}"),
@@ -263,10 +264,7 @@ fn a_long_validity_needs_three_scts() {
     // The leaf is valid for 198 days, above 180, so it needs 3 SCTs.
     let mut two = logs();
     two.pop();
-    let error = transparency_error(
-        EmbeddedSctPolicy::new(LogList::new(two, at(PUBLISHED))),
-        at(NOW),
-    );
+    let error = transparency_error(Policy::new(LogList::new(two, at(PUBLISHED))), at(NOW));
     assert!(
         matches!(
             error,
@@ -291,7 +289,7 @@ fn an_sct_from_a_log_retired_before_it_does_not_count() {
         },
     );
     let error = transparency_error(
-        EmbeddedSctPolicy::new(LogList::new(logs.clone(), at(PUBLISHED))),
+        Policy::new(LogList::new(logs.clone(), at(PUBLISHED))),
         at(NOW),
     );
     assert!(matches!(
@@ -301,10 +299,7 @@ fn an_sct_from_a_log_retired_before_it_does_not_count() {
     logs[0] = log(XENON, "Google", LogState::Retired { at: at(NOW) });
     assert!(
         verify(
-            &verifier(
-                EmbeddedSctPolicy::new(LogList::new(logs, at(PUBLISHED))),
-                at(NOW)
-            ),
+            &verifier(Policy::new(LogList::new(logs, at(PUBLISHED))), at(NOW)),
             "docsrs.com"
         )
         .is_ok()
@@ -319,7 +314,7 @@ fn the_scts_come_from_two_operators_at_least() {
         log(SYCAMORE, "Google", LogState::Usable),
     ];
     let error = transparency_error(
-        EmbeddedSctPolicy::new(LogList::new(one_operator, at(PUBLISHED))),
+        Policy::new(LogList::new(one_operator, at(PUBLISHED))),
         at(NOW),
     );
     assert!(
@@ -330,15 +325,15 @@ fn the_scts_come_from_two_operators_at_least() {
 
 #[test]
 fn a_stale_log_list_fails_closed_by_default() {
-    let late = at(PUBLISHED) + EmbeddedSctPolicy::CHROME_MAX_LIST_AGE + Duration::from_secs(1);
+    let late = at(PUBLISHED) + Policy::CHROME_MAX_LIST_AGE + Duration::from_secs(1);
     let error = transparency_error(policy(), late);
     assert!(
         matches!(error, TransparencyError::StaleLogList { .. }),
         "{error:?}"
     );
-    let open = EmbeddedSctPolicy::with_list_age(
+    let open = Policy::with_list_age(
         LogList::new(Vec::new(), at(PUBLISHED)),
-        EmbeddedSctPolicy::CHROME_MAX_LIST_AGE,
+        Policy::CHROME_MAX_LIST_AGE,
         StaleLogListAction::SkipCheck,
     );
     assert!(verify(&verifier(open, late), "docsrs.com").is_ok());

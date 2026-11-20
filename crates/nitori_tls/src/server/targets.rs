@@ -10,13 +10,13 @@
 use crate::{
     alert::AlertDescription, extension::alpn::ProtocolName, message::client_hello::ClientHello,
 };
+use alloc::{collections::BTreeMap, vec::Vec};
 use bytes::Bytes;
 use core::{
     convert::Infallible,
     future::{Future, Ready, ready},
 };
 use snafu::Snafu;
-use std::collections::HashMap;
 
 /// A selected target: what the server serves on this connection, with the
 /// application protocol negotiated for it.
@@ -62,14 +62,14 @@ struct SniEntry<T> {
 /// with no protocols negotiates none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SniTargets<T> {
-    names: HashMap<Vec<u8>, SniEntry<T>>,
+    names: BTreeMap<Vec<u8>, SniEntry<T>>,
     fallback: Option<SniEntry<T>>,
 }
 
 impl<T> Default for SniTargets<T> {
     fn default() -> Self {
         Self {
-            names: HashMap::new(),
+            names: BTreeMap::new(),
             fallback: None,
         }
     }

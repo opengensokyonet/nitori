@@ -116,6 +116,7 @@ use crate::{
     verify::{CertificateVerifier, SubjectPublicKey, public_key::SchemeKeyMismatchError},
     version::ProtocolVersion,
 };
+use alloc::{vec, vec::Vec};
 use bytes::Bytes;
 use core::{convert::Infallible, pin::Pin};
 use nitori_call::{LentAccess, ReceiverAccess, ReceiverFamily, call, capability};
