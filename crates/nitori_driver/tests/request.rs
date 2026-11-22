@@ -30,8 +30,9 @@ use nitori_driver::{
         PartList, Timed,
     },
     lend::KeyedList,
+    need::{At, Kind, MyLink, Ref, ToChild},
     request::{Edit, Editor, NodeRequest, Request},
-    structure::{AtMostOne, Child, KeyAddress, NodeKind, Share, SlotVec, Store},
+    structure::{AtMostOne, ByOwnKey, Child, KeyAddress, NodeKind, Share, SlotVec, Store},
 };
 
 // ---------------------------------------------------------------- a log
@@ -130,9 +131,10 @@ impl NodeKind for LogicalPath {
     type Linked = HNil;
     type Request = PathRequest;
 }
+/// A link path links to the connection's entry of its own link.
 impl NodeKind for LinkPath {
     type Children = HList![Child<Recovery, AtMostOne>];
-    type Linked = HNil;
+    type Linked = HList![ByOwnKey<Entry>];
     type Request = LinkRequest;
 }
 impl NodeKind for Recovery {
@@ -320,6 +322,26 @@ impl<L: PartList<L> + 'static> Timed<Base, L, Recovery> for Timeout {
     }
 }
 
+/// On a link path: reads its entry before the calls; the lend finds the
+/// entry, or the structure's invariant is broken.
+pub struct SeesEntry;
+impl<L: PartList<L> + 'static> Hooks<Base, L, LinkPath> for SeesEntry {
+    type Needs = HList![At<Kind<Conn>, ToChild<Entry, MyLink>, Ref<Logged<Entry>>>];
+    const ACTS_BEFORE_CALLS: bool = true;
+    fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, LinkPath>>>(
+        _: BuildView<'_, Self, Base, L, LinkPath, KP>,
+        _: &ArgsOf<L>,
+    ) -> Self {
+        SeesEntry
+    }
+    fn before_calls<KP: HookKeys<Self, Base, L, LinkPath>>(
+        _: HookView<'_, Self, Base, L, LinkPath, KP>,
+        _: &Waker,
+    ) -> Option<Self::Returns> {
+        None
+    }
+}
+
 // ---------------------------------------------------------------- the part
 
 pub struct Base;
@@ -339,7 +361,7 @@ impl Share<LogicalPath> for Base {
     type Data = HList![Logged<LogicalPath>];
 }
 impl Share<LinkPath> for Base {
-    type Data = HList![Logged<LinkPath>];
+    type Data = HList![Logged<LinkPath>, SeesEntry];
 }
 impl Share<Recovery> for Base {
     type Data = HList![Logged<Recovery>, Timeout];
@@ -442,6 +464,17 @@ fn driver(clock: TestClock) -> Driver<Q> {
     d
 }
 
+/// The links of the connection's entries.
+fn entries(d: &Driver<Q>) -> Vec<u32> {
+    let entries = &d.root().unwrap().children.tail.head;
+    let mut out: Vec<u32> = entries
+        .handles()
+        .map(|h| entries.key(h).unwrap().0)
+        .collect();
+    out.sort();
+    out
+}
+
 /// The recovery layers of the link paths of the logical path `k`, as
 /// `(link, has one)`.
 fn recoveries(d: &Driver<Q>, k: u32) -> Vec<(u32, bool)> {
@@ -482,12 +515,16 @@ fn the_connection_adds_and_ends_logical_paths() {
         to_conn(ConnRequest::EndLogicalPath(PathKey(1))),
     ]);
     let _ = run(&mut d);
+    // the link path's entry is built before it and ends after it, once no
+    // link path links to it
     assert_eq!(
         log(),
         [
+            "build Entry",
             "build LinkPath",
             "end LinkPath ()",
             "end LogicalPath ()",
+            "end Entry ()",
             "refused"
         ]
     );
@@ -505,13 +542,56 @@ fn a_logical_path_adds_and_ends_its_link_paths() {
     let _ = run(&mut d);
     assert_eq!(
         log(),
-        ["build LogicalPath", "build LinkPath", "build LinkPath"]
+        [
+            "build LogicalPath",
+            "build Entry",
+            "build LinkPath",
+            "build Entry",
+            "build LinkPath"
+        ]
     );
     assert_eq!(recoveries(&d, 1), [(1, false), (2, false)]);
     script([to_path(1, PathRequest::EndLinkPath(LinkId(1)))]);
     let _ = run(&mut d);
-    assert_eq!(log(), ["end LinkPath ()"]);
+    assert_eq!(log(), ["end LinkPath ()", "end Entry ()"]);
     assert_eq!(recoveries(&d, 1), [(2, false)]);
+}
+
+#[test]
+fn an_entry_starts_with_the_first_link_path_over_it_and_ends_with_the_last() {
+    reset();
+    let mut d = driver(TestClock::default());
+    script([
+        to_conn(ConnRequest::AddLogicalPath(PathKey(1))),
+        to_conn(ConnRequest::AddLogicalPath(PathKey(2))),
+        to_path(1, PathRequest::AddLinkPath(LinkId(1))),
+        to_path(2, PathRequest::AddLinkPath(LinkId(1))),
+    ]);
+    let _ = run(&mut d);
+    // one entry for both: the second link path finds it
+    assert_eq!(
+        log(),
+        [
+            "build LogicalPath",
+            "build LogicalPath",
+            "build Entry",
+            "build LinkPath",
+            "build LinkPath"
+        ]
+    );
+    assert_eq!(entries(&d), [1]);
+    script([to_path(1, PathRequest::EndLinkPath(LinkId(1)))]);
+    let _ = run(&mut d);
+    assert_eq!(log(), ["end LinkPath ()"]);
+    assert_eq!(entries(&d), [1]);
+    // ending the logical path ends its link path, the last over the entry
+    script([to_conn(ConnRequest::EndLogicalPath(PathKey(2)))]);
+    let _ = run(&mut d);
+    assert_eq!(
+        log(),
+        ["end LinkPath ()", "end LogicalPath ()", "end Entry ()"]
+    );
+    assert!(entries(&d).is_empty());
 }
 
 #[test]
@@ -557,6 +637,7 @@ fn a_link_path_adds_and_ends_its_recovery_layer() {
         log(),
         [
             "build LogicalPath",
+            "build Entry",
             "build LinkPath",
             "build Recovery",
             "refused",
@@ -657,6 +738,7 @@ fn the_connection_ends_itself() {
             "end Recovery ()",
             "end LinkPath ()",
             "end LogicalPath ()",
+            "end Entry ()",
             "end Conn ()"
         ]
     );

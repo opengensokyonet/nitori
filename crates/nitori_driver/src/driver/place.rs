@@ -436,6 +436,8 @@ pub struct PlaceInfo {
     pub index: Option<usize>,
     /// Its kind.
     pub kind: TypeId,
+    /// The kinds its kind links to ([`NodeKind::Linked`]).
+    pub links: Vec<TypeId>,
     /// Its positions up to the root, as subscriptions name places.
     pub pre: TypeId,
     /// How deep its nodes are; the root at 0.
@@ -1000,7 +1002,10 @@ where
     {
         let pp = ParentPathOf::<Self>::from_address(parent)?;
         let parent = pp.node_mut(root)?;
-        let key = cast(key).expect(SAME_TYPES);
+        // a link's key is the linking node's own: the same type when the
+        // structure's links are well formed, which a lend at the linking
+        // node proves; otherwise nothing is kept
+        let key = cast(key)?;
         let store =
             <LastChildren<R, Self> as ChildAt<IndexOf<Self>, P>>::store_mut(&mut parent.children);
         let h = store.insert(key, node).ok()?;
@@ -1013,7 +1018,7 @@ where
     ) -> Option<Address<R>> {
         let pp = ParentPathOf::<Self>::from_address(parent)?;
         let parent = pp.node(root)?;
-        let key = cast_ref(key).expect(SAME_TYPES);
+        let key = cast_ref(key)?;
         let store = <LastChildren<R, Self> as ChildAt<IndexOf<Self>, P>>::store(&parent.children);
         Some(pp.append(store.find(key)?).address())
     }
@@ -1143,6 +1148,13 @@ where
             parent: X::parent_place(),
             index: X::child_index(),
             kind: TypeId::of::<TargetOf<Q, X>>(),
+            links: {
+                let mut links = Vec::new();
+                <<TargetOf<Q, X> as NodeKind>::Linked as crate::structure::LinkList<
+                    TargetOf<Q, X>,
+                >>::targets(&mut links);
+                links
+            },
             pre: TypeId::of::<<ChainAt<Q, X> as OwnPlace>::Pre>(),
             depth: <<ChainAt<Q, X> as OwnPlace>::Pre as crate::event::Depth>::DEPTH,
             started: TypeId::of::<NodeStarted<TargetOf<Q, X>>>(),

@@ -599,10 +599,44 @@ fn removing_a_node_ends_it_and_its_subtree() {
     let p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
     d.add::<Route, _, _>(p, PeerId(1)).unwrap();
     log();
+    // the peer the route linked to ends after it: no node links to it
+    // any more
     assert!(d.remove(p, ()));
-    assert_eq!(log(), ["end Route", "end Path"]);
+    assert_eq!(log(), ["end Route", "end Path", "end Peer"]);
     assert_eq!(heard(&d).1, 1, "NodeEnding<Path> reaches the connection");
     assert!(!d.remove(p, ()));
+}
+
+#[test]
+fn a_route_builds_its_peer_and_the_last_route_ends_it() {
+    log();
+    let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
+    let p1 = d.add::<Path, _, _>(End, PathId(1)).unwrap();
+    let p2 = d.add::<Path, _, _>(End, PathId(2)).unwrap();
+    log();
+    // the first route to the peer builds it, before the route
+    let r1 = d.add::<Route, _, _>(p1, PeerId(5)).unwrap();
+    let r2 = d.add::<Route, _, _>(p2, PeerId(5)).unwrap();
+    assert!(log().is_empty(), "the components log only their end");
+    let peers = &d.root().unwrap().children.tail.head;
+    use nitori_driver::structure::Store;
+    let peer = peers.find(&PeerId(5)).expect("built with the first route");
+    // a peer routes link to is not removed on its own
+    let at: PeerAt = nitori_driver::structure::Step::new(peer, End);
+    assert!(!d.remove(at, ()));
+    assert!(d.remove(r1, ()));
+    assert_eq!(log(), ["end Route"]);
+    assert!(d.remove(r2, ()));
+    assert_eq!(log(), ["end Route", "end Peer"]);
+    assert!(
+        d.root()
+            .unwrap()
+            .children
+            .tail
+            .head
+            .find(&PeerId(5))
+            .is_none()
+    );
 }
 
 #[test]

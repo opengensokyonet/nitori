@@ -43,6 +43,12 @@
 //! it, its calls dropped, its components' end hooks run while it is still
 //! in the tree.
 //!
+//! The links of the structure ([`NodeKind::Linked`]) start and end with the
+//! nodes that link: the first node linking to a node it finds absent has
+//! it built first, under its own key; the last one to end has it ended
+//! after it, for its kind's default reason. A node others link to is not
+//! removed on its own.
+//!
 //! A driver dropped before the root ended tells every component that it
 //! was dropped ([`Hooks::aborted`](crate::hooks::Hooks::aborted)), the
 //! nodes above first, and ends every node. After a panic through a poll
@@ -626,6 +632,8 @@ struct PlaceRt {
     /// The places of its children, by their position among the kind's
     /// children.
     children: Vec<Option<usize>>,
+    /// The place of the root's child its nodes link to.
+    link: Option<usize>,
 }
 impl PlaceRt {
     fn positions(&self) -> usize {
@@ -659,6 +667,8 @@ struct NodeEntry<A> {
     addr: A,
     parent: Option<usize>,
     children: Vec<usize>,
+    /// The node it links to.
+    link: Option<usize>,
     /// The waker of each position, with the number of the outer waker it
     /// was made with.
     wakers: Vec<Option<(u64, Waker)>>,
@@ -1022,8 +1032,19 @@ where
                 before,
                 handled,
                 children: Vec::new(),
+                link: None,
                 info,
             });
+        }
+        // a link goes to the root's child of the kind it names, under the
+        // linking node's own key
+        for q in 0..places.len() {
+            let Some(&target) = places[q].info.links.first() else {
+                continue;
+            };
+            places[q].link = places
+                .iter()
+                .position(|p| p.info.parent == Some(places[0].info.path) && p.info.kind == target);
         }
         for q in 0..places.len() {
             let (Some(parent), Some(i)) = (places[q].info.parent, places[q].info.index) else {
@@ -1245,8 +1266,9 @@ where
     }
     /// Whether nodes link to the node `id`.
     fn linked_to(&self, id: usize) -> bool {
-        let _ = id;
-        false
+        self.nodes
+            .iter()
+            .any(|n| n.live().is_some_and(|n| n.link == Some(id)))
     }
     fn register(&mut self, addr: AddressOf<Q>, place: usize, parent: Option<usize>) -> usize {
         let id = self
@@ -1270,6 +1292,7 @@ where
             addr,
             parent,
             children: Vec::new(),
+            link: None,
             wakers: vec![None; positions],
         });
         if let Some(parent) = parent
@@ -1365,7 +1388,9 @@ where
     }
 
     /// Build a node at the position `child` among the children of the
-    /// node `parent`, under `key`; `None` when the key is taken.
+    /// node `parent`, under `key`; `None` when the key is taken. A node
+    /// whose kind links to another has it built first, under its own key,
+    /// when it is not there.
     fn add_node<KK: Clone + 'static>(
         &mut self,
         parent: usize,
@@ -1376,6 +1401,20 @@ where
         let n = self.live(parent)?;
         let (pp, parent_addr) = (n.place, n.addr);
         let p = self.places[pp].children.get(child).copied().flatten()?;
+        if self.find_child(parent, child, &key).is_some() {
+            return None;
+        }
+        let link = match self.places[p].link {
+            None => None,
+            Some(t) => {
+                let root = self.root_id();
+                let i = self.places[t].info.index?;
+                match self.find_child(root, i, &key) {
+                    Some(target) => Some(target),
+                    None => Some(self.add_node(root, i, key.clone(), todo)?),
+                }
+            }
+        };
         let root = self.root.as_mut()?;
         let addr = <Cursor<I0> as PlaceWalk<Q>>::visit(
             p,
@@ -1391,6 +1430,9 @@ where
         // what the builds published, at the parent and above
         self.effects(parent, &[], None, todo);
         let id = self.register(addr, p, Some(parent));
+        if let NodeSlot::Live(n) = &mut self.nodes[id] {
+            n.link = link;
+        }
         self.started(id, todo);
         Some(id)
     }
@@ -1465,7 +1507,8 @@ where
 
     /// End the node `id` with the nodes below it; `own_end` runs the end
     /// hooks of `id` itself. What it reaches goes into `todo`; ending the
-    /// root ends the driver.
+    /// root ends the driver. A node that no node links to any more once
+    /// they ended ends after them, for its kind's default reason.
     fn remove_subtree(
         &mut self,
         id: usize,
@@ -1476,9 +1519,11 @@ where
         self.removal_order(id, &mut order);
         let is_root = id == self.root_id();
         let mut own_end = Some(own_end);
+        let mut unlinked = Vec::new();
         for n in order {
             let Some(entry) = self.live(n) else { continue };
             let (p, addr) = (entry.place, entry.addr);
+            unlinked.extend(entry.link);
             let ending = self.places[p].info.ending;
             self.deliver(n, ending, None, true, todo);
             for c in 0..self.places[p].info.comps.len() {
@@ -1525,6 +1570,30 @@ where
         }
         if is_root {
             self.finish();
+            return;
+        }
+        self.end_unlinked(unlinked, todo);
+    }
+    /// End each of `targets` that is there and no node links to any more,
+    /// for its kind's default reason.
+    fn end_unlinked(&mut self, targets: Vec<usize>, todo: &mut Vec<Hit>) {
+        for target in targets {
+            let Some(p) = self.live(target).map(|n| n.place) else {
+                continue;
+            };
+            if self.linked_to(target) {
+                continue;
+            }
+            self.remove_subtree(
+                target,
+                |root, at, outbox| {
+                    let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
+                        p,
+                        EndDefault::<Q> { root, at, outbox },
+                    );
+                },
+                todo,
+            );
         }
     }
     fn retire(&mut self, id: usize) {
