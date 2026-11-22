@@ -274,12 +274,24 @@ fn a_call_without_keyed_needs_runs_to_its_end() {
     let mut call = pin!(start::<Q2, Advance, _, _>(&End));
     for _ in 0..2 {
         assert_eq!(
-            poll::<Q2, Advance, _, _>(&mut root, End, call.as_mut(), &mut cx),
+            poll::<Q2, Advance, _, _>(
+                &mut root,
+                End,
+                &nitori_driver::event::Outbox::new(),
+                call.as_mut(),
+                &mut cx
+            ),
             Ok(CallStep::Pending)
         );
     }
     assert_eq!(
-        poll::<Q2, Advance, _, _>(&mut root, End, call.as_mut(), &mut cx),
+        poll::<Q2, Advance, _, _>(
+            &mut root,
+            End,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Finished)
     );
     assert_eq!(
@@ -295,7 +307,13 @@ fn a_call_waits_across_polls_and_sees_a_new_view_each_time() {
     let mut call = pin!(start::<Q2, PathAckReceive, _, _>(&p0));
     for _ in 0..2 {
         assert_eq!(
-            poll::<Q2, PathAckReceive, _, _>(&mut root, p0, call.as_mut(), &mut cx),
+            poll::<Q2, PathAckReceive, _, _>(
+                &mut root,
+                p0,
+                &nitori_driver::event::Outbox::new(),
+                call.as_mut(),
+                &mut cx
+            ),
             Ok(CallStep::Pending)
         );
     }
@@ -303,7 +321,13 @@ fn a_call_waits_across_polls_and_sees_a_new_view_each_time() {
     component::<PathAcks, _, _>(&mut p0.node_mut(&mut root).unwrap().data.head).0 =
         vec![(PathId(2), 41), (PathId(0), 40), (PathId(5), 1)];
     assert_eq!(
-        poll::<Q2, PathAckReceive, _, _>(&mut root, p0, call.as_mut(), &mut cx),
+        poll::<Q2, PathAckReceive, _, _>(
+            &mut root,
+            p0,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Pending)
     );
     assert_eq!(
@@ -321,7 +345,13 @@ fn a_call_waits_across_polls_and_sees_a_new_view_each_time() {
     component::<PathAcks, _, _>(&mut p0.node_mut(&mut root).unwrap().data.head).0 =
         vec![(PathId(2), 50)];
     assert_eq!(
-        poll::<Q2, PathAckReceive, _, _>(&mut root, p0, call.as_mut(), &mut cx),
+        poll::<Q2, PathAckReceive, _, _>(
+            &mut root,
+            p0,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Pending)
     );
     assert_eq!(
@@ -335,7 +365,13 @@ fn a_call_waits_across_polls_and_sees_a_new_view_each_time() {
     component::<PathAcks, _, _>(&mut p2.node_mut(&mut root).unwrap().data.head).0 =
         vec![(PathId(0), 9)];
     assert_eq!(
-        poll::<Q3, PathAckReceive, _, _>(&mut root, p2, call.as_mut(), &mut cx),
+        poll::<Q3, PathAckReceive, _, _>(
+            &mut root,
+            p2,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Pending)
     );
     assert_eq!(p0.node(&root).unwrap().data.head.head, PathState(9));
@@ -350,15 +386,33 @@ fn a_call_yields_to_the_driver() {
     root.data.head.tail.tail.head.paths = vec![(PathId(0), 3), (PathId(9), 1)];
     root.data.head.tail.tail.head.peers = vec![(PeerId(7), 5), (PeerId(1), 1)];
     assert_eq!(
-        poll::<Q3, Sweep, _, _>(&mut root, End, call.as_mut(), &mut cx),
+        poll::<Q3, Sweep, _, _>(
+            &mut root,
+            End,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Yielded(Missing("path", 9)))
     );
     assert_eq!(
-        poll::<Q3, Sweep, _, _>(&mut root, End, call.as_mut(), &mut cx),
+        poll::<Q3, Sweep, _, _>(
+            &mut root,
+            End,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Yielded(Missing("peer", 1)))
     );
     assert_eq!(
-        poll::<Q3, Sweep, _, _>(&mut root, End, call.as_mut(), &mut cx),
+        poll::<Q3, Sweep, _, _>(
+            &mut root,
+            End,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Pending)
     );
     let path = &p0.node(&root).unwrap().data;
@@ -376,7 +430,13 @@ fn a_kind_that_is_its_operation_and_a_linked_node() {
     let mut call = pin!(start::<Q2, RouteTicking, _, _>(&route));
     for _ in 0..2 {
         assert_eq!(
-            poll::<Q2, RouteTicking, _, _>(&mut root, route, call.as_mut(), &mut cx),
+            poll::<Q2, RouteTicking, _, _>(
+                &mut root,
+                route,
+                &nitori_driver::event::Outbox::new(),
+                call.as_mut(),
+                &mut cx
+            ),
             Ok(CallStep::Pending)
         );
     }
@@ -390,7 +450,13 @@ fn a_node_gone_is_an_error() {
     let mut call = pin!(start::<Q2, PathAckReceive, _, _>(&p0));
     nitori_driver::structure::remove(&mut root, p0).unwrap();
     assert_eq!(
-        poll::<Q2, PathAckReceive, _, _>(&mut root, p0, call.as_mut(), &mut cx),
+        poll::<Q2, PathAckReceive, _, _>(
+            &mut root,
+            p0,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Err(nitori_driver::lend::LendError::NoNode)
     );
 }

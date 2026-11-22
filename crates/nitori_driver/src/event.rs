@@ -1,0 +1,320 @@
+//! Events: what happened at a node, published by whoever made it happen
+//! and handed to what subscribes to it.
+//!
+//! An event is only a type ([`Event`]). A call or a hook publishes one at
+//! a node on its way up, the node lent included: it writes the need
+//! `At<anchor, Here, Publish<E>>` ([`Publish`]), proved with its other
+//! needs, and its view has a [`Publisher`] for it. The driver publishes
+//! [`NodeStarted`] and [`NodeEnding`] itself.
+//!
+//! A subscriber says where it hears an event from ([`Subscriptions`]):
+//! [`Hear<E>`](Hear) by default, from the node it is at, the nodes above it
+//! and the nodes below it, not from the nodes beside it;
+//! [`HearAt<E, A, S>`](HearAt) from the nodes the anchor `A` and the steps
+//! `S` reach from it, proved where the structure is concrete; and
+//! [`ForDeadline<E>`](ForDeadline), heard by default, only to have a
+//! component's deadline read again. [`NodeEnding`] reaches only the nodes
+//! above the node that ends.
+//!
+//! After a lend, every event it published reaches its subscribers: a
+//! component's handler runs once with every event that reached it in a
+//! round ([`Triggered`]), a call is woken. What the handlers publish is
+//! handled in the next round, until a round publishes nothing.
+use alloc::vec::Vec;
+use core::{any::TypeId, cell::RefCell, fmt, marker::PhantomData};
+
+use frunk_core::hlist::{HCons, HNil, Selector};
+
+use crate::{
+    lend::{
+        Build, Cell, Cx, Flat, FreezeOne, KeyedList, KeyedPositions, KeyedShape, Locate, NeedList,
+        Pass1, Pass2, Places,
+    },
+    need::{Anchor, At, Here, Plain, Steps, StepsPath},
+    structure::NodeKind,
+};
+
+/// Something that happened at a node; the type is the whole event.
+pub trait Event: 'static {}
+
+/// A node of the kind `K` was built: the driver publishes it at the new
+/// node, once its calls are started and its deadlines read.
+pub struct NodeStarted<K>(PhantomData<fn() -> K>);
+impl<K: NodeKind> Event for NodeStarted<K> {}
+
+/// A node of the kind `K` is about to end: the driver publishes it at the
+/// node while it is in the tree. It reaches only the nodes above it; its
+/// subscribers' handlers run once it is gone.
+pub struct NodeEnding<K>(PhantomData<fn() -> K>);
+impl<K: NodeKind> Event for NodeEnding<K> {}
+
+// ---------------------------------------------------------------- publishing
+
+/// Take a publisher of the event `E` at the anchor of the need; only with
+/// the steps [`Here`].
+pub struct Publish<E>(PhantomData<fn() -> E>);
+
+/// Where the events published during a lend are kept until the driver
+/// hands them on: for each, how deep its node is (the root at 0) and its
+/// type.
+#[derive(Default)]
+pub struct Outbox {
+    published: RefCell<Vec<(usize, TypeId)>>,
+}
+impl Outbox {
+    /// An empty outbox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Every event published since the last time, in order, as the depth
+    /// of its node and its type.
+    pub fn take(&self) -> Vec<(usize, TypeId)> {
+        core::mem::take(&mut *self.published.borrow_mut())
+    }
+}
+impl fmt::Debug for Outbox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Outbox")
+            .field("published", &self.published.borrow().len())
+            .finish()
+    }
+}
+
+/// The place of the outbox among what is lent; it is not a node's.
+pub struct OutboxPlace;
+/// The outbox as what is lent holds it, first of every cell.
+pub type OutboxCell<'a> = Cell<OutboxPlace, &'a Outbox>;
+impl<'a> FreezeOne for &'a Outbox {
+    type Out = &'a Outbox;
+    fn freeze(self) -> &'a Outbox {
+        self
+    }
+}
+
+/// Publishes the event `E` at the node of its need's anchor.
+pub struct Publisher<'w, E> {
+    outbox: &'w Outbox,
+    depth: usize,
+    _event: PhantomData<fn() -> E>,
+}
+impl<E: Event> Publisher<'_, E> {
+    /// `E` happened at the anchor's node.
+    pub fn publish(&self) {
+        self.outbox
+            .published
+            .borrow_mut()
+            .push((self.depth, TypeId::of::<E>()));
+    }
+}
+impl<E> fmt::Debug for Publisher<'_, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Publisher<{}>({})",
+            core::any::type_name::<E>(),
+            self.depth
+        )
+    }
+}
+
+/// How deep the node of a place (the positions from it up to the root)
+/// is: the root at 0.
+pub trait Depth {
+    /// The depth.
+    const DEPTH: usize;
+}
+impl Depth for HNil {
+    const DEPTH: usize = 0;
+}
+impl<I, T: Depth> Depth for HCons<I, T> {
+    const DEPTH: usize = 1 + T::DEPTH;
+}
+
+impl<A, E> Flat for At<A, Here, Publish<E>> {
+    type Keyed = HNil;
+}
+impl<P, L: KeyedShape, A, E: 'static> NeedList<P, L> for At<A, Here, Publish<E>> {
+    type View<'w, KP: KeyedList<P, L>> = Publisher<'w, E>;
+    type Rest = L;
+    type RestPos<KP: KeyedList<P, L>> = KP;
+}
+impl<'a, Cx, U, A, E> Pass1<'a, Cx, U, ()> for At<A, Here, Publish<E>> {
+    type Raw = ();
+    type Rem = U;
+    fn take(u: U) -> ((), U) {
+        ((), u)
+    }
+}
+impl<'a, Ch, P, Fr, A, E, AI, FI> Pass2<'a, Cx<Ch, P>, Fr, (AI, FI)> for At<A, Here, Publish<E>>
+where
+    A: Anchor<Ch, P, AI, Pre: Depth>,
+    Fr: Selector<OutboxCell<'a>, FI>,
+{
+    type Raw = Publisher<'a, E>;
+    fn get(f: &Fr) -> Publisher<'a, E> {
+        Publisher {
+            outbox: f.get().0,
+            depth: <A::Pre as Depth>::DEPTH,
+            _event: PhantomData,
+        }
+    }
+}
+impl<Ch, P, U, A, E, AI> Locate<Cx<Ch, P>, U, AI> for At<A, Here, Publish<E>> where
+    A: Anchor<Ch, P, AI>
+{
+}
+impl<Cx, U, A, E> Places<Cx, U, ()> for At<A, Here, Publish<E>> {
+    type Out = HNil;
+}
+impl<Cx, A, E> KeyedPositions<Cx, ()> for At<A, Here, Publish<E>> {
+    type KP = HNil;
+}
+impl<'a, P, L, KP, A, E: 'static> Build<'a, P, L, KP, (), Publisher<'a, E>>
+    for At<A, Here, Publish<E>>
+where
+    L: KeyedShape,
+    KP: KeyedList<P, L>,
+{
+    fn view(_: (), r2: Publisher<'a, E>) -> Publisher<'a, E> {
+        r2
+    }
+}
+
+// ---------------------------------------------------------------- subscribing
+
+/// Hear the event `E` from the node the subscriber is at, the nodes above
+/// it and the nodes below it.
+pub struct Hear<E>(PhantomData<fn() -> E>);
+/// Hear the event `E` from the nodes the anchor `A` and the steps `S`
+/// reach from the subscriber's node (to a linked node: not supported).
+#[allow(clippy::type_complexity)]
+pub struct HearAt<E, A, S>(PhantomData<fn() -> (E, A, S)>);
+/// Hear the event `E` as [`Hear`] does, only to have the component's
+/// deadline read again; its handler does not run for it.
+pub struct ForDeadline<E>(PhantomData<fn() -> E>);
+
+/// Which nodes a subscriber hears an event from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Its own node, the nodes above it and the nodes below it.
+    Around,
+    /// The nodes of the place `place` (the type of its positions up to the
+    /// root) whose node at the depth `depth` is the subscriber's own node
+    /// at that depth.
+    At {
+        /// The depth of the anchor.
+        depth: usize,
+        /// The place of the nodes reached.
+        place: TypeId,
+    },
+}
+/// One subscription, as the driver keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Subscription {
+    /// The event.
+    pub event: TypeId,
+    /// Where it is heard from.
+    pub scope: Scope,
+    /// Whether the handler runs for it, or the deadline is only read
+    /// again.
+    pub handled: bool,
+}
+
+/// A list of subscriptions of a subscriber on the chain `Ch` (for the
+/// parts `P`); `I` is inferred.
+#[diagnostic::on_unimplemented(
+    message = "the subscriptions `{Self}` cannot be resolved here",
+    label = "a subscription's anchor or steps are not on this structure",
+    note = "a subscription is `Hear<E>`, `ForDeadline<E>` or `HearAt<E, Anchor, Steps>`, whose anchor is on the way up and whose steps go down from it"
+)]
+pub trait Subscriptions<Ch, P, I> {
+    /// The subscriptions, in order.
+    fn subscriptions(out: &mut Vec<Subscription>);
+}
+impl<Ch, P> Subscriptions<Ch, P, HNil> for HNil {
+    fn subscriptions(_: &mut Vec<Subscription>) {}
+}
+impl<Ch, P, H: Subscriptions<Ch, P, HI>, T: Subscriptions<Ch, P, TI>, HI, TI>
+    Subscriptions<Ch, P, HCons<HI, TI>> for HCons<H, T>
+{
+    fn subscriptions(out: &mut Vec<Subscription>) {
+        H::subscriptions(out);
+        T::subscriptions(out);
+    }
+}
+impl<Ch, P, E: Event> Subscriptions<Ch, P, ()> for Hear<E> {
+    fn subscriptions(out: &mut Vec<Subscription>) {
+        out.push(Subscription {
+            event: TypeId::of::<E>(),
+            scope: Scope::Around,
+            handled: true,
+        });
+    }
+}
+impl<Ch, P, E: Event> Subscriptions<Ch, P, ()> for ForDeadline<E> {
+    fn subscriptions(out: &mut Vec<Subscription>) {
+        out.push(Subscription {
+            event: TypeId::of::<E>(),
+            scope: Scope::Around,
+            handled: false,
+        });
+    }
+}
+impl<Ch, P, E: Event, A, S, AI, SI> Subscriptions<Ch, P, (AI, SI)> for HearAt<E, A, S>
+where
+    A: Anchor<Ch, P, AI, Pre: Depth>,
+    S: Steps<A::Kind, A::Pre, Plain, SI>,
+    StepsPath<A, S, Ch, P, AI, SI>: 'static,
+{
+    fn subscriptions(out: &mut Vec<Subscription>) {
+        out.push(Subscription {
+            event: TypeId::of::<E>(),
+            scope: Scope::At {
+                depth: <A::Pre as Depth>::DEPTH,
+                place: TypeId::of::<StepsPath<A, S, Ch, P, AI, SI>>(),
+            },
+            handled: true,
+        });
+    }
+}
+
+/// The events of those a component's handler runs for that reached it in
+/// one round: one bit for each, in the order of its subscriptions.
+#[derive(Clone, Copy)]
+pub struct Triggered<'a> {
+    bits: u64,
+    subscribed: &'a [TypeId],
+}
+impl<'a> Triggered<'a> {
+    /// The events at `bits` of `subscribed`.
+    pub fn new(bits: u64, subscribed: &'a [TypeId]) -> Self {
+        Self { bits, subscribed }
+    }
+    /// Whether `E` is among them.
+    pub fn contains<E: Event>(&self) -> bool {
+        let event = TypeId::of::<E>();
+        self.subscribed
+            .iter()
+            .position(|&e| e == event)
+            .is_some_and(|at| self.bits & (1 << at) != 0)
+    }
+    /// Whether none reached it.
+    pub fn is_empty(&self) -> bool {
+        self.bits == 0
+    }
+}
+impl fmt::Debug for Triggered<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Triggered({:#b})", self.bits)
+    }
+}
+
+/// The place of a node, the positions from it up to the root, of the
+/// chain `Ch` whose first item is the node.
+pub trait OwnPlace {
+    /// The positions.
+    type Pre: Depth + 'static;
+}
+impl<K, Pre: Depth + 'static, T> OwnPlace for HCons<crate::need::On<K, Pre>, T> {
+    type Pre = Pre;
+}

@@ -51,16 +51,21 @@ type RouteNeeds = HList![
 #[test]
 fn anchors_and_steps() {
     let (mut root, peer, p0, _, route) = build!(P2);
-    let seen = lend::<RouteNeeds, _, _, _, _, _>(&mut root, route, |view| {
-        let hlist_pat![keys, path, state, rtt, budget, session, keys_again] = view;
-        path.0 += 1;
-        state.0 = keys.0 + keys_again.0;
-        budget.0 -= 1;
-        if let Some(s) = session {
-            s.0 = 5;
-        }
-        rtt.map(|r| r.0)
-    })
+    let seen = lend::<RouteNeeds, _, _, _, _, _>(
+        &mut root,
+        route,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![keys, path, state, rtt, budget, session, keys_again] = view;
+            path.0 += 1;
+            state.0 = keys.0 + keys_again.0;
+            budget.0 -= 1;
+            if let Some(s) = session {
+                s.0 = 5;
+            }
+            rtt.map(|r| r.0)
+        },
+    )
     .unwrap();
     assert_eq!(seen, Some(33));
     assert_eq!(route.node(&root).unwrap().data.head.head, RouteState(0x154));
@@ -74,10 +79,15 @@ fn anchors_and_steps() {
     remove(&mut root, session).unwrap();
     let timer: TimerAt = nitori_driver::structure::Append::append(route, ());
     remove(&mut root, timer).unwrap();
-    lend::<RouteNeeds, _, _, _, _, _>(&mut root, route, |view| {
-        let hlist_pat![_, _, _, rtt, _, session, _] = view;
-        assert!(rtt.is_none() && session.is_none());
-    })
+    lend::<RouteNeeds, _, _, _, _, _>(
+        &mut root,
+        route,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![_, _, _, rtt, _, session, _] = view;
+            assert!(rtt.is_none() && session.is_none());
+        },
+    )
     .unwrap();
 }
 
@@ -86,7 +96,12 @@ fn a_node_gone_is_an_error() {
     let (mut root, _, p0, _, route) = build!(P2);
     remove(&mut root, p0).unwrap();
     assert_eq!(
-        lend::<RouteNeeds, _, _, _, _, _>(&mut root, route, |_| ()),
+        lend::<RouteNeeds, _, _, _, _, _>(
+            &mut root,
+            route,
+            &nitori_driver::event::Outbox::new(),
+            |_| ()
+        ),
         Err(LendError::NoNode)
     );
 }
@@ -96,7 +111,12 @@ fn a_node_gone_is_an_error() {
 fn a_linked_node_gone_breaks_the_invariant() {
     let (mut root, peer, _, _, route) = build!(P2);
     remove(&mut root, peer).unwrap();
-    let _ = lend::<RouteNeeds, _, _, _, _, _>(&mut root, route, |_| ());
+    let _ = lend::<RouteNeeds, _, _, _, _, _>(
+        &mut root,
+        route,
+        &nitori_driver::event::Outbox::new(),
+        |_| (),
+    );
 }
 
 /// On the connection: every path and every peer by key ("all"), one by
@@ -108,24 +128,31 @@ fn every_child_by_key() {
         At<Up<0>, ToChild<Path, ByKey<PathId>>, Mut<PathState>>,
         At<Up<0>, ToChild<Peer, ByKey<PeerId>>, Ref<Budget>>,
     ];
-    lend::<Needs, _, _, _, _, _>(&mut root, End, |view| {
-        let hlist_pat![mut paths, peers] = view;
-        assert_eq!(peers.get(&PeerId(7)), Some(&Budget(100)));
-        assert_eq!(peers.get(&PeerId(9)), None);
-        assert_eq!(peers.iter().count(), 2);
-        paths.get_mut(&PathId(0)).unwrap().0 = 10;
-        paths.get_mut(&PathId(2)).unwrap().0 = 20;
-        if let [Some(a), Some(b), dup] = paths.get_many_mut([&PathId(0), &PathId(2), &PathId(0)]) {
-            core::mem::swap(a, b);
-            assert!(dup.is_none());
-        } else {
-            panic!("both paths are there");
-        }
-        for (_, s) in paths.iter_mut() {
-            s.0 += 100;
-        }
-        assert!(paths.get(&PathId(5)).is_none());
-    })
+    lend::<Needs, _, _, _, _, _>(
+        &mut root,
+        End,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![mut paths, peers] = view;
+            assert_eq!(peers.get(&PeerId(7)), Some(&Budget(100)));
+            assert_eq!(peers.get(&PeerId(9)), None);
+            assert_eq!(peers.iter().count(), 2);
+            paths.get_mut(&PathId(0)).unwrap().0 = 10;
+            paths.get_mut(&PathId(2)).unwrap().0 = 20;
+            if let [Some(a), Some(b), dup] =
+                paths.get_many_mut([&PathId(0), &PathId(2), &PathId(0)])
+            {
+                core::mem::swap(a, b);
+                assert!(dup.is_none());
+            } else {
+                panic!("both paths are there");
+            }
+            for (_, s) in paths.iter_mut() {
+                s.0 += 100;
+            }
+            assert!(paths.get(&PathId(5)).is_none());
+        },
+    )
     .unwrap();
     assert_eq!(p0.node(&root).unwrap().data.head.head, PathState(120));
     assert_eq!(p2.node(&root).unwrap().data.head.head, PathState(110));
@@ -141,13 +168,18 @@ fn every_other_child_by_key() {
         At<Up<0>, Here, Ref<PathIdent>>,
         At<Kind<Connection>, ToChild<Path, ByKeyOthers<PathId>>, Mut<PathState>>,
     ];
-    lend::<Needs, _, _, _, _, _>(&mut root, p2, |view| {
-        let hlist_pat![own, ident, mut others] = view;
-        assert!(others.get(&PathId(ident.0)).is_none());
-        own.0 = 2;
-        others.get_mut(&PathId(0)).unwrap().0 = 1;
-        assert_eq!(others.iter().count(), 1);
-    })
+    lend::<Needs, _, _, _, _, _>(
+        &mut root,
+        p2,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![own, ident, mut others] = view;
+            assert!(others.get(&PathId(ident.0)).is_none());
+            own.0 = 2;
+            others.get_mut(&PathId(0)).unwrap().0 = 1;
+            assert_eq!(others.iter().count(), 1);
+        },
+    )
     .unwrap();
     assert_eq!(p0.node(&root).unwrap().data.head.head, PathState(1));
     assert_eq!(p2.node(&root).unwrap().data.head.head, PathState(2));
@@ -156,12 +188,17 @@ fn every_other_child_by_key() {
         At<Up<1>, Here, Mut<PathState>>,
         At<Kind<Connection>, ToChild<Path, ByKeyOthers<PathId>>, Ref<PathState>>,
     ];
-    lend::<FromRoute, _, _, _, _, _>(&mut root, route, |view| {
-        let hlist_pat![own, others] = view;
-        assert_eq!(own.0, 1);
-        assert_eq!(others.get(&PathId(2)), Some(&PathState(2)));
-        assert!(others.get(&PathId(0)).is_none());
-    })
+    lend::<FromRoute, _, _, _, _, _>(
+        &mut root,
+        route,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![own, others] = view;
+            assert_eq!(own.0, 1);
+            assert_eq!(others.get(&PathId(2)), Some(&PathState(2)));
+            assert!(others.get(&PathId(0)).is_none());
+        },
+    )
     .unwrap();
 }
 
@@ -174,23 +211,28 @@ fn several_components_by_key() {
         At<Up<0>, ToChild<Path, ByKey<PathId>>, MutList<HList![PathStreams, PathState]>>,
         At<Up<0>, Here, Mut<Clock>>,
     ];
-    lend::<Needs, _, _, _, _, _>(&mut root, End, |view| {
-        let hlist_pat![mut paths, clock] = view;
-        clock.0 += 1;
-        let hlist_pat![streams, state] = paths.get_mut(&PathId(0)).unwrap();
-        streams.0 = 12;
-        state.0 = 9;
-        for (id, hlist_pat![_, state]) in paths.iter_mut() {
-            state.0 += u64::from(id.0);
-        }
-        if let [Some(a), Some(b)] = paths.get_many_mut([&PathId(0), &PathId(2)]) {
-            let hlist_pat![a_streams, _] = a;
-            let hlist_pat![b_streams, _] = b;
-            core::mem::swap(a_streams, b_streams);
-        }
-        let hlist_pat![streams, _] = paths.get(&PathId(2)).unwrap();
-        assert_eq!(*streams, PathStreams(12));
-    })
+    lend::<Needs, _, _, _, _, _>(
+        &mut root,
+        End,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![mut paths, clock] = view;
+            clock.0 += 1;
+            let hlist_pat![streams, state] = paths.get_mut(&PathId(0)).unwrap();
+            streams.0 = 12;
+            state.0 = 9;
+            for (id, hlist_pat![_, state]) in paths.iter_mut() {
+                state.0 += u64::from(id.0);
+            }
+            if let [Some(a), Some(b)] = paths.get_many_mut([&PathId(0), &PathId(2)]) {
+                let hlist_pat![a_streams, _] = a;
+                let hlist_pat![b_streams, _] = b;
+                core::mem::swap(a_streams, b_streams);
+            }
+            let hlist_pat![streams, _] = paths.get(&PathId(2)).unwrap();
+            assert_eq!(*streams, PathStreams(12));
+        },
+    )
     .unwrap();
     assert_eq!(p0.node(&root).unwrap().data.head.head, PathState(9));
     assert_eq!(p2.node(&root).unwrap().data.head.head, PathState(2));
@@ -202,13 +244,18 @@ fn several_components_by_key() {
             MutList<HList![PathState, PathStreams]>,
         >,
     ];
-    lend::<Others, _, _, _, _, _>(&mut root, p0, |view| {
-        let hlist_pat![mut others] = view;
-        assert!(others.get_mut(&PathId(0)).is_none());
-        let hlist_pat![state, streams] = others.get_mut(&PathId(2)).unwrap();
-        state.0 += 1;
-        streams.0 = 0;
-    })
+    lend::<Others, _, _, _, _, _>(
+        &mut root,
+        p0,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![mut others] = view;
+            assert!(others.get_mut(&PathId(0)).is_none());
+            let hlist_pat![state, streams] = others.get_mut(&PathId(2)).unwrap();
+            state.0 += 1;
+            streams.0 = 0;
+        },
+    )
     .unwrap();
     assert_eq!(p2.node(&root).unwrap().data.head.head, PathState(3));
 }
@@ -229,25 +276,35 @@ fn a_second_structure() {
         At<Kind<HttpConnection>, Here, Ref<Settings>>,
         At<Kind<HttpConnection>, ToChild<Stream, ByKeyOthers<StreamId>>, Ref<Headers>>,
     ];
-    lend::<OnStream, _, _, _, _, _>(&mut root, s4, |view| {
-        let hlist_pat![headers, body, control, settings, others] = view;
-        headers.0.push("a");
-        body.unwrap().0 += settings.0 + 1;
-        assert!(control.is_some());
-        assert!(others.get(&StreamId(4)).is_none());
-        assert!(others.get(&StreamId(8)).is_some());
-    })
+    lend::<OnStream, _, _, _, _, _>(
+        &mut root,
+        s4,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![headers, body, control, settings, others] = view;
+            headers.0.push("a");
+            body.unwrap().0 += settings.0 + 1;
+            assert!(control.is_some());
+            assert!(others.get(&StreamId(4)).is_none());
+            assert!(others.get(&StreamId(8)).is_some());
+        },
+    )
     .unwrap();
     type OnConnection = HList![
         At<Up<0>, ToChild<Stream, ByKey<StreamId>>, Mut<Headers>>,
         At<Up<0>, Here, Mut<Limits>>,
         At<Up<0>, Then<ToChild<Control>, Here>, Mut<Settings>>,
     ];
-    lend::<OnConnection, _, _, _, _, _>(&mut root, End, |view| {
-        let hlist_pat![mut streams, limits, control] = view;
-        limits.0 = streams.iter().count() as u64;
-        assert_eq!(streams.get_mut(&StreamId(4)).unwrap().0, ["a"]);
-        control.unwrap().0 = 3;
-    })
+    lend::<OnConnection, _, _, _, _, _>(
+        &mut root,
+        End,
+        &nitori_driver::event::Outbox::new(),
+        |view| {
+            let hlist_pat![mut streams, limits, control] = view;
+            limits.0 = streams.iter().count() as u64;
+            assert_eq!(streams.get_mut(&StreamId(4)).unwrap().0, ["a"]);
+            control.unwrap().0 = 3;
+        },
+    )
     .unwrap();
 }

@@ -51,7 +51,7 @@
 //!     At<Kind<Root>, Here, Ref<Limit>>,
 //!     At<Kind<Root>, ToChild<Layer>, Mut<Count>>,
 //! ];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |view| {
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |view| {
 //!     let hlist_pat![count, limit, layer] = view;
 //!     count.0 += limit.0 + 1;
 //!     if let Some(layer) = layer {
@@ -113,13 +113,13 @@
 //!     At<Up<0>, ToChild<Item, ByKey<u32>>, MutList<HList![Count]>>,
 //!     At<Up<0>, ToChild<Layer>, Mut<Count>>,
 //! ];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! type OnItem = HList![
 //!     At<Up<0>, Here, Mut<Count>>,
 //!     At<Kind<Root>, ToChild<Item, ByKeyOthers<u32>>, Ref<Count>>,
 //!     At<Provides<Limit>, Here, Ref<Limit>>,
 //! ];
-//! lend::<OnItem, _, _, _, _, _>(&mut root, item, |_| ()).unwrap();
+//! lend::<OnItem, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! // The item-by-item check, which names the need when one fails.
 //! nitori_driver::lend::explain::<OnItem, Root, HList![Part], ItemAt, _, _, _, _>();
 //! ```
@@ -166,7 +166,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Kind<Root>, Here, Mut<Count>>, At<Up<0>, Here, Mut<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! An exclusive and a shared need of one place:
@@ -211,7 +211,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Kind<Root>, Here, Mut<Count>>, At<Up<0>, Here, Ref<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! A component not on the structure (the layer has no `Limit`):
@@ -256,7 +256,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Kind<Root>, ToChild<Layer>, Mut<Limit>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! Every child by key (`ByKey`) of a store on the chain; the item lent is kept in it:
@@ -301,7 +301,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Kind<Root>, ToChild<Item, ByKey<u32>>, Mut<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, item, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! Every other child by key (`ByKeyOthers`) of a store off the chain:
@@ -346,7 +346,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Up<0>, ToChild<Item, ByKeyOthers<u32>>, Mut<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! Two keyed needs of one store, even of different components:
@@ -394,7 +394,7 @@
 //!     At<Up<0>, ToChild<Item, ByKey<u32>>, Mut<Count>>,
 //!     At<Up<0>, ToChild<Item, ByKey<u32>>, MutList<HList![Count]>>,
 //! ];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! Several components by key, one of them not in the children's data:
@@ -439,7 +439,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Up<0>, ToChild<Item, ByKey<u32>>, MutList<HList![Count, Limit]>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! Several components without a step by key:
@@ -484,7 +484,7 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Up<0>, Here, MutList<HList![Count, Limit]>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! An anchor by content with two candidates on the way up (the item and the root both have `Count`):
@@ -529,13 +529,14 @@
 //! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
 //! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
 //! type Needs = HList![At<Provides<Count>, Here, Ref<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, item, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 mod cells;
 mod check;
 mod keyed;
 mod pass;
 mod view;
+mod writes;
 
 use core::fmt;
 
@@ -560,10 +561,12 @@ pub use view::{
     Build, Flat, NeedList, NeedSet, TagFlat, TagFlatMany, TagFlatRef, TagNeed, TagNeedBuild,
     TagNeedRef, TagNeedRefBuild, ViewOf,
 };
+pub use writes::{TypeIds, Writes};
 
-use frunk_core::hlist::HNil;
+use frunk_core::hlist::{HCons, HNil};
 
 use crate::{
+    event::{Outbox, OutboxCell},
     need::ChainOf,
     structure::{KindFor, Node, NodeKind, PathFrom},
 };
@@ -590,7 +593,10 @@ pub type LinkOf<R, P, X, IL> = <LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::Lk;
 /// Where the needs of the node at `X` from `R` are lent.
 pub type CxOf<R, P, X> = Cx<<X as ChainOf<R, HNil>>::Chain, P>;
 /// Every cell lent around the node at `X` from `R`.
-pub type CellsOf<'a, R, P, X, IL> = <X as ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>>>::Out;
+///
+/// The outbox comes first; the cells of the tree follow.
+pub type CellsOf<'a, R, P, X, IL> =
+    HCons<OutboxCell<'a>, <X as ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>>>::Out>;
 /// The keyed positions of the needs `N` at `X`.
 pub type PositionsOf<N, R, P, X, IK> = <N as KeyedPositions<CxOf<R, P, X>, IK>>::KP;
 /// Pass 1's result for the needs `N` at `X`.
@@ -615,10 +621,12 @@ pub type Raw2Of<'a, N, R, P, X, IL, I1, I2> =
 pub trait LendAt<'a, R: KindFor<P>, P, X, I>: NeedSet<P> {
     /// The keyed positions.
     type Positions: KeyedList<P, Self::Keyed>;
-    /// Lend the node at `at` and the tree around it to `f`.
+    /// Lend the node at `at` and the tree around it to `f`; what the view
+    /// publishes goes to `outbox`.
     fn lend<T>(
         root: &'a mut Node<R, P>,
         at: X,
+        outbox: &'a Outbox,
         f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> T,
     ) -> Result<T, LendError>;
 }
@@ -650,10 +658,14 @@ where
     fn lend<T>(
         root: &'a mut Node<R, P>,
         at: X,
+        outbox: &'a Outbox,
         f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> T,
     ) -> Result<T, LendError> {
         let link = linked(<LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::find(root, &at))?;
-        let cells = linked(at.cells(root, link))?;
+        let cells = HCons {
+            head: Cell::new(outbox),
+            tail: linked(at.cells(root, link))?,
+        };
         let (raw1, rem) = <N as Pass1<'a, CxOf<R, P, X>, _, I1>>::take(cells);
         let frozen = rem.freeze();
         let raw2 = <N as Pass2<'a, CxOf<R, P, X>, _, I2>>::get(&frozen);
@@ -664,7 +676,8 @@ where
 }
 
 /// Lend the node at `at` and the tree around it to the needs `N`, and run
-/// `f` on their view.
+/// `f` on their view; what the view publishes ([`Publish`](crate::event::Publish))
+/// goes to `outbox`.
 ///
 /// Every position is inferred here; the type parameters after `N` are
 /// written `_`. A node on the path not in the tree is an error; a linked
@@ -672,13 +685,14 @@ where
 pub fn lend<'a, N, R, P, X, I, T>(
     root: &'a mut Node<R, P>,
     at: X,
+    outbox: &'a Outbox,
     f: impl FnOnce(ViewOf<'a, N, P, N::Positions>) -> T,
 ) -> Result<T, LendError>
 where
     R: KindFor<P>,
     N: LendAt<'a, R, P, X, I>,
 {
-    N::lend(root, at, f)
+    N::lend(root, at, outbox, f)
 }
 
 /// The item-by-item check of the needs `N` at the path `X` from `R`, each

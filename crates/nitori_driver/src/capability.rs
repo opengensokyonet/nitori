@@ -116,7 +116,7 @@
 //!     fn assemble(_: <HNil as PartNeeds>::View<'_>) -> Self::Piece<'_> {}
 //! }
 //! type Needs = HList![Cap<CountCap>, Contributed<Limits>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |view| {
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |view| {
 //!     let hlist_pat![hlist_pat![count], mut limits] = view;
 //!     limits.each_piece(&mut count.0);
 //! })
@@ -183,7 +183,7 @@
 //!     fn assemble(_: <HNil as PartNeeds>::View<'_>) -> Self::Piece<'_> {}
 //! }
 //! type Needs = HList![Cap<CountCap>, At<Kind<Root>, Here, Ref<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! A part's piece and the call taking the same component exclusive:
@@ -244,7 +244,7 @@
 //!     fn assemble(_: <HNil as PartNeeds>::View<'_>) -> Self::Piece<'_> {}
 //! }
 //! type Needs = HList![At<Kind<Root>, Here, Mut<Limit>>, Contributed<Limits>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 //!
 //! A part that does not say what it contributes to a family a need uses:
@@ -300,7 +300,7 @@
 //! # }
 //! # let mut root: Node<Root, HList![Part, Other]> = Node::new(Default::default());
 //! type Needs = HList![Contributed<Limits>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, |_| ()).unwrap();
+//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
 use core::marker::PhantomData;
 
@@ -688,5 +688,16 @@ impl<F, A, H: EachRun<F, A>, T: EachPiece<F, A>> EachPiece<F, A> for HCons<H, T>
     fn each_piece(&mut self, arg: &mut A) {
         self.head.each_run(arg);
         self.tail.each_piece(arg);
+    }
+}
+
+impl<P, Cp: Capability<Needs: crate::lend::Writes<P>>> crate::lend::Writes<P> for Cap<Cp> {
+    fn writes(out: &mut alloc::vec::Vec<core::any::TypeId>) {
+        <Cp::Needs as crate::lend::Writes<P>>::writes(out);
+    }
+}
+impl<P: PieceList<F, Needs: crate::lend::Writes<P>>, F> crate::lend::Writes<P> for Contributed<F> {
+    fn writes(out: &mut alloc::vec::Vec<core::any::TypeId>) {
+        <NeedsOf<P, F> as crate::lend::Writes<P>>::writes(out);
     }
 }

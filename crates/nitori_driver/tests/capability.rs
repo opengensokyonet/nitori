@@ -393,7 +393,13 @@ fn frames_dispatched_by_the_sum() {
         vec![(2, 5), (8, 3), (9, 1), (2, 1)];
     let mut call = pin!(start::<Q3, Receive, _, _>(&p0));
     assert_eq!(
-        poll::<Q3, Receive, _, _>(&mut root, p0, call.as_mut(), &mut cx),
+        poll::<Q3, Receive, _, _>(
+            &mut root,
+            p0,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Finished)
     );
     let path = &p0.node(&root).unwrap().data.head;
@@ -409,7 +415,13 @@ fn frames_dispatched_by_the_sum() {
     component::<Inbox, _, _>(&mut p0.node_mut(&mut root).unwrap().data.head).0 = vec![(8, 3)];
     let mut call = pin!(start::<Q3, Receive, _, _>(&p0));
     assert_eq!(
-        poll::<Q3, Receive, _, _>(&mut root, p0, call.as_mut(), &mut cx),
+        poll::<Q3, Receive, _, _>(
+            &mut root,
+            p0,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Finished)
     );
     assert_eq!(p0.node(&root).unwrap().data.head.tail.head.0, [(0, 8)]);
@@ -435,7 +447,13 @@ fn composed_capabilities_and_pieces_in_turn() {
     session.node_mut(&mut root).unwrap().data.tail.head.head.0 = 20;
     let mut call = pin!(start::<Q3, RouteSend, _, _>(&route));
     assert_eq!(
-        poll::<Q3, RouteSend, _, _>(&mut root, route, call.as_mut(), &mut cx),
+        poll::<Q3, RouteSend, _, _>(
+            &mut root,
+            route,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Yielded((
             vec!["base", "streamed", "dgram"],
             10 + 1 + 20 + 100,
@@ -449,7 +467,13 @@ fn composed_capabilities_and_pieces_in_turn() {
     remove(&mut root, session).unwrap();
     let mut call = pin!(start::<Q2, RouteSend, _, _>(&route));
     assert_eq!(
-        poll::<Q2, RouteSend, _, _>(&mut root, route, call.as_mut(), &mut cx),
+        poll::<Q2, RouteSend, _, _>(
+            &mut root,
+            route,
+            &nitori_driver::event::Outbox::new(),
+            call.as_mut(),
+            &mut cx
+        ),
         Ok(CallStep::Yielded((vec!["base", "absent"], 1, None)))
     );
 }

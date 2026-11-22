@@ -201,7 +201,7 @@ impl<H, T: Refs> Refs for HCons<H, T> {
 
 /// A list of keyed needs as head and tail (the empty list: [`NoKeyed`]
 /// and itself).
-pub trait KeyedShape {
+pub trait KeyedShape: frunk_core::hlist::HList {
     /// The first keyed need.
     type Head: KeyedDesc;
     /// The others.

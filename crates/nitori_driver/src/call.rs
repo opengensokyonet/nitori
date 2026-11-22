@@ -82,7 +82,7 @@
 //! let _: ItemAt = insert(&mut root, End, 1, Node::new(frunk_core::hlist![frunk_core::hlist![Count(2)]])).ok().unwrap();
 //! let mut call = core::pin::pin!(start::<Q, Counting, _, _>(&End));
 //! let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
-//! let step = poll::<Q, Counting, _, _>(&mut root, End, call.as_mut(), &mut cx);
+//! let step = poll::<Q, Counting, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), call.as_mut(), &mut cx);
 //! assert!(matches!(step, Ok(CallStep::Finished)));
 //! assert_eq!(root.data.head.head.0, 2);
 //! ```
@@ -301,6 +301,7 @@
 //! ```
 use alloc::vec::Vec;
 use core::{
+    any::TypeId,
     marker::PhantomData,
     ops::{Add, ControlFlow},
     pin::Pin,
@@ -314,10 +315,11 @@ use frunk_core::{
 use nitori_call::{Access, LentCall, LentSlot, Operation, ReceiverFamily, Start};
 
 use crate::{
+    event::{Outbox, Subscription, Subscriptions},
     lend::{
-        Build, CellsOf, ChainCells, CxOf, Flat, Freeze, FrozenOf, KeyedList, KeyedPositions,
+        Build, Cell, CellsOf, ChainCells, CxOf, Flat, Freeze, FrozenOf, KeyedList, KeyedPositions,
         LendError, LinkOf, LinkSpec, LinkedOf, Locate, NeedSet, Pairwise, Pass1, Pass2, Places,
-        PositionsOf, Raw1Of, Raw2Of, Rem1Of, ViewOf, linked,
+        PositionsOf, Raw1Of, Raw2Of, Rem1Of, ViewOf, Writes, linked,
     },
     need::ChainOf,
     structure::{
@@ -343,8 +345,18 @@ pub trait CallKind<Q: Composition>: 'static + Sized {
     /// What the call yields to the driver; `Infallible` for a call that
     /// yields nothing.
     type Yield = core::convert::Infallible;
+    /// What wakes the call: a list of [`Hear`](crate::event::Hear) and
+    /// [`HearAt`](crate::event::HearAt), resolved where the call is lent.
+    type Subscribes = HNil;
     /// The operation of a new call.
     fn start() -> Self::Op;
+    /// Whether the call is no longer needed, read from the view of its
+    /// needs before it is polled; the driver then drops it and does not
+    /// poll it again. By default never.
+    fn no_longer_needed<KP: Positions<Q, Self>>(view: &View<'_, Self, Q, KP>) -> bool {
+        let _ = view;
+        false
+    }
 }
 /// The keyed needs of the call `C`, in order.
 pub type KeyedOf<Q, C> = <<C as CallKind<Q>>::Needs as Flat>::Keyed;
@@ -446,6 +458,9 @@ pub enum CallStep<Y> {
     Finished,
     /// The call yielded an item and goes on.
     Yielded(Y),
+    /// The call said it is no longer needed and was not polled; it is
+    /// dropped.
+    NoLongerNeeded,
 }
 
 // ---------------------------------------------------------------- the composition
@@ -641,13 +656,19 @@ pub trait SlotCall<Q: Composition, S: SlotDesc> {
     type Running;
     /// A new call for the node at `at`.
     fn start(at: &S::At) -> Self::Running;
+    /// What the call subscribes to, resolved at its node.
+    fn subscriptions(out: &mut Vec<Subscription>);
+    /// The components its needs take exclusive.
+    fn writes(out: &mut Vec<TypeId>);
 }
 /// Polling the slot `S`'s call under `Q` with a view lent for this poll.
 pub trait LendOne<'a, Q: Composition, S: SlotDesc + SlotYield<Q>>: SlotCall<Q, S> {
-    /// Lend the node at `at` and poll `call` once.
+    /// Lend the node at `at` and poll `call` once; what the view publishes
+    /// goes to `outbox`.
     fn poll(
         root: &'a mut Node<RootOf<Q>, PartsOf<Q>>,
         at: S::At,
+        outbox: &'a Outbox,
         call: Pin<&mut Self::Running>,
         cx: &mut Context<'_>,
     ) -> Result<CallStep<S::Yield>, LendError>;
@@ -676,11 +697,14 @@ impl<Q: Composition> SlotCall<Q, NoSlot> for NoPos {
     fn start(at: &core::convert::Infallible) -> core::convert::Infallible {
         *at
     }
+    fn subscriptions(_: &mut Vec<Subscription>) {}
+    fn writes(_: &mut Vec<TypeId>) {}
 }
 impl<Q: Composition> LendOne<'_, Q, NoSlot> for NoPos {
     fn poll(
         _: &mut Node<RootOf<Q>, PartsOf<Q>>,
         at: core::convert::Infallible,
+        _: &Outbox,
         _: Pin<&mut core::convert::Infallible>,
         _: &mut Context<'_>,
     ) -> Result<CallStep<core::convert::Infallible>, LendError> {
@@ -738,10 +762,12 @@ where
 {
     <PositionsAt<Q, I> as SlotCall<Q, Slot<X, C>>>::start(at)
 }
-/// Lend the node at `at` to the call of the kind `C` and poll it once.
+/// Lend the node at `at` to the call of the kind `C` and poll it once;
+/// what its view publishes goes to `outbox`.
 pub fn poll<'a, Q, C, X, I>(
     root: &'a mut Node<RootOf<Q>, PartsOf<Q>>,
     at: X,
+    outbox: &'a Outbox,
     call: Pin<&mut RunningAt<Q, I>>,
     cx: &mut Context<'_>,
 ) -> Result<CallStep<C::Yield>, LendError>
@@ -751,15 +777,15 @@ where
     CallSlotsOf<Q>: FindSlot<C, I, At = X> + NthItem<Q, I, Item = Slot<X, C>>,
     Q::Pack: PackNth<Q, CallSlotsOf<Q>, I>,
 {
-    <PositionsAt<Q, I> as LendOne<'a, Q, Slot<X, C>>>::poll(root, at, call, cx)
+    <PositionsAt<Q, I> as LendOne<'a, Q, Slot<X, C>>>::poll(root, at, outbox, call, cx)
 }
 
 // ---------------------------------------------------------------- proving every slot
 
-/// The positions of one slot: the link's, pass 1's, pass 2's and the keyed
-/// needs'.
+/// The positions of one slot: the link's, pass 1's, pass 2's, the keyed
+/// needs' and the subscriptions'.
 #[allow(clippy::type_complexity)]
-pub struct SlotPositions<IL, I1, I2, IK>(PhantomData<fn() -> (IL, I1, I2, IK)>);
+pub struct SlotPositions<IL, I1, I2, IK, IS>(PhantomData<fn() -> (IL, I1, I2, IK, IS)>);
 
 /// Every slot of a list proved, its positions inferred (`I`, one variable
 /// for the whole tree); the pack is the list of the positions.
@@ -798,9 +824,11 @@ pub trait ProveOne<Q, I> {
 }
 
 type Needs<Q, C> = <C as CallKind<Q>>::Needs;
+/// The chain up from the nodes at the path type `X` of `Q`'s tree.
+pub type ChainAt<Q, X> = <X as ChainOf<RootOf<Q>, HNil>>::Chain;
 type KPOf<Q, C, X, IK> = PositionsOf<Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IK>;
 
-impl<Q, X, C, IL, IC, IP, IK, I1, I2> ProveOne<Q, (IL, IC, IP, IK, I1, I2)> for Slot<X, C>
+impl<Q, X, C, IL, IC, IP, IK, I1, I2, IS> ProveOne<Q, (IL, IC, IP, IK, I1, I2, IS)> for Slot<X, C>
 where
     Q: Composition,
     C: CallKind<Q>,
@@ -832,8 +860,10 @@ where
             I2,
         >,
     C::Op: RunsOn<Lent<Q, C, KPOf<Q, C, X, IK>>, C::Yield>,
+    C::Subscribes: Subscriptions<ChainAt<Q, X>, PartsOf<Q>, IS>,
+    Needs<Q, C>: Writes<PartsOf<Q>>,
 {
-    type Pos = SlotPositions<IL, I1, I2, IK>;
+    type Pos = SlotPositions<IL, I1, I2, IK, IS>;
 }
 
 /// The item-by-item check of the call of the kind `C` at the path type `X`
@@ -860,7 +890,7 @@ where
 {
 }
 
-impl<Q, X, C, IL, I1, I2, IK> SlotCall<Q, Slot<X, C>> for SlotPositions<IL, I1, I2, IK>
+impl<Q, X, C, IL, I1, I2, IK, IS> SlotCall<Q, Slot<X, C>> for SlotPositions<IL, I1, I2, IK, IS>
 where
     Q: Composition,
     C: CallKind<Q>,
@@ -868,15 +898,24 @@ where
     Needs<Q, C>: KeyedPositions<CxOf<RootOf<Q>, PartsOf<Q>, X>, IK>,
     KPOf<Q, C, X, IK>: Positions<Q, C> + 'static,
     C::Op: RunsOn<Lent<Q, C, KPOf<Q, C, X, IK>>, C::Yield>,
+    C::Subscribes: Subscriptions<ChainAt<Q, X>, PartsOf<Q>, IS>,
+    Needs<Q, C>: Writes<PartsOf<Q>>,
 {
     type Family = Lent<Q, C, KPOf<Q, C, X, IK>>;
     type Running = LentCall<Self::Family, C::Op>;
     fn start(_: &X) -> Self::Running {
         LentCall::new(C::start())
     }
+    fn subscriptions(out: &mut Vec<Subscription>) {
+        <C::Subscribes as Subscriptions<ChainAt<Q, X>, PartsOf<Q>, IS>>::subscriptions(out);
+    }
+    fn writes(out: &mut Vec<TypeId>) {
+        <Needs<Q, C> as Writes<PartsOf<Q>>>::writes(out);
+    }
 }
 
-impl<'a, Q, X, C, IL, I1, I2, IK> LendOne<'a, Q, Slot<X, C>> for SlotPositions<IL, I1, I2, IK>
+impl<'a, Q, X, C, IL, I1, I2, IK, IS> LendOne<'a, Q, Slot<X, C>>
+    for SlotPositions<IL, I1, I2, IK, IS>
 where
     Q: Composition,
     C: CallKind<Q>,
@@ -884,6 +923,8 @@ where
     Needs<Q, C>: KeyedPositions<CxOf<RootOf<Q>, PartsOf<Q>, X>, IK>,
     KPOf<Q, C, X, IK>: Positions<Q, C> + 'static,
     C::Op: RunsOn<Lent<Q, C, KPOf<Q, C, X, IK>>, C::Yield>,
+    C::Subscribes: Subscriptions<ChainAt<Q, X>, PartsOf<Q>, IS>,
+    Needs<Q, C>: Writes<PartsOf<Q>>,
     LinkedOf<RootOf<Q>, X>: LinkSpec<RootOf<Q>, PartsOf<Q>, X, IL>,
     X: ChainCells<'a, RootOf<Q>, PartsOf<Q>, HNil, LinkOf<RootOf<Q>, PartsOf<Q>, X, IL>>,
     Needs<Q, C>:
@@ -907,6 +948,7 @@ where
     fn poll(
         root: &'a mut Node<RootOf<Q>, PartsOf<Q>>,
         at: X,
+        outbox: &'a Outbox,
         call: Pin<&mut Self::Running>,
         cx: &mut Context<'_>,
     ) -> Result<CallStep<C::Yield>, LendError> {
@@ -916,7 +958,10 @@ where
             X,
             IL,
         >>::find(root, &at))?;
-        let cells = linked(at.cells(root, link))?;
+        let cells = HCons {
+            head: Cell::new(outbox),
+            tail: linked(at.cells(root, link))?,
+        };
         let (raw1, rem) =
             <Needs<Q, C> as Pass1<'a, CxOf<RootOf<Q>, PartsOf<Q>, X>, _, I1>>::take(cells);
         let frozen = rem.freeze();
@@ -929,6 +974,9 @@ where
             _,
             _,
         >>::view(raw1, raw2));
+        if C::no_longer_needed::<KPOf<Q, C, X, IK>>(&loan.0) {
+            return Ok(CallStep::NoLongerNeeded);
+        }
         Ok(match call.poll_with_views(Pin::new(&mut loan), cx) {
             Poll::Pending => CallStep::Pending,
             Poll::Ready(ControlFlow::Break(())) => CallStep::Finished,
