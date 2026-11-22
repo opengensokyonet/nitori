@@ -1,5 +1,5 @@
 #![cfg_attr(not(test), no_std)]
-#![feature(impl_trait_in_assoc_type, yield_expr, min_specialization)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 #![warn(

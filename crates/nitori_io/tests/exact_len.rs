@@ -300,10 +300,7 @@ fn zero_sized_infinite_quota_is_unchanged_by_subassign() {
 
 #[test]
 fn budget_views_display_the_remaining_quota() {
-    // Existing downstream code can format a view with an unconstrained marker.
-    fn describe<F: nitori_call::ReceiverFamily, L>(
-        view: &nitori_io::adapters::LimitedView<'_, F, L>,
-    ) -> String {
+    fn describe(view: &impl core::fmt::Debug) -> String {
         format!("{view:?}")
     }
     use nitori_call::{Compose, Direct};
@@ -325,4 +322,46 @@ fn budget_views_display_the_remaining_quota() {
         view.as_mut(),
     );
     assert_eq!(describe(&limited), "LimitedView { remaining: 7, .. }");
+}
+
+// Formatting a limited view is optional. A quota can participate in reads
+// and exact-length queries without implementing Debug.
+#[derive(Clone)]
+struct OpaqueQuota(u8);
+
+impl nitori_io::Min<usize> for OpaqueQuota {
+    type Output = usize;
+    fn min(self, rhs: usize) -> usize {
+        core::cmp::min(usize::from(self.0), rhs)
+    }
+}
+impl nitori_io::Min<OpaqueQuota> for usize {
+    type Output = OpaqueQuota;
+    fn min(self, rhs: OpaqueQuota) -> OpaqueQuota {
+        OpaqueQuota(nitori_io::Min::min(self, rhs.0))
+    }
+}
+impl core::ops::SubAssign for OpaqueQuota {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 -= rhs.0;
+    }
+}
+
+#[call(sync)]
+async fn non_debug_quota<F: Read + ExactLen<Length = usize>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> (u8, u8)
+where
+    <F as Read>::Error: core::fmt::Debug,
+{
+    let mut limited = io.compose(ReadLimit(OpaqueQuota(3)));
+    limited.read_array::<1>().await.unwrap();
+    (query(&mut limited).await.0, limited.into_state().0.0)
+}
+
+#[test]
+fn reading_and_querying_do_not_require_a_debug_quota() {
+    let mut src = &b"ab"[..];
+    assert_eq!(src.sync_non_debug_quota_unpin(), (1, 2));
+    assert_eq!(src, b"b");
 }
