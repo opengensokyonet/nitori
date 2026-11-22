@@ -8,3 +8,4 @@ description = "The tree of state a driver keeps and lends to its calls"
 
 [dependencies]
 frunk_core.workspace = true
+nitori_call.workspace = true
