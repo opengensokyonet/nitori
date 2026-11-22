@@ -204,6 +204,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitori_clock"
+version = "0.0.0"
+
+[[package]]
+name = "nitori_clock_tokio"
+version = "0.0.0"
+dependencies = [
+ "nitori_clock",
+ "tokio",
+]
+
+[[package]]
 name = "nitori_crypto"
 version = "0.0.0"
 dependencies = [

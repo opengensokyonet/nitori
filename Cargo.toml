@@ -3,6 +3,8 @@ members = [
     "benches/call-bench",
     "crates/nitori_call",
     "crates/nitori_call_macros",
+    "crates/nitori_clock",
+    "crates/nitori_clock_tokio",
     "crates/nitori_crypto",
     "crates/nitori_crypto_aws_lc",
     "crates/nitori_crypto_ring",
@@ -22,6 +24,7 @@ futures-sink = "0.3.32"
 futures-util = { version = "0.3.32", default-features = false }
 nitori_call = { path = "crates/nitori_call", default-features = false }
 nitori_call_macros = { path = "crates/nitori_call_macros" }
+nitori_clock = { path = "crates/nitori_clock" }
 nitori_crypto = { path = "crates/nitori_crypto" }
 nitori_crypto_ring = { path = "crates/nitori_crypto_ring" }
 nitori_io = { path = "crates/nitori_io", default-features = false }
