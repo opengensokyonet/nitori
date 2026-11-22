@@ -8,6 +8,7 @@ members = [
     "crates/nitori_crypto",
     "crates/nitori_crypto_aws_lc",
     "crates/nitori_crypto_ring",
+    "crates/nitori_driver",
     "crates/nitori_id",
     "crates/nitori_io",
     "crates/nitori_sync",
@@ -18,6 +19,7 @@ resolver = "3"
 [workspace.dependencies]
 aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys"] }
 bytes = { version = "1.12.1", default-features = false }
+frunk_core = { version = "=0.5.0", default-features = false }
 futures-core = { version = "0.3.32", default-features = false }
 futures-io = "0.3.32"
 futures-sink = "0.3.32"
