@@ -137,3 +137,46 @@ macro_rules! split_chunk {
     )*};
 }
 split_chunk!(Bytes, BytesMut);
+
+macro_rules! memory_len {
+    ($($ty:ty),* $(,)?) => {$(
+        impl crate::ExactLen for Direct<$ty> {
+            type Length = usize;
+
+            fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> usize
+            where Self: 'v {
+                host.get_pin_mut().remaining()
+            }
+        }
+    )*};
+}
+memory_len!(&[u8], Bytes, BytesMut, VecDeque<u8>);
+
+#[cfg(feature = "std")]
+mod cursor_length {
+    use super::*;
+    use alloc::boxed::Box;
+
+    // Cursor::remaining consults AsRef on each call. Implement the length
+    // promise for byte storage whose AsRef exposes a stable length.
+    #[allow(private_bounds)]
+    impl<T: StableBytes + Unpin> crate::ExactLen for Direct<Cursor<T>> {
+        type Length = usize;
+        fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> usize
+        where
+            Self: 'v,
+        {
+            host.get_pin_mut().remaining()
+        }
+    }
+
+    trait StableBytes: AsRef<[u8]> {}
+    impl StableBytes for [u8] {}
+    impl<const N: usize> StableBytes for [u8; N] {}
+    impl StableBytes for Vec<u8> {}
+    impl StableBytes for Box<[u8]> {}
+    impl StableBytes for Bytes {}
+    impl StableBytes for BytesMut {}
+    impl<T: StableBytes + ?Sized> StableBytes for &T {}
+    impl<T: StableBytes + ?Sized> StableBytes for &mut T {}
+}

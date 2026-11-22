@@ -172,13 +172,72 @@ assert_eq!(chunk, &b"hel"[..]);
 assert_eq!(io.into_inner().into_inner().position(), 3);
 ```
 
+## Exact remaining length
+
+A family implementing `ExactLen` can report the exact byte length from its
+current cursor to normal EOF without reading. Its associated `Length` is
+chosen by the source. Memory readers report `usize`. A source that never
+reaches normal EOF may report the zero-sized `Infinite`. A subsequent IO
+failure can still end a read early. Ordinary readers need only implement
+the capabilities they provide.
+
+The length query is a synchronous view method. It is available through the
+prelude on a lent access or on the view obtained by `poll_access`.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use core::{future::poll_fn, task::Poll};
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{adapters::ReadLimit, prelude::*};
+
+#[call(sync)]
+async fn bounded_len<F: ExactLen<Length = usize>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> u8 {
+    let mut limited = io.compose(ReadLimit(4u8));
+    poll_fn(|cx| limited.poll_access(cx, |mut view, _| Poll::Ready(view.remaining_len()))).await
+}
+let mut input = &b"abc"[..];
+assert_eq!(input.sync_bounded_len_unpin(), 3u8);
+assert_eq!(input, b"abc");
+```
+
+Slices, `Bytes`, `BytesMut`, `VecDeque<u8>`, and the standard-library
+`Cursor` over byte arrays, slices, vectors, boxed slices, `Bytes`, or
+`BytesMut` support the query. Seeking a cursor past its end gives zero.
+`Chunked` forwards its inner source's exact length and type.
+
+## Byte budgets
+
 `adapters::ReadLimit(n)` and `adapters::WriteLimit(n)` are byte budgets for
 `io.compose(..)` inside an operation. The composed access reads or accepts at
 most `n` more bytes; past the budget a read reports EOF and a write accepts
 nothing, which `write_all` reports as zero progress; the composed access
 answers there without polling the parent. The budget survives Pending and cancellation, and `into_state` returns
-what remains. A read budget offers `Read` and `ReadChunk`, a write budget
-`Write`:
+what remains. A read budget forwards the parent's read capabilities and can
+also report an exact length when the parent supplies one. A write budget
+forwards `Write`.
+
+`ReadLimit<L = usize>` stores a logical quota of type `L`. All unsigned
+integer widths and `Infinite` are supported. A single transfer is still
+bounded by `usize`. With a finite quota on an unknown source, early normal
+EOF can leave unused quota. With an infinite source, the exact length of
+the limited view equals the quota. A bare integer may need its type written
+explicitly, for example `ReadLimit(6usize)`.
+
+`Min<Rhs>` takes both operands by value and has an associated `Output`.
+For the built-in lengths, a finite right operand selects the result type and
+`Infinite` on the right preserves the left type. A source's length alone
+needs no arithmetic bounds. The adapter clones its live quota for querying
+and constraining a request. A custom quota `L` implements
+`Min<usize, Output = usize>` to bound one read. When the host succeeds,
+the adapter deducts the actual count with standard `SubAssign`. It expresses
+that count in the subtraction operand type using `Min::min(count, quota)`:
+the count already fits the quota. Querying a limited source additionally
+requires `F::Length: Min<L>`. Querying the original source needs none of
+these quota bounds.
+
+For example, a write budget can check a bounded payload:
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]

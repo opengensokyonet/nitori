@@ -107,6 +107,19 @@ where
         )
     }
 }
+impl<T: Receiver> crate::ExactLen for Direct<Chunked<T>>
+where
+    T::Family: crate::ExactLen,
+{
+    type Length = <T::Family as crate::ExactLen>::Length;
+    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> Self::Length
+    where
+        Self: 'v,
+    {
+        let inner = host.get_pin_mut().project().inner;
+        <T::Family as crate::ExactLen>::remaining_len(core::pin::pin!(inner.view()))
+    }
+}
 impl<T: Receiver> Write for Direct<Chunked<T>>
 where
     T::Family: Write,
@@ -134,9 +147,12 @@ nitori_call::direct_receiver!(impl [T] for Chunked<T>);
 ///
 /// At the boundary the composed access answers EOF itself, without polling the
 /// parent; within the budget, requests (empty ones included) reach the parent.
-/// Only [`Read`] and [`ReadChunk`] are available through the composed access.
+/// The quota type is independent of the size of one read. If the parent
+/// implements [`crate::ExactLen`] and its length can be bounded by this
+/// quota, the composed access reports their minimum. Use a typed literal
+/// such as `ReadLimit(6u8)` when there is no expected quota type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadLimit(pub usize);
+pub struct ReadLimit<L = usize>(pub L);
 
 /// A write budget for a composed access: `io.compose(WriteLimit(n))` accepts
 /// at most `n` more bytes, then accepts none, which [`write_all`] reports as
@@ -156,46 +172,71 @@ pub struct Limited<F, L>(PhantomData<fn(F) -> F>, PhantomData<L>);
 /// A view of a parent view with the remaining budget of a [`Limited`] family.
 pub struct LimitedView<'v, F: ReceiverFamily, L> {
     parent: ViewLoan<'v, F>,
-    remaining: &'v mut usize,
-    limit: PhantomData<L>,
+    limit: &'v mut L,
 }
 impl<F: ReceiverFamily, L> fmt::Debug for LimitedView<'_, F, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LimitedView")
-            .field("remaining", &self.remaining)
-            .finish_non_exhaustive()
+        f.debug_struct("LimitedView").finish_non_exhaustive()
     }
 }
-impl<F: ReceiverFamily, L: 'static> ReceiverFamily for Limited<F, L> {
+impl<F: ReceiverFamily, L> ReceiverFamily for Limited<F, L> {
     type ReceiverView<'v>
         = LimitedView<'v, F, L>
     where
         Self: 'v;
 }
 macro_rules! limit_compose {
-    ($($limit:ident),*) => {$(
-        impl<F: ReceiverFamily> Compose<F> for $limit {
-            type Family = Limited<F, $limit>;
+    ($limit:ty $(, $param:ident)*) => {
+        impl<F: ReceiverFamily $(, $param: Unpin)*> Compose<F> for $limit {
+            type Family = Limited<F, Self>;
             fn compose<'v, 'p>(
-                self: Pin<&'v mut Self>,
-                parent: Pin<&'v mut F::ReceiverView<'p>>,
-            ) -> LimitedView<'v, F, $limit>
-            where
-                F: 'p,
-                Self::Family: 'v,
-                'p: 'v,
-            {
-                LimitedView {
-                    parent: ViewLoan::new(parent),
-                    remaining: &mut self.get_mut().0,
-                    limit: PhantomData,
-                }
+                self: Pin<&'v mut Self>, parent: Pin<&'v mut F::ReceiverView<'p>>,
+            ) -> LimitedView<'v,F,Self>
+            where F:'p, Self::Family:'v, 'p:'v {
+                LimitedView {parent: ViewLoan::new(parent), limit:self.get_mut()}
             }
         }
-    )*};
+    };
 }
-limit_compose!(ReadLimit, WriteLimit);
-impl<F: Read> Read for Limited<F, ReadLimit> {
+limit_compose!(ReadLimit<L>, L);
+limit_compose!(WriteLimit);
+
+impl<F: crate::ExactLen, L: Clone> crate::ExactLen for Limited<F, ReadLimit<L>>
+where
+    F::Length: crate::Min<L>,
+{
+    type Length = <F::Length as crate::Min<L>>::Output;
+    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> Self::Length
+    where
+        Self: 'v,
+    {
+        let view = host.get_mut();
+        let parent = view
+            .parent
+            .with(|parent| F::remaining_len(parent.into_pin()));
+        crate::Min::min(parent, view.limit.0.clone())
+    }
+}
+
+impl<L> ReadLimit<L>
+where
+    L: Clone + core::ops::SubAssign<<usize as crate::Min<L>>::Output>,
+    usize: crate::Min<L>,
+{
+    fn consume(&mut self, count: usize) {
+        // The host returned at most the allowed count. Taking the minimum
+        // therefore preserves that count, in the quota's subtraction type.
+        self.0 -= crate::Min::min(count, self.0.clone());
+    }
+}
+
+impl<F: Read, L> Read for Limited<F, ReadLimit<L>>
+where
+    L: Clone
+        + crate::Min<usize, Output = usize>
+        + core::ops::SubAssign<<usize as crate::Min<L>>::Output>,
+    usize: crate::Min<L>,
+{
     type Error = F::Error;
     fn poll_read<'v, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -206,19 +247,28 @@ impl<F: Read> Read for Limited<F, ReadLimit> {
         Self: 'v,
     {
         let view = host.get_mut();
-        let remaining = *view.remaining;
-        // The boundary is EOF for this view, without polling the parent.
+        let remaining = crate::Min::min(view.limit.0.clone(), usize::MAX);
         if remaining == 0 {
             return Poll::Ready(Ok(0));
         }
-        let count = ready!(view.parent.with(|parent| {
-            F::poll_read(parent.into_pin(), cx, &mut destination.limit(remaining))
-        }))?;
-        *view.remaining -= count;
+        let allowed = remaining.min(destination.remaining_mut());
+        let count = ready!(view.parent.with(|parent| F::poll_read(
+            parent.into_pin(),
+            cx,
+            &mut destination.limit(allowed)
+        )))?;
+        assert!(count <= allowed, "read exceeded the requested capacity");
+        view.limit.consume(count);
         Poll::Ready(Ok(count))
     }
 }
-impl<F: ReadChunk> ReadChunk for Limited<F, ReadLimit> {
+impl<F: ReadChunk, L> ReadChunk for Limited<F, ReadLimit<L>>
+where
+    L: Clone
+        + crate::Min<usize, Output = usize>
+        + core::ops::SubAssign<<usize as crate::Min<L>>::Output>,
+    usize: crate::Min<L>,
+{
     type Chunk = F::Chunk;
     fn poll_read_chunk<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -229,15 +279,22 @@ impl<F: ReadChunk> ReadChunk for Limited<F, ReadLimit> {
         Self: 'v,
     {
         let view = host.get_mut();
-        let Some(remaining) = NonZeroUsize::new(*view.remaining) else {
+        let Some(allowed) = NonZeroUsize::new(crate::Min::min(view.limit.0.clone(), maximum.get()))
+        else {
             return Poll::Ready(Ok(None));
         };
-        let chunk =
-            ready!(view.parent.with(|parent| {
-                F::poll_read_chunk(parent.into_pin(), cx, maximum.min(remaining))
-            }))?;
+        let chunk = ready!(view.parent.with(|parent| F::poll_read_chunk(
+            parent.into_pin(),
+            cx,
+            allowed
+        )))?;
         if let Some(chunk) = &chunk {
-            *view.remaining -= chunk.remaining();
+            let count = chunk.remaining();
+            assert!(
+                count > 0 && count <= allowed.get(),
+                "invalid read chunk length"
+            );
+            view.limit.consume(count);
         }
         Poll::Ready(Ok(chunk))
     }
@@ -253,7 +310,7 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
         Self: 'v,
     {
         let view = host.get_mut();
-        let remaining = *view.remaining;
+        let remaining = view.limit.0;
         // The boundary accepts nothing, without polling the parent.
         if remaining == 0 {
             return Poll::Ready(Ok(0));
@@ -261,7 +318,7 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
         let count = ready!(view.parent.with(|parent| {
             F::poll_write(parent.into_pin(), cx, &mut (&mut *input).take(remaining))
         }))?;
-        *view.remaining -= count;
+        view.limit.0 -= count;
         Poll::Ready(Ok(count))
     }
 }

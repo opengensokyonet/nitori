@@ -23,12 +23,33 @@ pub mod adapters;
 #[cfg(feature = "std")]
 pub mod bridge;
 mod impls;
+mod length;
+pub use length::{Infinite, Min};
 
 pub mod calls;
 pub mod error;
 pub mod helpers;
 pub mod prelude;
 mod split;
+
+/// Report the exact remaining byte count of this source layer at its cursor.
+/// Querying a view is synchronous and consumes nothing. A successful read
+/// subtracts the number of bytes consumed from a finite count. A known
+/// infinite source can report [`Infinite`]. A source whose end cannot be
+/// predicted need not implement this capability.
+///
+/// The count describes reading to normal EOF without an independent change
+/// such as seeking or appending data. A subsequent IO failure is still
+/// possible. Length queries do not require [`Read`] or [`ReadChunk`].
+#[nitori_call::capability]
+pub trait ExactLen: nitori_call::ReceiverFamily {
+    /// This source's representation of its exact remaining byte length.
+    type Length;
+    /// Return the byte length from the current cursor to normal EOF.
+    fn remaining_len<'visit>(source: Pin<&mut Self::ReceiverView<'visit>>) -> Self::Length
+    where
+        Self: 'visit;
+}
 
 /// Fill a caller-selected buffer, advancing it by the returned byte count.
 ///
