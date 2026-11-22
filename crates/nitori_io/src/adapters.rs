@@ -174,18 +174,42 @@ pub struct LimitedView<'v, F: ReceiverFamily, L> {
     parent: ViewLoan<'v, F>,
     limit: &'v mut L,
 }
-impl<F: ReceiverFamily, L: fmt::Debug> fmt::Debug for LimitedView<'_, F, ReadLimit<L>> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LimitedView")
-            .field("remaining", &self.limit.0)
-            .finish_non_exhaustive()
+// A view is printable for *every* marker, as it was when all budgets
+// used usize. Built-in budgets also expose their remaining amount. Keep
+// this diagnostic independent of the bounds for reading a custom quota.
+trait DebugQuota {
+    fn remaining_field(&self) -> Option<&dyn fmt::Debug>;
+}
+impl<T> DebugQuota for T {
+    default fn remaining_field(&self) -> Option<&dyn fmt::Debug> {
+        None
     }
 }
-impl<F: ReceiverFamily> fmt::Debug for LimitedView<'_, F, WriteLimit> {
+macro_rules! debug_quota {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl DebugQuota for $ty {
+            fn remaining_field(&self) -> Option<&dyn fmt::Debug> { Some(&self.0) }
+        }
+    )+};
+}
+debug_quota!(
+    WriteLimit,
+    ReadLimit<u8>,
+    ReadLimit<u16>,
+    ReadLimit<u32>,
+    ReadLimit<u64>,
+    ReadLimit<u128>,
+    ReadLimit<usize>,
+    ReadLimit<crate::Infinite>
+);
+
+impl<F: ReceiverFamily, L> fmt::Debug for LimitedView<'_, F, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LimitedView")
-            .field("remaining", &self.limit.0)
-            .finish_non_exhaustive()
+        let mut view = f.debug_struct("LimitedView");
+        if let Some(remaining) = <L as DebugQuota>::remaining_field(self.limit) {
+            view.field("remaining", remaining);
+        }
+        view.finish_non_exhaustive()
     }
 }
 impl<F: ReceiverFamily, L> ReceiverFamily for Limited<F, L> {

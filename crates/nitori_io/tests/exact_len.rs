@@ -300,6 +300,12 @@ fn zero_sized_infinite_quota_is_unchanged_by_subassign() {
 
 #[test]
 fn budget_views_display_the_remaining_quota() {
+    // Existing downstream code can format a view with an unconstrained marker.
+    fn describe<F: nitori_call::ReceiverFamily, L>(
+        view: &nitori_io::adapters::LimitedView<'_, F, L>,
+    ) -> String {
+        format!("{view:?}")
+    }
     use nitori_call::{Compose, Direct};
     use nitori_io::adapters::WriteLimit;
     let mut storage = Vec::<u8>::new();
@@ -309,7 +315,7 @@ fn budget_views_display_the_remaining_quota() {
         Pin::new(&mut write_limit),
         view.as_mut(),
     );
-    assert_eq!(format!("{limited:?}"), "LimitedView { remaining: 3, .. }");
+    assert_eq!(describe(&limited), "LimitedView { remaining: 3, .. }");
 
     let mut source = &b"abc"[..];
     let mut read_limit = ReadLimit(7u8);
@@ -318,5 +324,5 @@ fn budget_views_display_the_remaining_quota() {
         Pin::new(&mut read_limit),
         view.as_mut(),
     );
-    assert_eq!(format!("{limited:?}"), "LimitedView { remaining: 7, .. }");
+    assert_eq!(describe(&limited), "LimitedView { remaining: 7, .. }");
 }
