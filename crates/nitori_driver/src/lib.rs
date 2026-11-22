@@ -7,6 +7,7 @@
 extern crate alloc;
 
 pub mod call;
+pub mod capability;
 pub mod lend;
 pub mod need;
 pub mod structure;
