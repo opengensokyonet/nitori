@@ -7,7 +7,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use nitori_call::{Direct, Receiver, ReceiverAccess, call};
+use nitori_call::{Receiver, ReceiverAccess, call};
 use nitori_io::{
     Infinite,
     adapters::{Chunked, ReadLimit},
@@ -50,6 +50,7 @@ fn queries_memory_sources_without_consuming_them() {
 #[cfg(feature = "std")]
 #[test]
 fn cursor_length_stops_at_zero_past_eof() {
+    use nitori_call::Direct;
     use std::io::Cursor;
     fn check<T>(bytes: T)
     where
@@ -295,4 +296,27 @@ fn zero_sized_infinite_quota_is_unchanged_by_subassign() {
     assert_eq!(quota, Infinite);
     assert_eq!(core::mem::size_of::<ReadLimit<Infinite>>(), 0);
     assert_eq!(core::mem::size_of::<ReadLimit<u8>>(), 1);
+}
+
+#[test]
+fn budget_views_display_the_remaining_quota() {
+    use nitori_call::{Compose, Direct};
+    use nitori_io::adapters::WriteLimit;
+    let mut storage = Vec::<u8>::new();
+    let mut write_limit = WriteLimit(3);
+    let mut view = pin!(Pin::new(&mut storage).view());
+    let limited = <WriteLimit as Compose<Direct<Vec<u8>>>>::compose(
+        Pin::new(&mut write_limit),
+        view.as_mut(),
+    );
+    assert_eq!(format!("{limited:?}"), "LimitedView { remaining: 3, .. }");
+
+    let mut source = &b"abc"[..];
+    let mut read_limit = ReadLimit(7u8);
+    let mut view = pin!(Pin::new(&mut source).view());
+    let limited = <ReadLimit<u8> as Compose<Direct<&[u8]>>>::compose(
+        Pin::new(&mut read_limit),
+        view.as_mut(),
+    );
+    assert_eq!(format!("{limited:?}"), "LimitedView { remaining: 7, .. }");
 }

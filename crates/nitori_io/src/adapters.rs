@@ -174,9 +174,18 @@ pub struct LimitedView<'v, F: ReceiverFamily, L> {
     parent: ViewLoan<'v, F>,
     limit: &'v mut L,
 }
-impl<F: ReceiverFamily, L> fmt::Debug for LimitedView<'_, F, L> {
+impl<F: ReceiverFamily, L: fmt::Debug> fmt::Debug for LimitedView<'_, F, ReadLimit<L>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LimitedView").finish_non_exhaustive()
+        f.debug_struct("LimitedView")
+            .field("remaining", &self.limit.0)
+            .finish_non_exhaustive()
+    }
+}
+impl<F: ReceiverFamily> fmt::Debug for LimitedView<'_, F, WriteLimit> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LimitedView")
+            .field("remaining", &self.limit.0)
+            .finish_non_exhaustive()
     }
 }
 impl<F: ReceiverFamily, L> ReceiverFamily for Limited<F, L> {
