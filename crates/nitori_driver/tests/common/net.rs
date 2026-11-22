@@ -74,6 +74,7 @@ components!(
     Keys,
     Clock,
     Budget,
+    PathStreams,
     PathState,
     RouteState,
     Rtt,
@@ -122,7 +123,7 @@ part!(Streaming {
     Connection => [Streams],
     Session => [SessionRecv],
     Peer => [],
-    Path => [],
+    Path => [PathStreams],
     Route => [StreamsRoute],
     Timer => [],
 });
