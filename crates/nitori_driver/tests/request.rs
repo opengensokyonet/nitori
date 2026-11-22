@@ -22,15 +22,16 @@ use common::clock::TestClock;
 use frunk_core::{Coprod, HList, coproduct::Coproduct, hlist::HNil};
 use nitori_call::{LentAccess, call};
 use nitori_driver::{
-    call::{CallFamily, CallKind, Composition, ShareCalls},
+    call::{CallFamily, CallKind, Composition, LoanNeeds, ShareCalls},
     composition,
     driver::Driver,
+    event::{Hear, NodeStarted, Triggered},
     hooks::{
         ArgsOf, BuildKeyed, BuildView, EndReasonOf, HasDeadline, HookKeys, HookView, Hooks, Part,
         PartList, Timed,
     },
     lend::KeyedList,
-    need::{At, Kind, MyLink, Ref, ToChild},
+    need::{At, Here, Kind, MyLink, Now, Ref, ToChild, Up},
     request::{Edit, Editor, NodeRequest, Request},
     structure::{AtMostOne, ByOwnKey, Child, KeyAddress, NodeKind, Share, SlotVec, Store},
 };
@@ -433,10 +434,10 @@ pub async fn handshaking<W: CallFamily<C = Handshake>>(host: &mut impl LentAcces
 }
 
 /// On a recovery layer: counts its polls, so that a moved layer shows it
-/// went on.
+/// went on; it reads the instant, as a call lent by a driver can.
 pub struct Recover;
 impl<Q: Composition> CallKind<Q> for Recover {
-    type Needs = HNil;
+    type Needs = HList![At<Up<0>, Here, Now<Duration>>];
     type Op = Recovering;
     fn start() -> Recovering {
         Recovering::new()
@@ -444,9 +445,10 @@ impl<Q: Composition> CallKind<Q> for Recover {
 }
 #[call]
 pub async fn recovering<W: CallFamily<C = Recover>>(host: &mut impl LentAccess<Family = W>) {
-    let _ = host;
     let mut polls = 0;
     poll_fn(|cx| {
+        let now: Duration = host.with(|mut view| view.needs().head);
+        assert!(now < Duration::from_secs(1000));
         polls += 1;
         put(format!("recover {polls}"));
         RECOVER_WAKERS.with(|w| w.borrow_mut().push(cx.waker().clone()));
@@ -822,7 +824,36 @@ mod http_like {
     }
 
     impl Share<H> for Base {
-        type Data = HList![Logged<H>];
+        type Data = HList![Logged<H>, Seen];
+    }
+
+    /// On the connection: the instant a stream started at, and the instant
+    /// of each action before the calls.
+    pub struct Seen;
+    impl<L: PartList<L> + 'static> Hooks<Base, L, H> for Seen {
+        type Needs = HList![At<Up<0>, Here, Now<Duration>>];
+        type Subscribes = HList![Hear<NodeStarted<Stream>>];
+        const ACTS_BEFORE_CALLS: bool = true;
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, H>>>(
+            _: BuildView<'_, Self, Base, L, H, KP>,
+            _: &ArgsOf<L>,
+        ) -> Self {
+            Seen
+        }
+        fn before_calls<KP: HookKeys<Self, Base, L, H>>(
+            view: HookView<'_, Self, Base, L, H, KP>,
+            _: &Waker,
+        ) -> Option<Self::Returns> {
+            put(format!("before the calls at {}", view.tail.head.as_secs()));
+            None
+        }
+        fn on_events<KP: HookKeys<Self, Base, L, H>>(
+            _: Triggered<'_>,
+            view: HookView<'_, Self, Base, L, H, KP>,
+        ) -> Option<Self::Returns> {
+            put(format!("stream started at {}", view.tail.head.as_secs()));
+            None
+        }
     }
     impl Share<Stream> for Base {
         type Data = HList![Logged<Stream>];
@@ -865,16 +896,36 @@ mod http_like {
     #[test]
     fn a_body_asks_the_connection_to_close_its_stream() {
         reset();
-        let mut d = Driver::<QH>::new(TestClock::default(), frunk_core::hlist![()]).unwrap();
+        let clock = TestClock::default();
+        let mut d = Driver::<QH>::new(clock.clone(), frunk_core::hlist![()]).unwrap();
+        clock.set(Duration::from_secs(2));
         let stream = d
             .add::<Stream, _, _>(nitori_driver::structure::End, StreamId(4))
             .unwrap();
         d.add::<Body, _, _>(stream, ()).unwrap();
-        assert_eq!(log(), ["build H", "build Stream", "build Body"]);
+        // the hooks read the instant the driver read when it was entered
+        assert_eq!(
+            log(),
+            [
+                "build H",
+                "build Stream",
+                "stream started at 2",
+                "build Body"
+            ]
+        );
+        clock.set(Duration::from_secs(5));
         let w = OUTER.with(Clone::clone);
         let _ = Pin::new(&mut d).poll(&mut Context::from_waker(&w));
         let _ = Pin::new(&mut d).poll(&mut Context::from_waker(&w));
-        assert_eq!(log(), ["drained", "end Body ()", "end Stream ()"]);
+        assert_eq!(
+            log(),
+            [
+                "before the calls at 5",
+                "drained",
+                "end Body ()",
+                "end Stream ()"
+            ]
+        );
         assert!(d.root().unwrap().children.head.handles().next().is_none());
     }
 }

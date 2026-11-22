@@ -31,7 +31,9 @@ parts and calls.
 - `hooks`: what the driver calls on every component of a node, with the
   component as `Self`: associated functions lent the component and its own
   needs, `build` lent the parent's, every part's construction arguments,
-  and a deadline for a component that writes `Timed`.
+  and a deadline for a component that writes `Timed`. A hook that needs the
+  time reads it through the need `Now`, whose instant the composition
+  checks is the clock's.
 - `event`: events are types, published through a need at a node on the way
   up and heard by anchor and steps, or by default from the node, the nodes
   above it and below it.

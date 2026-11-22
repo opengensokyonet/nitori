@@ -57,7 +57,7 @@
 //!
 //!
 //! A layer whose deadline is a count at the root, and which hears its own
-//! start:
+//! start and reads the instant then:
 //!
 //! ```
 //! # #![feature(impl_trait_in_assoc_type)]
@@ -71,7 +71,7 @@
 //! #     event::{Hear, HearAt, NodeStarted},
 //! #     hooks::{ArgsOf, BuildKeyed, BuildView, HasDeadline, HookKeys, HookView, Hooks, Part, PartList, Timed},
 //! #     lend::KeyedList,
-//! #     need::{At, Here, Kind, Mut, Ref, Up},
+//! #     need::{At, Here, Kind, Mut, Now, Ref, Up},
 //! #     structure::{AtMostOne, Child, End, NodeKind, Share},
 //! # };
 //! # #[derive(Clone, Default)]
@@ -121,10 +121,10 @@
 //! # }
 //! #[derive(Default)]
 //! struct Due {
-//!     started: bool,
+//!     started: Option<Duration>,
 //! }
 //! impl<L: PartList<L> + 'static> Hooks<Part1, L, Layer> for Due {
-//!     type Needs = HList![At<Kind<Root>, Here, Ref<Count>>];
+//!     type Needs = HList![At<Kind<Root>, Here, Ref<Count>>, At<Up<0>, Here, Now<Duration>>];
 //!     type BuildNeeds = HList![At<Up<0>, Here, Ref<Count>>];
 //!     type Subscribes = HList![Hear<NodeStarted<Layer>>];
 //!     type Timing = HasDeadline;
@@ -140,7 +140,8 @@
 //!         _: nitori_driver::event::Triggered<'_>,
 //!         view: HookView<'_, Self, Part1, L, Layer, KP>,
 //!     ) -> Option<Self::Returns> {
-//!         view.head.started = true;
+//!         let hlist_pat![this, _, now] = view;
+//!         this.started = Some(now);
 //!         None
 //!     }
 //! }
@@ -168,7 +169,7 @@
 //! let layer = driver.add::<Layer, _, _>(End, ()).unwrap();
 //! assert!(Pin::new(&mut driver).poll(&mut Context::from_waker(Waker::noop())).is_pending());
 //! use nitori_driver::structure::NodePath;
-//! assert!(layer.node(driver.root().unwrap()).unwrap().data.head.head.started);
+//! assert_eq!(layer.node(driver.root().unwrap()).unwrap().data.head.head.started, Some(Duration::ZERO));
 //! driver.end(());
 //! assert!(Pin::new(&mut driver).poll(&mut Context::from_waker(Waker::noop())).is_ready());
 //! ```
@@ -189,7 +190,7 @@
 //! #     event::{Hear, HearAt, NodeStarted},
 //! #     hooks::{ArgsOf, BuildKeyed, BuildView, HasDeadline, HookKeys, HookView, Hooks, Part, PartList, Timed},
 //! #     lend::KeyedList,
-//! #     need::{At, Here, Kind, Mut, Ref, Up},
+//! #     need::{At, Here, Kind, Mut, Now, Ref, Up},
 //! #     structure::{AtMostOne, Child, End, NodeKind, Share},
 //! # };
 //! # #[derive(Clone, Default)]
@@ -269,6 +270,86 @@
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
 //! ```
 //!
+//! A need of the instant that is not the clock's:
+//!
+//! ```compile_fail
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use core::{pin::Pin, task::{Context, Poll, Waker}, time::Duration};
+//! # use frunk_core::{HList, hlist::HNil, hlist_pat};
+//! # use nitori_call::{LentAccess, call};
+//! # use nitori_driver::{
+//! #     call::{CallFamily, CallKind, Composition, LoanNeeds, ShareCalls},
+//! #     composition,
+//! #     driver::Driver,
+//! #     event::{Hear, HearAt, NodeStarted},
+//! #     hooks::{ArgsOf, BuildKeyed, BuildView, HasDeadline, HookKeys, HookView, Hooks, Part, PartList, Timed},
+//! #     lend::KeyedList,
+//! #     need::{At, Here, Kind, Mut, Now, Ref, Up},
+//! #     structure::{AtMostOne, Child, End, NodeKind, Share},
+//! # };
+//! # #[derive(Clone, Default)]
+//! # struct Clock;
+//! # impl nitori_clock::MonotonicClock for Clock {
+//! #     type Instant = Duration;
+//! #     type Sleep = core::future::Pending<()>;
+//! #     fn now(&self) -> Duration { Duration::ZERO }
+//! #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+//! #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+//! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+//! # }
+//! # struct Root;
+//! # struct Layer;
+//! # struct Other;
+//! # impl NodeKind for Root {
+//! #     type Children = HList![Child<Layer, AtMostOne>];
+//! #     type Linked = HNil;
+//! # }
+//! # impl NodeKind for Layer {
+//! #     type Children = HNil;
+//! #     type Linked = HNil;
+//! # }
+//! # impl NodeKind for Other {
+//! #     type Children = HNil;
+//! #     type Linked = HNil;
+//! # }
+//! # struct Part1;
+//! # impl<L> Part<L> for Part1 {
+//! #     type Args = ();
+//! # }
+//! # impl ShareCalls<Root> for Part1 {
+//! #     type Calls = HNil;
+//! # }
+//! # impl ShareCalls<Layer> for Part1 {
+//! #     type Calls = HNil;
+//! # }
+//! # #[derive(Default)]
+//! # struct Count(u64);
+//! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #         Count(0)
+//! #     }
+//! # }
+//! # impl Share<Root> for Part1 {
+//! #     type Data = HList![Count];
+//! # }
+//! #[derive(Default)]
+//! struct Reads;
+//! impl<L: PartList<L> + 'static> Hooks<Part1, L, Layer> for Reads {
+//!     type Needs = HList![At<Up<0>, Here, Now<u64>>];
+//!     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Layer>>>(
+//!         _: BuildView<'_, Self, Part1, L, Layer, KP>,
+//!         _: &ArgsOf<L>,
+//!     ) -> Self {
+//!         Reads
+//!     }
+//! }
+//! impl Share<Layer> for Part1 {
+//!     type Data = HList![Reads];
+//! }
+//! struct Q;
+//! composition!(impl driver for Q: Root, HList![Part1], Clock);
+//! ```
+//!
 //! A hook's need not on the structure (the layer has no `Count`):
 //!
 //! ```compile_fail
@@ -283,7 +364,7 @@
 //! #     event::{Hear, HearAt, NodeStarted},
 //! #     hooks::{ArgsOf, BuildKeyed, BuildView, HasDeadline, HookKeys, HookView, Hooks, Part, PartList, Timed},
 //! #     lend::KeyedList,
-//! #     need::{At, Here, Kind, Mut, Ref, Up},
+//! #     need::{At, Here, Kind, Mut, Now, Ref, Up},
 //! #     structure::{AtMostOne, Child, End, NodeKind, Share},
 //! # };
 //! # #[derive(Clone, Default)]
@@ -363,7 +444,7 @@
 //! #     event::{Hear, HearAt, NodeStarted},
 //! #     hooks::{ArgsOf, BuildKeyed, BuildView, HasDeadline, HookKeys, HookView, Hooks, Part, PartList, Timed},
 //! #     lend::KeyedList,
-//! #     need::{At, Here, Kind, Mut, Ref, Up},
+//! #     need::{At, Here, Kind, Mut, Now, Ref, Up},
 //! #     structure::{AtMostOne, Child, End, NodeKind, Share},
 //! # };
 //! # #[derive(Clone, Default)]
@@ -433,7 +514,7 @@
 //! #     event::{Hear, HearAt, NodeStarted},
 //! #     hooks::{ArgsOf, BuildKeyed, BuildView, HasDeadline, HookKeys, HookView, Hooks, Part, PartList, Timed},
 //! #     lend::KeyedList,
-//! #     need::{At, Here, Kind, Mut, Ref, Up},
+//! #     need::{At, Here, Kind, Mut, Now, Ref, Up},
 //! #     structure::{AtMostOne, Child, End, NodeKind, Share},
 //! # };
 //! # #[derive(Clone, Default)]
@@ -525,17 +606,18 @@ use frunk_core::indices::Here as I0;
 use nitori_clock::MonotonicClock;
 
 pub use place::{
-    AddressOf, BuildAt, ChildPath, ChildPlaces, ClockOf, CompInfo, CompLend, CompPositions, Detach,
-    DriverComposition, FindPlace, InstantOf, NoPlace, NoPlacePos, NthPlace, ParentOf, ParentPlace,
-    PartsOps, Place, PlaceAt, PlaceDesc, PlaceInfo, PlaceNth, PlaceOps, PlacePack, PlacePositions,
-    PlacePositionsAt, PlaceShape, PlacesOf, PlacesUnder, ProveComp, ProveParts, ProvePlace,
-    ProvePlaces, RequestsOf, RootNode, SelfParts, ShareOps, TargetOf, prove_places,
+    AddressOf, BuildAt, ChildPath, ChildPlaces, ClockInstantOf, ClockOf, CompInfo, CompLend,
+    CompPositions, Detach, DriverComposition, FindPlace, InstantOf, NoPlace, NoPlacePos, NthPlace,
+    ParentOf, ParentPlace, PartsOps, Place, PlaceAt, PlaceDesc, PlaceInfo, PlaceNth, PlaceOps,
+    PlacePack, PlacePositions, PlacePositionsAt, PlaceShape, PlacesOf, PlacesUnder, ProveComp,
+    ProveParts, ProvePlace, ProvePlaces, RequestsOf, RootNode, SelfParts, ShareOps, TargetOf,
+    prove_places,
 };
 use wake::{NodeHead, PositionWaker, Shared};
 use walk::{CallWalk, Cursor, Number, PlaceVisit, PlaceWalk, SlotInfo, SlotStore, SlotVisit};
 
 use crate::{
-    call::{CallStep, LendOne, PartsOf, RootOf, SlotCall, SlotDesc, SlotYield},
+    call::{CallStep, LendOne, OutboxOf, PartsOf, RootOf, SlotCall, SlotDesc, SlotYield},
     event::{Outbox, Scope, Triggered},
     hooks::{AbortCause, ArgsOf, EndReasonOf},
     request::{
@@ -734,13 +816,11 @@ where
     sleep: Option<Sleeping<Q>>,
     timers: BTreeSet<(InstantOf<Q>, usize, usize)>,
     deadlines: BTreeMap<(usize, usize), InstantOf<Q>>,
-    outbox: Outbox,
+    outbox: OutboxOf<Q>,
     /// What the edits of the request being handled reach.
     pending: Vec<Hit>,
     /// The serial of the last node registered.
     serial: u64,
-    /// The instant read when the driver's code was last entered.
-    now: InstantOf<Q>,
     remains: Option<Q::Remains>,
     ended: bool,
     /// The driver's poll runs: still set when it is dropped or polled
@@ -771,7 +851,7 @@ struct Deadline<'r, Q: DriverComposition> {
     root: &'r mut RootNode<Q>,
     at: &'r AddressOf<Q>,
     c: usize,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition> PlaceVisit<Q> for Deadline<'_, Q> {
     type Out = Option<InstantOf<Q>>;
@@ -784,7 +864,7 @@ struct Expire<'r, Q: DriverComposition> {
     at: &'r AddressOf<Q>,
     c: usize,
     now: InstantOf<Q>,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition> PlaceVisit<Q> for Expire<'_, Q> {
     type Out = Option<RequestsOf<Q>>;
@@ -797,7 +877,7 @@ struct OnEvents<'r, Q: DriverComposition> {
     at: &'r AddressOf<Q>,
     c: usize,
     events: Triggered<'r>,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition> PlaceVisit<Q> for OnEvents<'_, Q> {
     type Out = Option<RequestsOf<Q>>;
@@ -810,7 +890,7 @@ struct BeforeCalls<'r, Q: DriverComposition> {
     at: &'r AddressOf<Q>,
     c: usize,
     waker: &'r Waker,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition> PlaceVisit<Q> for BeforeCalls<'_, Q> {
     type Out = Option<RequestsOf<Q>>;
@@ -822,7 +902,7 @@ struct Aborted<'r, Q: DriverComposition> {
     root: &'r mut RootNode<Q>,
     at: &'r AddressOf<Q>,
     cause: AbortCause,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition> PlaceVisit<Q> for Aborted<'_, Q> {
     type Out = ();
@@ -833,7 +913,7 @@ impl<Q: DriverComposition> PlaceVisit<Q> for Aborted<'_, Q> {
 struct EndDefault<'r, Q: DriverComposition> {
     root: &'r mut RootNode<Q>,
     at: &'r AddressOf<Q>,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition> PlaceVisit<Q> for EndDefault<'_, Q> {
     type Out = ();
@@ -857,7 +937,7 @@ struct AddAt<'r, Q: DriverComposition, KK> {
     parent: &'r AddressOf<Q>,
     key: KK,
     args: &'r ArgsOf<PartsOf<Q>>,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition, KK: 'static> PlaceVisit<Q> for AddAt<'_, Q, KK> {
     type Out = Option<AddressOf<Q>>;
@@ -891,7 +971,7 @@ struct EndWith<'r, Q: DriverComposition, RR> {
     root: &'r mut RootNode<Q>,
     at: &'r AddressOf<Q>,
     reason: &'r RR,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition, RR: 'static> PlaceVisit<Q> for EndWith<'_, Q, RR> {
     type Out = ();
@@ -948,7 +1028,7 @@ struct PollCall<'r, 'c, Q: DriverComposition> {
     root: &'r mut RootNode<Q>,
     node: usize,
     at: &'r AddressOf<Q>,
-    outbox: &'r Outbox,
+    outbox: &'r OutboxOf<Q>,
     cx: &'r mut Context<'c>,
 }
 impl<Q: DriverComposition> SlotVisit<Q> for PollCall<'_, '_, Q> {
@@ -1093,13 +1173,13 @@ where
             }
         }
         subscribers.sort_by_key(|&(e, _)| e);
-        let outbox = Outbox::new();
+        let now = clock.now();
+        let outbox = Outbox::at(now);
         // Invariant: the root's components have no needs at a parent
         // (`BuildAt` for `End`), so building it lends nothing.
         let root =
             <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::build(None, &(), &args, &outbox)
                 .expect("building the root lends nothing");
-        let now = clock.now();
         let mut driver = Self {
             root: Some(root),
             args,
@@ -1118,7 +1198,6 @@ where
             outbox,
             pending: Vec::new(),
             serial: 0,
-            now,
             remains: None,
             ended: false,
             running: false,
@@ -1170,7 +1249,7 @@ where
         let Some(parent_id) = self.find(&parent.address()) else {
             return Err(AddError::NoParent);
         };
-        self.now = self.clock.now();
+        self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
         let added = self.add_node(parent_id, I::VALUE, key, &mut todo);
         self.settle(todo);
@@ -1196,7 +1275,7 @@ where
         if id == self.root_id() || self.linked_to(id) {
             return false;
         }
-        self.now = self.clock.now();
+        self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
         self.end_with(id, &reason, &mut todo);
         self.settle(todo);
@@ -1211,7 +1290,7 @@ where
         if self.ended {
             return;
         }
-        self.now = self.clock.now();
+        self.outbox.set_now(self.clock.now());
         let id = self.root_id();
         let mut todo = Vec::new();
         self.end_with(id, &reason, &mut todo);
@@ -1512,7 +1591,7 @@ where
     fn remove_subtree(
         &mut self,
         id: usize,
-        own_end: impl FnOnce(&mut RootNode<Q>, &AddressOf<Q>, &Outbox),
+        own_end: impl FnOnce(&mut RootNode<Q>, &AddressOf<Q>, &OutboxOf<Q>),
         todo: &mut Vec<Hit>,
     ) {
         let mut order = Vec::new();
@@ -1945,7 +2024,7 @@ where
         }
         self.shared.notified.store(false, SeqCst);
         let now = self.clock.now();
-        self.now = now;
+        self.outbox.set_now(now);
         // the actions before the calls, the nodes above first
         let mut ready = self.take_ready();
         let mut before: Vec<(usize, u64)> = ready

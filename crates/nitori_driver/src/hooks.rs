@@ -19,7 +19,9 @@
 //! of the root has none.
 //!
 //! A component with a deadline also writes [`Timed`], whose instant is the
-//! driver clock's; the composition checks it. A component hears events
+//! driver clock's; the composition checks it. A hook reads the instant the
+//! driver read when it was last entered through the need
+//! [`Now`](crate::need::Now), checked the same way. A component hears events
 //! through [`Hooks::Subscribes`] ([`event`](crate::event)).
 //!
 //! Every part has construction arguments, whose type may depend on the

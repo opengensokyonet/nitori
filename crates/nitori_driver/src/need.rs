@@ -7,7 +7,9 @@
 //! ([`Up`]) or by a component only it has ([`Provides`]). The steps go down
 //! from the anchor ([`Here`], [`ToChild`], [`Then`]). What is taken is a
 //! component, exclusive ([`Mut`]) or shared ([`Ref`]), or several
-//! components of every child by key ([`MutList`]).
+//! components of every child by key ([`MutList`]); or, with the steps
+//! [`Here`], the instant the driver read when it was last entered
+//! ([`Now`]).
 //!
 //! A list of needs is proved where it is lent on a concrete structure:
 //! the shape at compile time, the presence of a node reached through an
@@ -68,6 +70,10 @@ pub struct Ref<X>(PhantomData<fn() -> X>);
 /// only after a [`ByKey`] or [`ByKeyOthers`] step. A child gives the list
 /// of `&mut` components, in the order of `L`.
 pub struct MutList<L>(PhantomData<fn() -> L>);
+/// Take the instant the driver read when it was last entered, of the
+/// type `I`, which is its clock's (the composition checks it); only with
+/// the steps [`Here`]. The view has the instant.
+pub struct Now<I>(PhantomData<fn() -> I>);
 
 // ---------------------------------------------------------------- view shapes from the steps
 

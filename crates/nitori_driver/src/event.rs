@@ -56,23 +56,49 @@ pub struct Publish<E>(PhantomData<fn() -> E>);
 
 /// Where the events published during a lend are kept until the driver
 /// hands them on: for each, how deep its node is (the root at 0) and its
-/// type.
-#[derive(Default)]
-pub struct Outbox {
+/// type. It also holds the instant `T` the driver read when it was last
+/// entered, which the need [`Now`](crate::need::Now) lends; `()` outside a
+/// driver.
+pub struct Outbox<T = ()> {
     published: RefCell<Vec<(usize, TypeId)>>,
+    now: core::cell::Cell<T>,
 }
 impl Outbox {
-    /// An empty outbox.
+    /// An empty outbox, without an instant.
     pub fn new() -> Self {
-        Self::default()
+        Self::at(())
     }
+}
+impl Default for Outbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<T: Copy> Outbox<T> {
+    /// An empty outbox whose instant is `now`.
+    pub fn at(now: T) -> Self {
+        Self {
+            published: RefCell::new(Vec::new()),
+            now: core::cell::Cell::new(now),
+        }
+    }
+    /// The instant it holds.
+    pub fn now(&self) -> T {
+        self.now.get()
+    }
+    /// Hold `now` from here on.
+    pub fn set_now(&self, now: T) {
+        self.now.set(now);
+    }
+}
+impl<T> Outbox<T> {
     /// Every event published since the last time, in order, as the depth
     /// of its node and its type.
     pub fn take(&self) -> Vec<(usize, TypeId)> {
         core::mem::take(&mut *self.published.borrow_mut())
     }
 }
-impl fmt::Debug for Outbox {
+impl<T> fmt::Debug for Outbox<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Outbox")
             .field("published", &self.published.borrow().len())
@@ -83,25 +109,24 @@ impl fmt::Debug for Outbox {
 /// The place of the outbox among what is lent; it is not a node's.
 pub struct OutboxPlace;
 /// The outbox as what is lent holds it, first of every cell.
-pub type OutboxCell<'a> = Cell<OutboxPlace, &'a Outbox>;
-impl<'a> FreezeOne for &'a Outbox {
-    type Out = &'a Outbox;
-    fn freeze(self) -> &'a Outbox {
+pub type OutboxCell<'a, T = ()> = Cell<OutboxPlace, &'a Outbox<T>>;
+impl<'a, T> FreezeOne for &'a Outbox<T> {
+    type Out = &'a Outbox<T>;
+    fn freeze(self) -> &'a Outbox<T> {
         self
     }
 }
 
 /// Publishes the event `E` at the node of its need's anchor.
 pub struct Publisher<'w, E> {
-    outbox: &'w Outbox,
+    published: &'w RefCell<Vec<(usize, TypeId)>>,
     depth: usize,
     _event: PhantomData<fn() -> E>,
 }
 impl<E: Event> Publisher<'_, E> {
     /// `E` happened at the anchor's node.
     pub fn publish(&self) {
-        self.outbox
-            .published
+        self.published
             .borrow_mut()
             .push((self.depth, TypeId::of::<E>()));
     }
@@ -145,15 +170,16 @@ impl<'a, Cx, U, A, E> Pass1<'a, Cx, U, ()> for At<A, Here, Publish<E>> {
         ((), u)
     }
 }
-impl<'a, Ch, P, Fr, A, E, AI, FI> Pass2<'a, Cx<Ch, P>, Fr, (AI, FI)> for At<A, Here, Publish<E>>
+impl<'a, Ch, P, Fr, A, E, AI, FI, T: 'a> Pass2<'a, Cx<Ch, P>, Fr, (AI, FI, T)>
+    for At<A, Here, Publish<E>>
 where
     A: Anchor<Ch, P, AI, Pre: Depth>,
-    Fr: Selector<OutboxCell<'a>, FI>,
+    Fr: Selector<OutboxCell<'a, T>, FI>,
 {
     type Raw = Publisher<'a, E>;
     fn get(f: &Fr) -> Publisher<'a, E> {
         Publisher {
-            outbox: f.get().0,
+            published: &f.get().0.published,
             depth: <A::Pre as Depth>::DEPTH,
             _event: PhantomData,
         }

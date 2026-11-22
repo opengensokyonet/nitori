@@ -475,6 +475,9 @@ pub trait Composition: 'static + Sized {
     type Root: KindFor<Self::Parts> + SlotsUnder<Self::Parts, End, Slots: ListShape<Self>>;
     /// The list of parts.
     type Parts: 'static;
+    /// The instant a lend is given ([`Now`](crate::need::Now)): the driver
+    /// clock's for a composition a driver runs, `()` otherwise.
+    type Instant: Copy + Ord + core::fmt::Debug + 'static;
     /// The positions of every call slot of the tree.
     type Pack: PackList<Self, CallSlotsOf<Self>>;
     /// Only to define `Pack`.
@@ -484,6 +487,10 @@ pub trait Composition: 'static + Sized {
 pub type RootOf<Q> = <Q as Composition>::Root;
 /// The list of parts of `Q`.
 pub type PartsOf<Q> = <Q as Composition>::Parts;
+/// The instant a lend under `Q` is given.
+pub type LendInstant<Q> = <Q as Composition>::Instant;
+/// The outbox of a lend under `Q`, with its instant.
+pub type OutboxOf<Q> = Outbox<LendInstant<Q>>;
 /// Every call of the tree of `Q` with the path type of its nodes, in tree
 /// order.
 pub type CallSlotsOf<Q> = <RootOf<Q> as SlotsUnder<PartsOf<Q>, End>>::Slots;
@@ -500,7 +507,7 @@ pub type CallSlotsOf<Q> = <RootOf<Q> as SlotsUnder<PartsOf<Q>, End>>::Slots;
 #[macro_export]
 macro_rules! composition {
     (impl driver for $q:ty: $r:ty, $p:ty, $clock:ty) => {
-        $crate::composition!(impl for $q: $r, $p);
+        $crate::composition!(@calls $q: $r, $p, $crate::driver::ClockInstantOf<$clock>);
         impl $crate::driver::DriverComposition for $q {
             type Clock = $clock;
             type Remains = $crate::structure::RemainsOf<$p, $r>;
@@ -515,9 +522,13 @@ macro_rules! composition {
         }
     };
     (impl for $q:ty: $r:ty, $p:ty) => {
+        $crate::composition!(@calls $q: $r, $p, ());
+    };
+    (@calls $q:ty: $r:ty, $p:ty, $instant:ty) => {
         impl $crate::call::Composition for $q {
             type Root = $r;
             type Parts = $p;
+            type Instant = $instant;
             type Pack = impl $crate::call::PackList<Self, $crate::call::CallSlotsOf<Self>>;
             fn pack() -> ::core::marker::PhantomData<Self::Pack> {
                 $crate::call::prove::<Self, $crate::call::CallSlotsOf<Self>, _>()
@@ -687,7 +698,7 @@ pub trait LendOne<'a, Q: Composition, S: SlotDesc + SlotYield<Q>>: SlotCall<Q, S
     fn poll(
         root: &'a mut Node<RootOf<Q>, PartsOf<Q>>,
         at: S::At,
-        outbox: &'a Outbox,
+        outbox: &'a OutboxOf<Q>,
         call: Pin<&mut Self::Running>,
         cx: &mut Context<'_>,
     ) -> Result<CallStep<S::Yield>, LendError>;
@@ -723,7 +734,7 @@ impl<Q: Composition> LendOne<'_, Q, NoSlot> for NoPos {
     fn poll(
         _: &mut Node<RootOf<Q>, PartsOf<Q>>,
         at: core::convert::Infallible,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
         _: Pin<&mut core::convert::Infallible>,
         _: &mut Context<'_>,
     ) -> Result<CallStep<core::convert::Infallible>, LendError> {
@@ -786,7 +797,7 @@ where
 pub fn poll<'a, Q, C, X, I>(
     root: &'a mut Node<RootOf<Q>, PartsOf<Q>>,
     at: X,
-    outbox: &'a Outbox,
+    outbox: &'a OutboxOf<Q>,
     call: Pin<&mut RunningAt<Q, I>>,
     cx: &mut Context<'_>,
 ) -> Result<CallStep<C::Yield>, LendError>
@@ -854,13 +865,19 @@ where
     X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil>,
     LinkedOf<RootOf<Q>, X>: LinkSpec<RootOf<Q>, PartsOf<Q>, X, IL>,
     X: ChainCells<'static, RootOf<Q>, PartsOf<Q>, HNil, LinkOf<RootOf<Q>, PartsOf<Q>, X, IL>>,
-    Needs<Q, C>:
-        Locate<CxOf<RootOf<Q>, PartsOf<Q>, X>, CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>, IC>,
-    Needs<Q, C>:
-        Places<CxOf<RootOf<Q>, PartsOf<Q>, X>, CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>, IP>,
+    Needs<Q, C>: Locate<
+            CxOf<RootOf<Q>, PartsOf<Q>, X>,
+            CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
+            IC,
+        >,
+    Needs<Q, C>: Places<
+            CxOf<RootOf<Q>, PartsOf<Q>, X>,
+            CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
+            IP,
+        >,
     <Needs<Q, C> as Places<
         CxOf<RootOf<Q>, PartsOf<Q>, X>,
-        CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>,
+        CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
         IP,
     >>::Out: Pairwise,
     Needs<Q, C>: KeyedPositions<CxOf<RootOf<Q>, PartsOf<Q>, X>, IK>,
@@ -868,14 +885,14 @@ where
     Needs<Q, C>: Pass1<
             'static,
             CxOf<RootOf<Q>, PartsOf<Q>, X>,
-            CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>,
+            CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
             I1,
         >,
-    Rem1Of<'static, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1>: Freeze,
+    Rem1Of<'static, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, LendInstant<Q>>: Freeze,
     Needs<Q, C>: Pass2<
             'static,
             CxOf<RootOf<Q>, PartsOf<Q>, X>,
-            FrozenOf<'static, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1>,
+            FrozenOf<'static, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, LendInstant<Q>>,
             I2,
         >,
     C::Op: RunsOn<Lent<Q, C, KPOf<Q, C, X, IK>>, C::Yield>,
@@ -896,13 +913,19 @@ where
     X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil>,
     LinkedOf<RootOf<Q>, X>: LinkSpec<RootOf<Q>, PartsOf<Q>, X, IL>,
     X: ChainCells<'static, RootOf<Q>, PartsOf<Q>, HNil, LinkOf<RootOf<Q>, PartsOf<Q>, X, IL>>,
-    Needs<Q, C>:
-        Locate<CxOf<RootOf<Q>, PartsOf<Q>, X>, CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>, IC>,
-    Needs<Q, C>:
-        Places<CxOf<RootOf<Q>, PartsOf<Q>, X>, CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>, IP>,
+    Needs<Q, C>: Locate<
+            CxOf<RootOf<Q>, PartsOf<Q>, X>,
+            CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
+            IC,
+        >,
+    Needs<Q, C>: Places<
+            CxOf<RootOf<Q>, PartsOf<Q>, X>,
+            CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
+            IP,
+        >,
     <Needs<Q, C> as Places<
         CxOf<RootOf<Q>, PartsOf<Q>, X>,
-        CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL>,
+        CellsOf<'static, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
         IP,
     >>::Out: Pairwise,
     Needs<Q, C>: KeyedPositions<CxOf<RootOf<Q>, PartsOf<Q>, X>, IK>,
@@ -946,13 +969,17 @@ where
     Needs<Q, C>: Writes<PartsOf<Q>>,
     LinkedOf<RootOf<Q>, X>: LinkSpec<RootOf<Q>, PartsOf<Q>, X, IL>,
     X: ChainCells<'a, RootOf<Q>, PartsOf<Q>, HNil, LinkOf<RootOf<Q>, PartsOf<Q>, X, IL>>,
-    Needs<Q, C>:
-        Pass1<'a, CxOf<RootOf<Q>, PartsOf<Q>, X>, CellsOf<'a, RootOf<Q>, PartsOf<Q>, X, IL>, I1>,
-    Rem1Of<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1>: Freeze,
+    Needs<Q, C>: Pass1<
+            'a,
+            CxOf<RootOf<Q>, PartsOf<Q>, X>,
+            CellsOf<'a, RootOf<Q>, PartsOf<Q>, X, IL, LendInstant<Q>>,
+            I1,
+        >,
+    Rem1Of<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, LendInstant<Q>>: Freeze,
     Needs<Q, C>: Pass2<
             'a,
             CxOf<RootOf<Q>, PartsOf<Q>, X>,
-            FrozenOf<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1>,
+            FrozenOf<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, LendInstant<Q>>,
             I2,
         >,
     Needs<Q, C>: Build<
@@ -960,14 +987,14 @@ where
             PartsOf<Q>,
             KeyedOf<Q, C>,
             KPOf<Q, C, X, IK>,
-            Raw1Of<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1>,
-            Raw2Of<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, I2>,
+            Raw1Of<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, LendInstant<Q>>,
+            Raw2Of<'a, Needs<Q, C>, RootOf<Q>, PartsOf<Q>, X, IL, I1, I2, LendInstant<Q>>,
         >,
 {
     fn poll(
         root: &'a mut Node<RootOf<Q>, PartsOf<Q>>,
         at: X,
-        outbox: &'a Outbox,
+        outbox: &'a OutboxOf<Q>,
         call: Pin<&mut Self::Running>,
         cx: &mut Context<'_>,
     ) -> Result<CallStep<C::Yield>, LendError> {

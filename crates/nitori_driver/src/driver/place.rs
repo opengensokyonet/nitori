@@ -18,7 +18,7 @@ use frunk_core::{
 use nitori_clock::MonotonicClock;
 
 use crate::{
-    call::{ChainAt, Composition, PartsOf, RootOf},
+    call::{ChainAt, Composition, LendInstant, OutboxOf, PartsOf, RootOf},
     event::{NodeEnding, NodeStarted, Outbox, OwnPlace, Subscription, Subscriptions, Triggered},
     hooks::{
         AbortCause, ArgsOf, BuildKeyed, BuildView, EndReasonOf, HookKeys, HookView, Hooks,
@@ -166,7 +166,7 @@ pub trait DriverComposition:
 {
     /// The clock the driver reads and sleeps on; every component with a
     /// deadline has its instant.
-    type Clock: MonotonicClock + 'static;
+    type Clock: MonotonicClock<Instant = LendInstant<Self>> + 'static;
     /// What the parts keep of the root's shares after it ended
     /// ([`RemainsOf`]`<Parts, Root>`).
     type Remains: Default + 'static;
@@ -179,6 +179,8 @@ pub trait DriverComposition:
     /// Only to define `Yields`.
     fn yields() -> PhantomData<Self::Yields>;
 }
+/// The instant of the clock `C`.
+pub type ClockInstantOf<C> = <C as MonotonicClock>::Instant;
 /// The clock of `Q`.
 pub type ClockOf<Q> = <Q as DriverComposition>::Clock;
 /// The instant of the clock of `Q`.
@@ -197,42 +199,42 @@ pub type ParentOf<X> = <X as ParentPath>::Parent;
 // ---------------------------------------------------------------- one component
 
 /// Lending what a `build` reads at the parent of a node at the path
-/// `Self`, for the needs `N`; at the root there is no parent and `N` is
-/// empty.
-pub trait BuildAt<'a, R: KindFor<P>, P, N: NeedSet<P>, I>: ParentPath {
+/// `Self`, for the needs `N`, with the instant `T`; at the root there is
+/// no parent and `N` is empty.
+pub trait BuildAt<'a, R: KindFor<P>, P, N: NeedSet<P>, I, T = ()>: ParentPath {
     /// The keyed positions.
     type Positions: KeyedList<P, <N as Flat>::Keyed>;
     /// Lend the parent at `parent` to `f`.
-    fn lend<T>(
+    fn lend<O>(
         root: Option<&'a mut Node<R, P>>,
         parent: &Self::Parent,
-        outbox: &'a Outbox,
-        f: impl FnOnce(ViewOf<'a, N, P, Self::Positions>) -> T,
-    ) -> Result<T, LendError>;
+        outbox: &'a Outbox<T>,
+        f: impl FnOnce(ViewOf<'a, N, P, Self::Positions>) -> O,
+    ) -> Result<O, LendError>;
 }
-impl<'a, R: KindFor<P>, P> BuildAt<'a, R, P, HNil, ()> for End {
+impl<'a, R: KindFor<P>, P, T> BuildAt<'a, R, P, HNil, (), T> for End {
     type Positions = HNil;
-    fn lend<T>(
+    fn lend<O>(
         _: Option<&'a mut Node<R, P>>,
         _: &(),
-        _: &'a Outbox,
-        f: impl FnOnce(HNil) -> T,
-    ) -> Result<T, LendError> {
+        _: &'a Outbox<T>,
+        f: impl FnOnce(HNil) -> O,
+    ) -> Result<O, LendError> {
         Ok(f(HNil))
     }
 }
-impl<'a, R: KindFor<P>, P, N, I, J, H, Rr> BuildAt<'a, R, P, N, I> for Step<J, H, Rr>
+impl<'a, R: KindFor<P>, P, N, I, J, H, Rr, T> BuildAt<'a, R, P, N, I, T> for Step<J, H, Rr>
 where
     Step<J, H, Rr>: ParentPath,
-    N: LendAt<'a, R, P, ParentOf<Step<J, H, Rr>>, I>,
+    N: LendAt<'a, R, P, ParentOf<Step<J, H, Rr>>, I, T>,
 {
     type Positions = N::Positions;
-    fn lend<T>(
+    fn lend<O>(
         root: Option<&'a mut Node<R, P>>,
         parent: &ParentOf<Self>,
-        outbox: &'a Outbox,
-        f: impl FnOnce(ViewOf<'a, N, P, Self::Positions>) -> T,
-    ) -> Result<T, LendError> {
+        outbox: &'a Outbox<T>,
+        f: impl FnOnce(ViewOf<'a, N, P, Self::Positions>) -> O,
+    ) -> Result<O, LendError> {
         N::lend(root.ok_or(LendError::NoNode)?, *parent, outbox, f)
     }
 }
@@ -258,8 +260,9 @@ where
     Q: Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceRequests<RootOf<Q>>>>,
     X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil>,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
-    OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>: LendAt<'static, RootOf<Q>, P_<Q>, X, In> + Writes<P_<Q>>,
-    X: BuildAt<'static, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib>,
+    OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>:
+        LendAt<'static, RootOf<Q>, P_<Q>, X, In, LendInstant<Q>> + Writes<P_<Q>>,
+    X: BuildAt<'static, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>,
     C::Subscribes: Subscriptions<ChainAt<Q, X>, P_<Q>, Is>,
     C::Returns: IntoRequestSum<RequestSumOf<RootOf<Q>>, Ir>,
 {
@@ -282,7 +285,7 @@ where
     fn lend<T>(
         root: &'a mut RootNode<Q>,
         at: X,
-        outbox: &'a Outbox,
+        outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(HookView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::Positions>) -> T,
     ) -> Result<T, LendError>;
     /// Lend the parent at `parent` to `build`.
@@ -290,7 +293,7 @@ where
     fn lend_parent<T>(
         root: Option<&'a mut RootNode<Q>>,
         parent: &ParentOf<X>,
-        outbox: &'a Outbox,
+        outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(BuildView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::BuildPositions>) -> T,
     ) -> Result<T, LendError>;
     /// What the component subscribes to, resolved at the place.
@@ -305,31 +308,46 @@ where
     Q: Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceRequests<RootOf<Q>>>>,
     X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil> + ParentPath,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
-    OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>: LendAt<'a, RootOf<Q>, P_<Q>, X, In> + Writes<P_<Q>>,
-    X: BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib>,
+    OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>:
+        LendAt<'a, RootOf<Q>, P_<Q>, X, In, LendInstant<Q>> + Writes<P_<Q>>,
+    X: BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>,
     C::Subscribes: Subscriptions<ChainAt<Q, X>, P_<Q>, Is>,
     C::Returns: IntoRequestSum<RequestSumOf<RootOf<Q>>, Ir>,
 {
-    type Positions =
-        <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as LendAt<'a, RootOf<Q>, P_<Q>, X, In>>::Positions;
-    type BuildPositions = <X as BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib>>::Positions;
+    type Positions = <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as LendAt<
+        'a,
+        RootOf<Q>,
+        P_<Q>,
+        X,
+        In,
+        LendInstant<Q>,
+    >>::Positions;
+    type BuildPositions =
+        <X as BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>>::Positions;
     fn lend<T>(
         root: &'a mut RootNode<Q>,
         at: X,
-        outbox: &'a Outbox,
+        outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(HookView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::Positions>) -> T,
     ) -> Result<T, LendError> {
-        <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as LendAt<'a, RootOf<Q>, P_<Q>, X, In>>::lend(
-            root, at, outbox, f,
-        )
+        <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as LendAt<
+            'a,
+            RootOf<Q>,
+            P_<Q>,
+            X,
+            In,
+            LendInstant<Q>,
+        >>::lend(root, at, outbox, f)
     }
     fn lend_parent<T>(
         root: Option<&'a mut RootNode<Q>>,
         parent: &ParentOf<X>,
-        outbox: &'a Outbox,
+        outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(BuildView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::BuildPositions>) -> T,
     ) -> Result<T, LendError> {
-        <X as BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib>>::lend(root, parent, outbox, f)
+        <X as BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>>::lend(
+            root, parent, outbox, f,
+        )
     }
     fn subscriptions(out: &mut Vec<Subscription>) {
         <C::Subscribes as Subscriptions<ChainAt<Q, X>, P_<Q>, Is>>::subscriptions(out);
@@ -464,42 +482,42 @@ pub trait ShareOps<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O,
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
         args: &ArgsOf<P_<Q>>,
-        outbox: &Outbox,
+        outbox: &OutboxOf<Q>,
     ) -> Result<Cs, LendError>;
     fn deadline(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<InstantOf<Q>>>;
     fn expire(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
         now: InstantOf<Q>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>>;
     fn on_events(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
         events: Triggered<'_>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>>;
     fn before_calls(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
         waker: &Waker,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>>;
-    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &Outbox);
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &Outbox);
+    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>);
+    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>);
     fn remains(
         root: &mut RootNode<Q>,
         at: X,
         out: &mut <O as Share<TargetOf<Q, X>>>::Remains,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) where
         O: Share<TargetOf<Q, X>>;
 }
@@ -512,11 +530,16 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O> ShareOps<Q, X
         _: &mut Option<&mut RootNode<Q>>,
         _: &ParentOf<X>,
         _: &ArgsOf<P_<Q>>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Result<HNil, LendError> {
         Ok(HNil)
     }
-    fn deadline(_: &mut RootNode<Q>, _: X, _: usize, _: &Outbox) -> Option<Option<InstantOf<Q>>> {
+    fn deadline(
+        _: &mut RootNode<Q>,
+        _: X,
+        _: usize,
+        _: &OutboxOf<Q>,
+    ) -> Option<Option<InstantOf<Q>>> {
         None
     }
     fn expire(
@@ -524,7 +547,7 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O> ShareOps<Q, X
         _: X,
         _: usize,
         _: InstantOf<Q>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>> {
         None
     }
@@ -533,7 +556,7 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O> ShareOps<Q, X
         _: X,
         _: usize,
         _: Triggered<'_>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>> {
         None
     }
@@ -542,14 +565,18 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O> ShareOps<Q, X
         _: X,
         _: usize,
         _: &Waker,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>> {
         None
     }
-    fn aborted(_: &mut RootNode<Q>, _: X, _: AbortCause, _: &Outbox) {}
-    fn end(_: &mut RootNode<Q>, _: X, _: &EndReasonOf<TargetOf<Q, X>>, _: &Outbox) {}
-    fn remains(_: &mut RootNode<Q>, _: X, _: &mut <O as Share<TargetOf<Q, X>>>::Remains, _: &Outbox)
-    where
+    fn aborted(_: &mut RootNode<Q>, _: X, _: AbortCause, _: &OutboxOf<Q>) {}
+    fn end(_: &mut RootNode<Q>, _: X, _: &EndReasonOf<TargetOf<Q, X>>, _: &OutboxOf<Q>) {}
+    fn remains(
+        _: &mut RootNode<Q>,
+        _: X,
+        _: &mut <O as Share<TargetOf<Q, X>>>::Remains,
+        _: &OutboxOf<Q>,
+    ) where
         O: Share<TargetOf<Q, X>>,
     {
     }
@@ -582,7 +609,7 @@ where
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
         args: &ArgsOf<P_<Q>>,
-        outbox: &Outbox,
+        outbox: &OutboxOf<Q>,
     ) -> Result<HCons<C, Cs>, LendError> {
         let head = <CP as CompLend<'_, Q, X, O, C>>::lend_parent(
             root.as_deref_mut(),
@@ -599,7 +626,7 @@ where
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<InstantOf<Q>>> {
         if c > 0 {
             return SP::deadline(root, at, c - 1, o);
@@ -617,7 +644,7 @@ where
         at: X,
         c: usize,
         now: InstantOf<Q>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>> {
         if c > 0 {
             return SP::expire(root, at, c - 1, now, o);
@@ -636,7 +663,7 @@ where
         at: X,
         c: usize,
         events: Triggered<'_>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>> {
         if c > 0 {
             return SP::on_events(root, at, c - 1, events, o);
@@ -653,7 +680,7 @@ where
         at: X,
         c: usize,
         waker: &Waker,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>> {
         if c > 0 {
             return SP::before_calls(root, at, c - 1, waker, o);
@@ -667,11 +694,11 @@ where
             .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
     }
-    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &Outbox) {
+    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>) {
         let _ = <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::aborted(view, cause));
         SP::aborted(root, at, cause, o);
     }
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &Outbox) {
+    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>) {
         let _ = <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::end(view, reason));
         SP::end(root, at, reason, o);
     }
@@ -679,7 +706,7 @@ where
         root: &mut RootNode<Q>,
         at: X,
         out: &mut <O as Share<TargetOf<Q, X>>>::Remains,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) where
         O: Share<TargetOf<Q, X>>,
     {
@@ -703,33 +730,38 @@ where
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
         args: &ArgsOf<P_<Q>>,
-        outbox: &Outbox,
+        outbox: &OutboxOf<Q>,
     ) -> Result<<Ps as Shares<TargetOf<Q, X>>>::Data, LendError>;
-    fn deadline(root: &mut RootNode<Q>, at: X, c: usize, o: &Outbox) -> Option<InstantOf<Q>>;
+    fn deadline(root: &mut RootNode<Q>, at: X, c: usize, o: &OutboxOf<Q>) -> Option<InstantOf<Q>>;
     fn expire(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
         now: InstantOf<Q>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
     fn on_events(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
         events: Triggered<'_>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
     fn before_calls(
         root: &mut RootNode<Q>,
         at: X,
         c: usize,
         waker: &Waker,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
-    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &Outbox);
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &Outbox);
-    fn remains(root: &mut RootNode<Q>, at: X, out: &mut RemainsOf<Ps, TargetOf<Q, X>>, o: &Outbox);
+    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>);
+    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>);
+    fn remains(
+        root: &mut RootNode<Q>,
+        at: X,
+        out: &mut RemainsOf<Ps, TargetOf<Q, X>>,
+        o: &OutboxOf<Q>,
+    );
 }
 impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, HNil> for HNil {
     fn info(_: &mut Vec<CompInfo>) {}
@@ -737,11 +769,11 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, H
         _: &mut Option<&mut RootNode<Q>>,
         _: &ParentOf<X>,
         _: &ArgsOf<P_<Q>>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Result<HNil, LendError> {
         Ok(HNil)
     }
-    fn deadline(_: &mut RootNode<Q>, _: X, _: usize, _: &Outbox) -> Option<InstantOf<Q>> {
+    fn deadline(_: &mut RootNode<Q>, _: X, _: usize, _: &OutboxOf<Q>) -> Option<InstantOf<Q>> {
         None
     }
     fn expire(
@@ -749,7 +781,7 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, H
         _: X,
         _: usize,
         _: InstantOf<Q>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         None
     }
@@ -758,7 +790,7 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, H
         _: X,
         _: usize,
         _: Triggered<'_>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         None
     }
@@ -767,13 +799,13 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, H
         _: X,
         _: usize,
         _: &Waker,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         None
     }
-    fn aborted(_: &mut RootNode<Q>, _: X, _: AbortCause, _: &Outbox) {}
-    fn end(_: &mut RootNode<Q>, _: X, _: &EndReasonOf<TargetOf<Q, X>>, _: &Outbox) {}
-    fn remains(_: &mut RootNode<Q>, _: X, _: &mut HNil, _: &Outbox) {}
+    fn aborted(_: &mut RootNode<Q>, _: X, _: AbortCause, _: &OutboxOf<Q>) {}
+    fn end(_: &mut RootNode<Q>, _: X, _: &EndReasonOf<TargetOf<Q, X>>, _: &OutboxOf<Q>) {}
+    fn remains(_: &mut RootNode<Q>, _: X, _: &mut HNil, _: &OutboxOf<Q>) {}
 }
 impl<Q, X, O, Ps, SP, PL> PartsOps<Q, X, HCons<O, Ps>> for HCons<SP, PL>
 where
@@ -792,14 +824,14 @@ where
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
         args: &ArgsOf<P_<Q>>,
-        outbox: &Outbox,
+        outbox: &OutboxOf<Q>,
     ) -> Result<HCons<O::Data, <Ps as Shares<TargetOf<Q, X>>>::Data>, LendError> {
         Ok(HCons {
             head: SP::build(root, parent, args, outbox)?,
             tail: PL::build(root, parent, args, outbox)?,
         })
     }
-    fn deadline(root: &mut RootNode<Q>, at: X, c: usize, o: &Outbox) -> Option<InstantOf<Q>> {
+    fn deadline(root: &mut RootNode<Q>, at: X, c: usize, o: &OutboxOf<Q>) -> Option<InstantOf<Q>> {
         match c.checked_sub(SP::LEN) {
             None => SP::deadline(root, at, c, o).flatten(),
             Some(c) => PL::deadline(root, at, c, o),
@@ -810,7 +842,7 @@ where
         at: X,
         c: usize,
         now: InstantOf<Q>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         match c.checked_sub(SP::LEN) {
             None => SP::expire(root, at, c, now, o).flatten(),
@@ -822,7 +854,7 @@ where
         at: X,
         c: usize,
         events: Triggered<'_>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         match c.checked_sub(SP::LEN) {
             None => SP::on_events(root, at, c, events, o).flatten(),
@@ -834,18 +866,18 @@ where
         at: X,
         c: usize,
         waker: &Waker,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         match c.checked_sub(SP::LEN) {
             None => SP::before_calls(root, at, c, waker, o).flatten(),
             Some(c) => PL::before_calls(root, at, c, waker, o),
         }
     }
-    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &Outbox) {
+    fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>) {
         SP::aborted(root, at, cause, o);
         PL::aborted(root, at, cause, o);
     }
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &Outbox) {
+    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>) {
         SP::end(root, at, reason, o);
         PL::end(root, at, reason, o);
     }
@@ -853,7 +885,7 @@ where
         root: &mut RootNode<Q>,
         at: X,
         out: &mut HCons<O::Remains, RemainsOf<Ps, TargetOf<Q, X>>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) {
         SP::remains(root, at, &mut out.head, o);
         PL::remains(root, at, &mut out.tail, o);
@@ -1045,7 +1077,7 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         root: Option<&mut RootNode<Q>>,
         parent: &ParentOf<Pl::At>,
         args: &ArgsOf<P_<Q>>,
-        outbox: &Outbox,
+        outbox: &OutboxOf<Q>,
     ) -> Result<Node<TargetOf<Q, Pl::At>, P_<Q>>, LendError>
     where
         TargetOf<Q, Pl::At>: KindFor<P_<Q>>;
@@ -1053,44 +1085,44 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         c: usize,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<InstantOf<Q>>;
     fn expire(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         c: usize,
         now: InstantOf<Q>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
     fn on_events(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         c: usize,
         events: Triggered<'_>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
     fn before_calls(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         c: usize,
         waker: &Waker,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
-    fn aborted(root: &mut RootNode<Q>, at: &AddressOf<Q>, cause: AbortCause, o: &Outbox);
+    fn aborted(root: &mut RootNode<Q>, at: &AddressOf<Q>, cause: AbortCause, o: &OutboxOf<Q>);
     /// Every component's end, for `reason`.
     fn end(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         reason: &EndReasonOf<TargetOf<Q, Pl::At>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     );
     /// Every component's end, for the kind's default reason.
-    fn end_default(root: &mut RootNode<Q>, at: &AddressOf<Q>, o: &Outbox);
+    fn end_default(root: &mut RootNode<Q>, at: &AddressOf<Q>, o: &OutboxOf<Q>);
     fn remains(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         out: &mut RemainsOf<P_<Q>, TargetOf<Q, Pl::At>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) where
         P_<Q>: RemainsList<TargetOf<Q, Pl::At>>;
     /// Take the node out of its parent's store.
@@ -1103,7 +1135,7 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         parent: &AddressOf<Q>,
         key: KK,
         args: &ArgsOf<P_<Q>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>>;
     /// The node of the place kept under `key` under the parent at
     /// `parent`.
@@ -1121,7 +1153,12 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
     ) -> Result<AddressOf<Q>, MoveError>;
     /// Every component's end, for `reason`, of the type of the place's
     /// kind's reason.
-    fn end_with<RR: 'static>(root: &mut RootNode<Q>, at: &AddressOf<Q>, reason: &RR, o: &Outbox);
+    fn end_with<RR: 'static>(
+        root: &mut RootNode<Q>,
+        at: &AddressOf<Q>,
+        reason: &RR,
+        o: &OutboxOf<Q>,
+    );
 }
 impl<Q, X, PL> PlaceOps<Q, Place<X>> for PlacePositions<PL>
 where
@@ -1166,7 +1203,7 @@ where
         root: Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
         args: &ArgsOf<P_<Q>>,
-        outbox: &Outbox,
+        outbox: &OutboxOf<Q>,
     ) -> Result<Node<TargetOf<Q, X>, P_<Q>>, LendError> {
         let mut root = root;
         Ok(Node::new(PL::build(&mut root, parent, args, outbox)?))
@@ -1175,7 +1212,7 @@ where
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         c: usize,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<InstantOf<Q>> {
         PL::deadline(root, X::from_address(at)?, c, o)
     }
@@ -1184,7 +1221,7 @@ where
         at: &AddressOf<Q>,
         c: usize,
         now: InstantOf<Q>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         PL::expire(root, X::from_address(at)?, c, now, o)
     }
@@ -1193,7 +1230,7 @@ where
         at: &AddressOf<Q>,
         c: usize,
         events: Triggered<'_>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         PL::on_events(root, X::from_address(at)?, c, events, o)
     }
@@ -1202,11 +1239,11 @@ where
         at: &AddressOf<Q>,
         c: usize,
         waker: &Waker,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         PL::before_calls(root, X::from_address(at)?, c, waker, o)
     }
-    fn aborted(root: &mut RootNode<Q>, at: &AddressOf<Q>, cause: AbortCause, o: &Outbox) {
+    fn aborted(root: &mut RootNode<Q>, at: &AddressOf<Q>, cause: AbortCause, o: &OutboxOf<Q>) {
         if let Some(at) = X::from_address(at) {
             PL::aborted(root, at, cause, o);
         }
@@ -1215,20 +1252,20 @@ where
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         reason: &EndReasonOf<TargetOf<Q, X>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) {
         if let Some(at) = X::from_address(at) {
             PL::end(root, at, reason, o);
         }
     }
-    fn end_default(root: &mut RootNode<Q>, at: &AddressOf<Q>, o: &Outbox) {
+    fn end_default(root: &mut RootNode<Q>, at: &AddressOf<Q>, o: &OutboxOf<Q>) {
         Self::end(root, at, &Default::default(), o);
     }
     fn remains(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
         out: &mut RemainsOf<P_<Q>, TargetOf<Q, X>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) where
         P_<Q>: RemainsList<TargetOf<Q, X>>,
     {
@@ -1244,7 +1281,7 @@ where
         parent: &AddressOf<Q>,
         key: KK,
         args: &ArgsOf<P_<Q>>,
-        o: &Outbox,
+        o: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>> {
         if X::find_under(root, parent, &key).is_some() {
             return None;
@@ -1267,7 +1304,12 @@ where
     ) -> Result<AddressOf<Q>, MoveError> {
         X::move_under(root, at, to)
     }
-    fn end_with<RR: 'static>(root: &mut RootNode<Q>, at: &AddressOf<Q>, reason: &RR, o: &Outbox) {
+    fn end_with<RR: 'static>(
+        root: &mut RootNode<Q>,
+        at: &AddressOf<Q>,
+        reason: &RR,
+        o: &OutboxOf<Q>,
+    ) {
         Self::end(root, at, cast_ref(reason).expect(SAME_TYPES), o);
     }
 }
@@ -1284,7 +1326,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: Option<&mut RootNode<Q>>,
         _: &(),
         _: &ArgsOf<P_<Q>>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Result<RootNode<Q>, LendError> {
         unreachable!("{NO_PLACE}")
     }
@@ -1292,7 +1334,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &mut RootNode<Q>,
         _: &AddressOf<Q>,
         _: usize,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<InstantOf<Q>> {
         None
     }
@@ -1301,7 +1343,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &AddressOf<Q>,
         _: usize,
         _: InstantOf<Q>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         None
     }
@@ -1310,7 +1352,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &AddressOf<Q>,
         _: usize,
         _: Triggered<'_>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         None
     }
@@ -1319,18 +1361,18 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &AddressOf<Q>,
         _: usize,
         _: &Waker,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>> {
         None
     }
-    fn aborted(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: AbortCause, _: &Outbox) {}
-    fn end(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &EndReasonOf<RootOf<Q>>, _: &Outbox) {}
-    fn end_default(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &Outbox) {}
+    fn aborted(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: AbortCause, _: &OutboxOf<Q>) {}
+    fn end(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &EndReasonOf<RootOf<Q>>, _: &OutboxOf<Q>) {}
+    fn end_default(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &OutboxOf<Q>) {}
     fn remains(
         _: &mut RootNode<Q>,
         _: &AddressOf<Q>,
         _: &mut RemainsOf<P_<Q>, RootOf<Q>>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) where
         P_<Q>: RemainsList<RootOf<Q>>,
     {
@@ -1343,7 +1385,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &AddressOf<Q>,
         _: KK,
         _: &ArgsOf<P_<Q>>,
-        _: &Outbox,
+        _: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>> {
         None
     }
@@ -1357,7 +1399,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
     ) -> Result<AddressOf<Q>, MoveError> {
         Err(MoveError::NoSource)
     }
-    fn end_with<RR: 'static>(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &RR, _: &Outbox) {}
+    fn end_with<RR: 'static>(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &RR, _: &OutboxOf<Q>) {}
 }
 
 /// The positions of every place of the list `L` under `Q`.
