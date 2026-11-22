@@ -130,3 +130,23 @@ fn aead_input_limit_is_inclusive() {
         }
     }
 }
+
+#[test]
+fn aead_input_limit_within_is_inclusive_and_capped() {
+    use nitori_crypto::{AeadAlgorithm, AeadInputTooLongError};
+    let algorithm = AeadAlgorithm::Aes128Gcm;
+    assert!(AeadInputTooLongError::check_within(algorithm, 100, 100).is_ok());
+    let error = AeadInputTooLongError::check_within(algorithm, 101, 100).unwrap_err();
+    assert_eq!(error.algorithm(), algorithm);
+    assert_eq!(error.requested_len(), 101);
+    assert!(error.to_string().contains("the 100 byte limit"));
+
+    // A limit above the algorithm's own is lowered to it.
+    let max = AeadInputTooLongError::max_len(algorithm);
+    if let Ok(max) = usize::try_from(max) {
+        assert!(AeadInputTooLongError::check_within(algorithm, max, u64::MAX).is_ok());
+        let error = AeadInputTooLongError::check_within(algorithm, max + 1, u64::MAX).unwrap_err();
+        assert_eq!(error.requested_len(), max + 1);
+        assert!(error.to_string().contains(&format!("the {max} byte limit")));
+    }
+}

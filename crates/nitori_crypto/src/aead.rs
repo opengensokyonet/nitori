@@ -68,8 +68,11 @@ pub trait AeadKey {
     ///
     /// # Errors
     ///
-    /// Fails without writing `in_out` when it is longer than the algorithm
-    /// protects under one nonce, more than 64 GiB for every algorithm here.
+    /// Fails without writing `in_out` when it is longer than the
+    /// implementation's limit. That limit is at most
+    /// [`AeadInputTooLongError::max_len`], the limit of the algorithm itself,
+    /// and may be lower; it is more than 64 GiB for every algorithm here. The
+    /// error carries the limit the implementation applied.
     fn seal_in_place(
         &self,
         nonce: &[u8; AeadAlgorithm::NONCE_LEN],
@@ -83,7 +86,8 @@ pub trait AeadKey {
     /// # Errors
     ///
     /// - [`AeadOpenError::InputTooLong`] without writing `in_out` when it is
-    ///   longer than the algorithm protects under one nonce.
+    ///   longer than the implementation's limit, as for
+    ///   [`AeadKey::seal_in_place`].
     /// - [`AeadOpenError::Authentication`] when the tag does not match. The
     ///   contents of `in_out` are then unspecified: an implementation may
     ///   leave the ciphertext, partly decrypted text or zeros there.
@@ -150,10 +154,13 @@ pub struct AeadInputTooLongError {
 }
 
 impl AeadInputTooLongError {
-    /// The longest text `algorithm` protects under one nonce: 2<sup>32</sup>
-    /// − 2 blocks of 16 bytes for AES-GCM (NIST SP 800-38D §5.2.1.1),
-    /// 2<sup>32</sup> − 1 blocks of 64 bytes for ChaCha20-Poly1305
-    /// (RFC 8439 §2.8).
+    /// The longest text `algorithm` itself protects under one nonce:
+    /// 2<sup>32</sup> − 2 blocks of 16 bytes for AES-GCM (NIST SP 800-38D
+    /// §5.2.1.1), 2<sup>32</sup> − 1 blocks of 64 bytes for
+    /// ChaCha20-Poly1305 (RFC 8439 §2.8).
+    ///
+    /// An implementation of [`AeadKey`] may accept less; its errors then
+    /// carry its own, lower limit.
     #[must_use]
     pub const fn max_len(algorithm: AeadAlgorithm) -> u64 {
         match algorithm {
@@ -168,7 +175,23 @@ impl AeadInputTooLongError {
     ///
     /// Fails when it is longer than [`AeadInputTooLongError::max_len`].
     pub fn check(algorithm: AeadAlgorithm, len: usize) -> Result<(), Self> {
-        let max_len = Self::max_len(algorithm);
+        Self::check_within(algorithm, len, Self::max_len(algorithm))
+    }
+
+    /// Check that a text of `len` bytes is within `max_len`, the limit of an
+    /// implementation that accepts less than `algorithm` itself protects.
+    ///
+    /// The caller ensures that `max_len` is at most
+    /// [`AeadInputTooLongError::max_len`] of `algorithm`. A larger `max_len`
+    /// is lowered to that limit, so the check never accepts more than the
+    /// algorithm protects.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `len` is longer than `max_len`; the error carries `max_len`,
+    /// lowered as above, as its limit.
+    pub fn check_within(algorithm: AeadAlgorithm, len: usize, max_len: u64) -> Result<(), Self> {
+        let max_len = max_len.min(Self::max_len(algorithm));
         // A `usize` that does not fit a `u64` exceeds every limit.
         if u64::try_from(len).is_ok_and(|len| len <= max_len) {
             Ok(())
@@ -188,7 +211,8 @@ impl AeadInputTooLongError {
         self.algorithm
     }
 
-    /// The length that was given, always above the limit.
+    /// The length that was given, always above the limit this error
+    /// carries.
     #[must_use]
     pub fn requested_len(&self) -> usize {
         self.len
