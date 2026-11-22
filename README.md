@@ -4,7 +4,7 @@ Foundational Rust tools for Open Gensokyo Network, administratively supported by
 
 Source: [opengensokyonet/nitori](https://github.com/opengensokyonet/nitori).
 
-This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, the `nitori_tls` TLS 1.3 handshake for QUIC, and a DATA frame codec prototype. The current APIs are experimental and are not stable production APIs.
+This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, and a DATA frame codec prototype. The TLS 1.3 handshake package has moved to the kasen repository as `kasen_handshake`. The current APIs are experimental and are not stable production APIs.
 
 ## Layout
 
@@ -33,10 +33,6 @@ Each package documents itself in its own README or crate documentation. Dependen
 - [`crates/nitori_crypto_ring`](crates/nitori_crypto_ring/README.md): the `nitori_crypto` capabilities implemented with ring; depends on `nitori_crypto`.
 - [`crates/nitori_crypto_aws_lc`](crates/nitori_crypto_aws_lc/README.md): the `nitori_crypto` capabilities implemented with aws-lc-rs, including P-521 and ML-KEM; depends on `nitori_crypto`.
 
-### TLS
-
-- [`crates/nitori_tls`](crates/nitori_tls/README.md): the TLS 1.3 handshake for QUIC; depends on `nitori_call`, `nitori_io`, `nitori_crypto` and `nitori_sync`.
-
 ### Examples and benchmarks
 
 - `examples/data-frame-codec`: a QUIC VarInt and HTTP/3 DATA frame codec with tests, compiler boundary probes and macro expansion tooling; depends on `nitori_call` and `nitori_io`. See its crate documentation.
@@ -44,7 +40,7 @@ Each package documents itself in its own README or crate documentation. Dependen
 
 ## Development
 
-Install [rustup](https://rustup.rs/) and Python 3; `nitori_crypto_aws_lc` also needs a C compiler and CMake. The repository pins `nightly-2026-11-03` with rustfmt, Clippy and the `x86_64-unknown-none` target in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`). `nitori_id`, `nitori_crypto`, `nitori_call`, `nitori_io`, `nitori_sync` and `nitori_tls` build without the standard library, with `alloc`; the parts of `nitori_call`, `nitori_io`, `nitori_sync` and `nitori_tls` that need it are behind their default `std` feature. They are checked on `x86_64-unknown-none`, a target without the standard library that has 64-bit atomics, one package at a time, since a workspace build unifies the `std` features of all packages.
+Install [rustup](https://rustup.rs/) and Python 3; `nitori_crypto_aws_lc` also needs a C compiler and CMake. The repository pins `nightly-2026-11-03` with rustfmt, Clippy and the `x86_64-unknown-none` target in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`). `nitori_id`, `nitori_crypto`, `nitori_call`, `nitori_io` and `nitori_sync` build without the standard library, with `alloc`; the parts of `nitori_call`, `nitori_io` and `nitori_sync` that need it are behind their default `std` feature. They are checked on `x86_64-unknown-none`, a target without the standard library that has 64-bit atomics, one package at a time, since a workspace build unifies the `std` features of all packages.
 
 SNAFU is pinned to commit `03cb8d2e52a3b0b33a39cc3d4ce8a7075fa4ab58` in the public [Open Gensokyo Network fork](https://github.com/opengensokyonet/snafu), pending [upstream PR #565](https://github.com/shepmaster/snafu/pull/565). Its conditional diagnostic trait implementations and decoupled error construction are required. Cargo fetches this source automatically; no sibling checkout is needed.
 
@@ -60,7 +56,7 @@ From the repository root:
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-for package in nitori_id nitori_crypto nitori_call nitori_io nitori_sync nitori_tls; do
+for package in nitori_id nitori_crypto nitori_call nitori_io nitori_sync; do
   cargo clippy --locked -p "$package" --target x86_64-unknown-none --no-default-features -- -D warnings
 done
 cargo clippy --locked -p nitori_call --target x86_64-unknown-none --no-default-features --features bytes -- -D warnings
