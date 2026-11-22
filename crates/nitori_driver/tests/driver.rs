@@ -29,8 +29,8 @@ use nitori_driver::{
     },
     lend::KeyedList,
     need::{At, ByKey, Here, Kind, Mut, Ref, ToChild, Up},
-    request::RequestSum,
-    structure::{End, NodeKind, Share},
+    request::NodeRequest,
+    structure::{End, KeyAddress, NodeKind, Share},
 };
 
 // ---------------------------------------------------------------- a log
@@ -153,10 +153,10 @@ mod session {
         const ACTS_BEFORE_CALLS: bool = true;
         build_default!();
         end_logged!("Session");
-        fn before_calls<KP: HookKeys<Self, Base, L, K_>, R: RequestSum>(
+        fn before_calls<KP: HookKeys<Self, Base, L, K_>>(
             view: HookView<'_, Self, Base, L, K_, KP>,
             waker: &Waker,
-        ) -> Option<R> {
+        ) -> Option<Self::Returns> {
             view.head.0 += 1;
             put(format!("before {}", view.head.0));
             stash("session", waker);
@@ -183,10 +183,10 @@ mod peer {
         type Timing = HasDeadline;
         build_default!();
         end_logged!("Peer");
-        fn on_events<KP: HookKeys<Self, Base, L, K_>, R: RequestSum>(
+        fn on_events<KP: HookKeys<Self, Base, L, K_>>(
             events: Triggered<'_>,
             view: HookView<'_, Self, Base, L, K_, KP>,
-        ) -> Option<R> {
+        ) -> Option<Self::Returns> {
             assert!(events.contains::<Bumped>());
             view.head.bumped += 1;
             None
@@ -200,10 +200,10 @@ mod peer {
             let total = view.tail.head.0;
             (total > 0).then(|| Duration::from_secs(100 + total))
         }
-        fn expire<KP: HookKeys<Self, Base, L, K_>, R: RequestSum>(
+        fn expire<KP: HookKeys<Self, Base, L, K_>>(
             _: HookView<'_, Self, Base, L, K_, KP>,
             _: Duration,
-        ) -> Option<R> {
+        ) -> Option<Self::Returns> {
             None
         }
     }
@@ -244,10 +244,10 @@ mod path {
         ) -> Option<Duration> {
             view.head.at
         }
-        fn expire<KP: HookKeys<Self, Base, L, K_>, R: RequestSum>(
+        fn expire<KP: HookKeys<Self, Base, L, K_>>(
             view: HookView<'_, Self, Base, L, K_, KP>,
             now: Duration,
-        ) -> Option<R> {
+        ) -> Option<Self::Returns> {
             let hlist_pat![this, expired] = view;
             this.fired += 1;
             this.at = None;
@@ -300,10 +300,10 @@ impl<L: PartList<L> + 'static> Hooks<Watch, L, Connection> for Heard {
     ) -> Self {
         Default::default()
     }
-    fn on_events<KP: HookKeys<Self, Watch, L, Connection>, R: RequestSum>(
+    fn on_events<KP: HookKeys<Self, Watch, L, Connection>>(
         events: Triggered<'_>,
         view: HookView<'_, Self, Watch, L, Connection, KP>,
-    ) -> Option<R> {
+    ) -> Option<Self::Returns> {
         let this = view.head;
         this.started += events.contains::<NodeStarted<Path>>() as u64;
         this.ending += events.contains::<NodeEnding<Path>>() as u64;
@@ -389,12 +389,12 @@ impl<Q: Composition> CallKind<Q> for Advance {
         At<Up<0>, Here, Publish<TotalChanged>>
     ];
     type Op = Advancing;
-    type Yield = u64;
+    type Yield = NodeRequest<Connection, Connection>;
     fn start() -> Advancing {
         Advancing::new()
     }
 }
-#[call(yields = u64)]
+#[call(yields = NodeRequest<Connection, Connection>)]
 pub async fn advancing<W: CallFamily<C = Advance>>(host: &mut impl LentAccess<Family = W>) {
     loop {
         let total = host.with(|mut view| {
@@ -404,7 +404,7 @@ pub async fn advancing<W: CallFamily<C = Advance>>(host: &mut impl LentAccess<Fa
             total.0
         });
         put(format!("advance {total}"));
-        yield total;
+        yield NodeRequest::new(KeyAddress::here(), Noted(total));
         if total == 3 {
             return;
         }
@@ -494,12 +494,8 @@ fn calls_run_yield_and_finish() {
     assert_eq!(poll(&mut d, &w), Poll::Pending);
     assert_eq!(poll(&mut d, &w), Poll::Pending);
     assert_eq!(log(), ["advance 2", "advance 3"]);
-    let yields: Vec<u64> = d
-        .take_yields::<Advance, _, _, _>()
-        .into_iter()
-        .map(|(_, y)| y)
-        .collect();
-    assert_eq!(yields, [1, 2, 3]);
+    // what it yielded went to the connection, a request each
+    assert_eq!(noted(), [1, 2, 3]);
     // over: not polled again
     assert_eq!(poll(&mut d, &w), Poll::Pending);
     assert!(log().is_empty());
@@ -513,11 +509,11 @@ fn build_reads_the_parent_and_events_reach_above_not_beside() {
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
     let (_, w) = outer();
     let _ = poll(&mut d, &w);
-    let _ = d.take_yields::<Advance, _, _, _>();
+    let _ = noted();
     // the total is 1: a path is built with 10
-    let p1 = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
-    let p2 = d.add::<Path, _, _, _>(End, PathId(2)).unwrap();
-    let peer = d.add::<Peer, _, _, _>(End, PeerId(7)).unwrap();
+    let p1 = d.add::<Path, _, _>(End, PathId(1)).unwrap();
+    let p2 = d.add::<Path, _, _>(End, PathId(2)).unwrap();
+    let peer = d.add::<Peer, _, _>(End, PeerId(7)).unwrap();
     assert_eq!(
         heard(&d).0,
         2,
@@ -544,8 +540,8 @@ fn deadlines_come_and_are_read_again() {
     let clock = TestClock::default();
     let mut d = Driver::<Q>::new(clock.clone(), args()).unwrap();
     let (_, w) = outer();
-    let _p = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
-    let _peer = d.add::<Peer, _, _, _>(End, PeerId(1)).unwrap();
+    let _p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
+    let _peer = d.add::<Peer, _, _>(End, PeerId(1)).unwrap();
     // the call arms the timer: its write is read again (debug builds check
     // every deadline at the end of a poll, and the peer's moves with the
     // total, read again on `TotalChanged`)
@@ -571,11 +567,11 @@ fn removal_order_end_hooks_and_remains() {
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
     let (_, w) = outer();
     let _ = poll(&mut d, &w);
-    d.add::<Session, _, _, _>(End, ()).unwrap();
-    d.add::<Peer, _, _, _>(End, PeerId(1)).unwrap();
-    let p = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
-    let r = d.add::<Route, _, _, _>(p, PeerId(1)).unwrap();
-    d.add::<Timer, _, _, _>(r, ()).unwrap();
+    d.add::<Session, _, _>(End, ()).unwrap();
+    d.add::<Peer, _, _>(End, PeerId(1)).unwrap();
+    let p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
+    let r = d.add::<Route, _, _>(p, PeerId(1)).unwrap();
+    d.add::<Timer, _, _>(r, ()).unwrap();
     log();
     d.end(());
     assert!(d.ended());
@@ -599,9 +595,9 @@ fn removal_order_end_hooks_and_remains() {
 fn removing_a_node_ends_it_and_its_subtree() {
     log();
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
-    d.add::<Peer, _, _, _>(End, PeerId(1)).unwrap();
-    let p = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
-    d.add::<Route, _, _, _>(p, PeerId(1)).unwrap();
+    d.add::<Peer, _, _>(End, PeerId(1)).unwrap();
+    let p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
+    d.add::<Route, _, _>(p, PeerId(1)).unwrap();
     log();
     assert!(d.remove(p, ()));
     assert_eq!(log(), ["end Route", "end Path"]);
@@ -616,9 +612,9 @@ fn before_calls_and_no_longer_needed() {
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
     let (_, w) = outer();
     let _ = poll(&mut d, &w);
-    d.take_yields::<Advance, _, _, _>();
+    let _ = noted();
     log();
-    d.add::<Session, _, _, _>(End, ()).unwrap();
+    d.add::<Session, _, _>(End, ()).unwrap();
     let _ = poll(&mut d, &w);
     // the action before the calls runs first
     let l = log();
@@ -644,7 +640,7 @@ fn old_wakers_after_a_node_goes() {
     clear_stash();
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
     let (_, w) = outer();
-    let p = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
+    let p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
     let _ = poll(&mut d, &w);
     log();
     let old = stashed("bump").pop().unwrap();
@@ -655,7 +651,7 @@ fn old_wakers_after_a_node_goes() {
     assert!(log().iter().all(|x| !x.starts_with("bump")));
     // a new node at the same place and key: its call starts; the old
     // waker does not call it
-    let again = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
+    let again = d.add::<Path, _, _>(End, PathId(1)).unwrap();
     assert_eq!(again, p);
     let _ = poll(&mut d, &w);
     assert!(log().contains(&"bump waits".to_string()));
@@ -674,13 +670,13 @@ fn many_wakes_wake_the_outer_waker_once() {
     clear_stash();
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
     for i in 0..3 {
-        d.add::<Path, _, _, _>(End, PathId(i)).unwrap();
+        d.add::<Path, _, _>(End, PathId(i)).unwrap();
     }
     let (count, w) = outer();
     for _ in 0..4 {
         let _ = poll(&mut d, &w);
     }
-    let _ = d.take_yields::<Advance, _, _, _>();
+    let _ = noted();
     log();
     let before = count.0.load(Ordering::SeqCst);
     for waker in stashed("bump") {
@@ -696,7 +692,7 @@ fn a_new_outer_waker_polls_every_call_again() {
     log();
     clear_stash();
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
-    d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
+    d.add::<Path, _, _>(End, PathId(1)).unwrap();
     let (_, w1) = outer();
     for _ in 0..4 {
         let _ = poll(&mut d, &w1);
@@ -714,8 +710,8 @@ fn a_new_outer_waker_polls_every_call_again() {
 fn dropped_tells_every_component_then_ends() {
     log();
     let mut d = Driver::<Q>::new(TestClock::default(), args()).unwrap();
-    d.add::<Session, _, _, _>(End, ()).unwrap();
-    let p = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
+    d.add::<Session, _, _>(End, ()).unwrap();
+    let p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
     let _ = p;
     log();
     drop(d);
@@ -767,10 +763,10 @@ composition!(impl driver for QB: Connection, HList![Base, Watch, Boomer], TestCl
 fn a_panic_tells_the_root_only() {
     log();
     let mut d = Driver::<QB>::new(TestClock::default(), frunk_core::hlist![(), (), ()]).unwrap();
-    d.add::<Peer, _, _, _>(End, PeerId(1)).unwrap();
-    let p = d.add::<Path, _, _, _>(End, PathId(1)).unwrap();
-    let r = d.add::<Route, _, _, _>(p, PeerId(1)).unwrap();
-    d.add::<Timer, _, _, _>(r, ()).unwrap();
+    d.add::<Peer, _, _>(End, PeerId(1)).unwrap();
+    let p = d.add::<Path, _, _>(End, PathId(1)).unwrap();
+    let r = d.add::<Route, _, _>(p, PeerId(1)).unwrap();
+    d.add::<Timer, _, _>(r, ()).unwrap();
     log();
     let (_, w) = outer();
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll(&mut d, &w)));

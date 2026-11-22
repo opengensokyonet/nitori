@@ -26,13 +26,32 @@ use crate::{
     },
     lend::{Flat, KeyedList, LendAt, LendError, NeedSet, ViewOf, Writes},
     need::ChainOf,
-    request::RequestSum,
+    request::{IntoRequestSum, PlaceRequests, RequestSumOf},
     structure::{
         Address, Append, Child, ChildAt, ChildStorage, End, FromAddress, KindFor, LastChildren,
-        Node, NodeKind, NodePath, ParentPath, PathFrom, RemainsList, RemainsOf, Share, Shares,
-        SplitLast, Step, remove,
+        MoveError, Node, NodeKind, NodePath, ParentPath, PathFrom, RemainsList, RemainsOf, Share,
+        Shares, SplitLast, Step, Store, move_to, remove,
     },
 };
+
+// ---------------------------------------------------------------- casts
+
+/// `a` as a `B`, when `A` is `B`. The driver reaches a place by its number
+/// and hands it a key or a reason of the type the edit handle's types
+/// give; the place's own types are the same, which only the run time sees.
+fn cast<A: 'static, B: 'static>(a: A) -> Option<B> {
+    let mut a = Some(a);
+    (&mut a as &mut dyn core::any::Any)
+        .downcast_mut::<Option<B>>()
+        .and_then(Option::take)
+}
+/// `a` as a `&B`, when `A` is `B`.
+fn cast_ref<A: 'static, B: 'static>(a: &A) -> Option<&B> {
+    (a as &dyn core::any::Any).downcast_ref::<B>()
+}
+/// The edit handle's types are the place's: the driver found the place by
+/// the position of the child the handle's types name.
+const SAME_TYPES: &str = "the place found by the position of a child has the types of that child";
 
 // ---------------------------------------------------------------- the places
 
@@ -136,28 +155,36 @@ impl<L: PartList<L> + 'static> SelfParts for L {}
 /// Root, Parts, Clock)`; the places are opaque, defined by
 /// [`places`](DriverComposition::places).
 pub trait DriverComposition:
-    Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceShape<<Self as Composition>::Root>>>
+    Composition<
+        Parts: SelfParts,
+        Root: PlacesUnder<
+            End,
+            Out: PlaceShape<<Self as Composition>::Root>
+                     + PlaceRequests<<Self as Composition>::Root>,
+        >,
+    >
 {
     /// The clock the driver reads and sleeps on; every component with a
     /// deadline has its instant.
     type Clock: MonotonicClock + 'static;
-    /// What a hook hands the driver to change the structure (see
-    /// [`request`](crate::request)).
-    type Requests: RequestSum;
     /// What the parts keep of the root's shares after it ended
     /// ([`RemainsOf`]`<Parts, Root>`).
     type Remains: Default + 'static;
     /// The positions of every hook of every place.
     type Places: PlacePack<Self, PlacesOf<Self>>;
+    /// How what each call yields goes into the requests.
+    type Yields: super::walk::YieldPack<Self, crate::call::CallSlotsOf<Self>>;
     /// Only to define `Places`.
     fn places() -> PhantomData<Self::Places>;
+    /// Only to define `Yields`.
+    fn yields() -> PhantomData<Self::Yields>;
 }
 /// The clock of `Q`.
 pub type ClockOf<Q> = <Q as DriverComposition>::Clock;
 /// The instant of the clock of `Q`.
 pub type InstantOf<Q> = <ClockOf<Q> as MonotonicClock>::Instant;
-/// The requests of `Q`.
-pub type RequestsOf<Q> = <Q as DriverComposition>::Requests;
+/// The sum of the requests of `Q`'s tree.
+pub type RequestsOf<Q> = RequestSumOf<RootOf<Q>>;
 /// The root of `Q`'s tree.
 pub type RootNode<Q> = Node<RootOf<Q>, PartsOf<Q>>;
 /// The address of a node of `Q`'s tree.
@@ -213,35 +240,37 @@ where
 /// The positions of one component: its own needs', its build needs' and
 /// its subscriptions'.
 #[allow(clippy::type_complexity)]
-pub struct CompPositions<In, Ib, Is>(PhantomData<fn() -> (In, Ib, Is)>);
+pub struct CompPositions<In, Ib, Is, Ir>(PhantomData<fn() -> (In, Ib, Is, Ir)>);
 
 /// One component `C` of the part `O` proved at the path type `X` of `Q`.
 #[diagnostic::on_unimplemented(
     message = "the hooks of `{Self}` cannot be lent at `{X}` under `{Q}`",
     label = "a need of this component is not met",
-    note = "a need in the component's `Needs` (lent with the component itself at its node) or `BuildNeeds` (lent at the parent; none at the root) is not on this structure or overlaps another, or a subscription's anchor or steps are not there"
+    note = "a need in the component's `Needs` (lent with the component itself at its node) or `BuildNeeds` (lent at the parent; none at the root) is not on this structure or overlaps another, a subscription's anchor or steps are not there, or what its hooks return is not a request of this structure"
 )]
 pub trait ProveComp<Q, X, O, I> {
     /// The component's positions.
     type Pos;
 }
 type P_<Q> = PartsOf<Q>;
-impl<Q, X, O, C, In, Ib, Is> ProveComp<Q, X, O, (In, Ib, Is)> for C
+impl<Q, X, O, C, In, Ib, Is, Ir> ProveComp<Q, X, O, (In, Ib, Is, Ir)> for C
 where
-    Q: Composition<Parts: SelfParts>,
+    Q: Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceRequests<RootOf<Q>>>>,
     X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil>,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
     OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>: LendAt<'static, RootOf<Q>, P_<Q>, X, In> + Writes<P_<Q>>,
     X: BuildAt<'static, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib>,
     C::Subscribes: Subscriptions<ChainAt<Q, X>, P_<Q>, Is>,
+    C::Returns: IntoRequestSum<RequestSumOf<RootOf<Q>>, Ir>,
 {
-    type Pos = CompPositions<In, Ib, Is>;
+    type Pos = CompPositions<In, Ib, Is, Ir>;
 }
 
 /// Lending the hooks of the component `C` of the part `O` at the path
 /// type `X` of `Q`, for every lifetime of the lend.
-pub trait CompLend<'a, Q: Composition<Parts: SelfParts>, X: PathFrom<RootOf<Q>> + ParentPath, O, C>
+pub trait CompLend<'a, Q, X: PathFrom<RootOf<Q>> + ParentPath, O, C>
 where
+    Q: Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceRequests<RootOf<Q>>>>,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
 {
     /// The keyed positions of the hooks' view.
@@ -268,15 +297,18 @@ where
     fn subscriptions(out: &mut Vec<Subscription>);
     /// The components its hooks take exclusive.
     fn writes(out: &mut Vec<TypeId>);
+    /// What a hook returned, in the requests of the tree.
+    fn returned(r: C::Returns) -> RequestSumOf<RootOf<Q>>;
 }
-impl<'a, Q, X, O, C, In, Ib, Is> CompLend<'a, Q, X, O, C> for CompPositions<In, Ib, Is>
+impl<'a, Q, X, O, C, In, Ib, Is, Ir> CompLend<'a, Q, X, O, C> for CompPositions<In, Ib, Is, Ir>
 where
-    Q: Composition<Parts: SelfParts>,
+    Q: Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceRequests<RootOf<Q>>>>,
     X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil> + ParentPath,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
     OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>: LendAt<'a, RootOf<Q>, P_<Q>, X, In> + Writes<P_<Q>>,
     X: BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib>,
     C::Subscribes: Subscriptions<ChainAt<Q, X>, P_<Q>, Is>,
+    C::Returns: IntoRequestSum<RequestSumOf<RootOf<Q>>, Ir>,
 {
     type Positions =
         <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as LendAt<'a, RootOf<Q>, P_<Q>, X, In>>::Positions;
@@ -304,6 +336,9 @@ where
     }
     fn writes(out: &mut Vec<TypeId>) {
         <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as Writes<P_<Q>>>::writes(out);
+    }
+    fn returned(r: C::Returns) -> RequestSumOf<RootOf<Q>> {
+        r.into_sum()
     }
 }
 
@@ -396,6 +431,9 @@ pub struct PlaceInfo {
     pub path: TypeId,
     /// The parent's path type; none for the root.
     pub parent: Option<TypeId>,
+    /// Its position among the children of its parent's kind; none for the
+    /// root.
+    pub index: Option<usize>,
     /// Its kind.
     pub kind: TypeId,
     /// Its positions up to the root, as subscriptions name places.
@@ -587,7 +625,8 @@ where
                 <C::Timing as Timing<C, O, P_<Q>, TargetOf<Q, X>, InstantOf<Q>>>::expire(view, now)
             })
             .ok()
-            .flatten(),
+            .flatten()
+            .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
     }
     fn on_events(
@@ -603,7 +642,8 @@ where
         Some(
             <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::on_events(events, view))
                 .ok()
-                .flatten(),
+                .flatten()
+                .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
     }
     fn before_calls(
@@ -621,7 +661,8 @@ where
                 C::before_calls(view, waker)
             })
             .ok()
-            .flatten(),
+            .flatten()
+            .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
     }
     fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &Outbox) {
@@ -849,18 +890,141 @@ where
 pub trait ParentPlace {
     /// The parent's path type; none for the root.
     fn parent_place() -> Option<TypeId>;
+    /// The position of the path's last step among the children of the
+    /// parent's kind; none for the root.
+    fn child_index() -> Option<usize>;
 }
 impl ParentPlace for End {
     fn parent_place() -> Option<TypeId> {
         None
     }
+    fn child_index() -> Option<usize> {
+        None
+    }
 }
 impl<I, H, R> ParentPlace for Step<I, H, R>
 where
-    Step<I, H, R>: ParentPath<Parent: 'static>,
+    Step<I, H, R>: ParentPath<Parent: 'static> + SplitLast<Index: super::walk::Number>,
 {
     fn parent_place() -> Option<TypeId> {
         Some(TypeId::of::<ParentOf<Self>>())
+    }
+    fn child_index() -> Option<usize> {
+        Some(<<Self as SplitLast>::Index as super::walk::Number>::VALUE)
+    }
+}
+
+/// The nodes at a path, reached by the driver's addresses: added under a
+/// parent by a key, found by their key, moved under another parent. The
+/// root is none of these.
+#[allow(clippy::type_complexity)]
+pub trait ChildPath<R: KindFor<P>, P>: PathFrom<R> + ParentPath {
+    /// The parent's path, from its address.
+    fn parent_path(parent: &Address<R>) -> Option<ParentOf<Self>>;
+    /// Keep `node` under the parent at `parent`, under `key` (a key of
+    /// this path's store); `None` when the key is taken.
+    fn attach<KK: 'static>(
+        root: &mut Node<R, P>,
+        parent: &Address<R>,
+        key: KK,
+        node: Node<Self::Target, P>,
+    ) -> Option<Address<R>>
+    where
+        Self::Target: KindFor<P>;
+    /// The node kept under `key` under the parent at `parent`.
+    fn find_under<KK: 'static>(
+        root: &Node<R, P>,
+        parent: &Address<R>,
+        key: &KK,
+    ) -> Option<Address<R>>;
+    /// Move the node at `at` under the node at `to`, of its parent's place.
+    fn move_under(
+        root: &mut Node<R, P>,
+        at: &Address<R>,
+        to: &Address<R>,
+    ) -> Result<Address<R>, MoveError>;
+}
+impl<R: KindFor<P>, P> ChildPath<R, P> for End {
+    fn parent_path(_: &Address<R>) -> Option<()> {
+        None
+    }
+    fn attach<KK: 'static>(
+        _: &mut Node<R, P>,
+        _: &Address<R>,
+        _: KK,
+        _: Node<R, P>,
+    ) -> Option<Address<R>>
+    where
+        R: KindFor<P>,
+    {
+        None
+    }
+    fn find_under<KK: 'static>(_: &Node<R, P>, _: &Address<R>, _: &KK) -> Option<Address<R>> {
+        None
+    }
+    fn move_under(
+        _: &mut Node<R, P>,
+        _: &Address<R>,
+        _: &Address<R>,
+    ) -> Result<Address<R>, MoveError> {
+        Err(MoveError::NoSource)
+    }
+}
+type ParentPathOf<X> = <X as SplitLast>::Parent;
+type IndexOf<X> = <X as SplitLast>::Index;
+type HandleOf<X> = <X as SplitLast>::Handle;
+impl<R, P, I, H, Rr> ChildPath<R, P> for Step<I, H, Rr>
+where
+    R: KindFor<P>,
+    Self: PathFrom<R> + FromAddress<R> + SplitLast + ParentPath<Parent = ParentPathOf<Self>>,
+    ParentPathOf<Self>:
+        NodePath<R, P> + FromAddress<R> + Append<IndexOf<Self>, HandleOf<Self>, Out = Self> + Copy,
+    LastChildren<R, Self>: ChildAt<
+            IndexOf<Self>,
+            P,
+            Kind = <Self as PathFrom<R>>::Target,
+            Storage: ChildStorage<Handle = HandleOf<Self>>,
+        >,
+{
+    fn parent_path(parent: &Address<R>) -> Option<ParentPathOf<Self>> {
+        ParentPathOf::<Self>::from_address(parent)
+    }
+    fn attach<KK: 'static>(
+        root: &mut Node<R, P>,
+        parent: &Address<R>,
+        key: KK,
+        node: Node<Self::Target, P>,
+    ) -> Option<Address<R>>
+    where
+        Self::Target: KindFor<P>,
+    {
+        let pp = ParentPathOf::<Self>::from_address(parent)?;
+        let parent = pp.node_mut(root)?;
+        let key = cast(key).expect(SAME_TYPES);
+        let store =
+            <LastChildren<R, Self> as ChildAt<IndexOf<Self>, P>>::store_mut(&mut parent.children);
+        let h = store.insert(key, node).ok()?;
+        Some(pp.append(h).address())
+    }
+    fn find_under<KK: 'static>(
+        root: &Node<R, P>,
+        parent: &Address<R>,
+        key: &KK,
+    ) -> Option<Address<R>> {
+        let pp = ParentPathOf::<Self>::from_address(parent)?;
+        let parent = pp.node(root)?;
+        let key = cast_ref(key).expect(SAME_TYPES);
+        let store = <LastChildren<R, Self> as ChildAt<IndexOf<Self>, P>>::store(&parent.children);
+        Some(pp.append(store.find(key)?).address())
+    }
+    fn move_under(
+        root: &mut Node<R, P>,
+        at: &Address<R>,
+        to: &Address<R>,
+    ) -> Result<Address<R>, MoveError> {
+        let at = Self::from_address(at).ok_or(MoveError::NoSource)?;
+        let to = ParentPathOf::<Self>::from_address(to).ok_or(MoveError::NoDestination)?;
+        Ok(move_to(root, at, to)?.address())
     }
 }
 
@@ -926,6 +1090,33 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         P_<Q>: RemainsList<TargetOf<Q, Pl::At>>;
     /// Take the node out of its parent's store.
     fn detach(root: &mut RootNode<Q>, at: &AddressOf<Q>) -> bool;
+    /// Build a node of the place under the parent at `parent`, under `key`
+    /// (of the place's store), and keep it there; `None` when the key is
+    /// taken: nothing is built.
+    fn add<KK: 'static>(
+        root: &mut RootNode<Q>,
+        parent: &AddressOf<Q>,
+        key: KK,
+        args: &ArgsOf<P_<Q>>,
+        o: &Outbox,
+    ) -> Option<AddressOf<Q>>;
+    /// The node of the place kept under `key` under the parent at
+    /// `parent`.
+    fn find_child<KK: 'static>(
+        root: &RootNode<Q>,
+        parent: &AddressOf<Q>,
+        key: &KK,
+    ) -> Option<AddressOf<Q>>;
+    /// Move the node at `at` under the node at `to`, of the place of its
+    /// parent.
+    fn move_under(
+        root: &mut RootNode<Q>,
+        at: &AddressOf<Q>,
+        to: &AddressOf<Q>,
+    ) -> Result<AddressOf<Q>, MoveError>;
+    /// Every component's end, for `reason`, of the type of the place's
+    /// kind's reason.
+    fn end_with<RR: 'static>(root: &mut RootNode<Q>, at: &AddressOf<Q>, reason: &RR, o: &Outbox);
 }
 impl<Q, X, PL> PlaceOps<Q, Place<X>> for PlacePositions<PL>
 where
@@ -936,6 +1127,7 @@ where
         + ParentPath
         + ParentPlace
         + Detach<RootOf<Q>, P_<Q>>
+        + ChildPath<RootOf<Q>, P_<Q>>
         + Copy
         + 'static,
     <TargetOf<Q, X> as NodeKind>::Children: crate::structure::ChildStores<P_<Q>>,
@@ -949,6 +1141,7 @@ where
         PlaceInfo {
             path: TypeId::of::<X>(),
             parent: X::parent_place(),
+            index: X::child_index(),
             kind: TypeId::of::<TargetOf<Q, X>>(),
             pre: TypeId::of::<<ChainAt<Q, X> as OwnPlace>::Pre>(),
             depth: <<ChainAt<Q, X> as OwnPlace>::Pre as crate::event::Depth>::DEPTH,
@@ -1034,6 +1227,37 @@ where
     fn detach(root: &mut RootNode<Q>, at: &AddressOf<Q>) -> bool {
         X::from_address(at).is_some_and(|at| at.detach(root))
     }
+    fn add<KK: 'static>(
+        root: &mut RootNode<Q>,
+        parent: &AddressOf<Q>,
+        key: KK,
+        args: &ArgsOf<P_<Q>>,
+        o: &Outbox,
+    ) -> Option<AddressOf<Q>> {
+        if X::find_under(root, parent, &key).is_some() {
+            return None;
+        }
+        let pp = X::parent_path(parent)?;
+        let node = Self::build(Some(root), &pp, args, o).ok()?;
+        X::attach(root, parent, key, node)
+    }
+    fn find_child<KK: 'static>(
+        root: &RootNode<Q>,
+        parent: &AddressOf<Q>,
+        key: &KK,
+    ) -> Option<AddressOf<Q>> {
+        X::find_under(root, parent, key)
+    }
+    fn move_under(
+        root: &mut RootNode<Q>,
+        at: &AddressOf<Q>,
+        to: &AddressOf<Q>,
+    ) -> Result<AddressOf<Q>, MoveError> {
+        X::move_under(root, at, to)
+    }
+    fn end_with<RR: 'static>(root: &mut RootNode<Q>, at: &AddressOf<Q>, reason: &RR, o: &Outbox) {
+        Self::end(root, at, cast_ref(reason).expect(SAME_TYPES), o);
+    }
 }
 
 /// The end of a pack of places: never reached.
@@ -1102,6 +1326,26 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
     fn detach(_: &mut RootNode<Q>, _: &AddressOf<Q>) -> bool {
         false
     }
+    fn add<KK: 'static>(
+        _: &mut RootNode<Q>,
+        _: &AddressOf<Q>,
+        _: KK,
+        _: &ArgsOf<P_<Q>>,
+        _: &Outbox,
+    ) -> Option<AddressOf<Q>> {
+        None
+    }
+    fn find_child<KK: 'static>(_: &RootNode<Q>, _: &AddressOf<Q>, _: &KK) -> Option<AddressOf<Q>> {
+        None
+    }
+    fn move_under(
+        _: &mut RootNode<Q>,
+        _: &AddressOf<Q>,
+        _: &AddressOf<Q>,
+    ) -> Result<AddressOf<Q>, MoveError> {
+        Err(MoveError::NoSource)
+    }
+    fn end_with<RR: 'static>(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &RR, _: &Outbox) {}
 }
 
 /// The positions of every place of the list `L` under `Q`.

@@ -1,6 +1,6 @@
 //! Node kinds, their children and their links.
 use alloc::vec::Vec;
-use core::{any::TypeId, marker::PhantomData};
+use core::{any::TypeId, convert::Infallible, marker::PhantomData};
 
 use frunk_core::{
     coproduct::{CNil, Coproduct},
@@ -8,7 +8,8 @@ use frunk_core::{
     indices::{Here, There},
 };
 
-use super::{Address, ChildStorage};
+use super::{Address, ChildStorage, KeyAddress};
+use crate::request::Request;
 
 /// A kind of node: the kinds of its children and the nodes it links to.
 ///
@@ -24,6 +25,10 @@ pub trait NodeKind: 'static + Sized {
     /// ([`Hooks::end`](crate::hooks::Hooks::end)); `()` by default. A node
     /// that ends because a node above it ends is told the default.
     type EndReason: Default + 'static = ();
+    /// What a node of this kind is asked to change in its own subtree, and
+    /// how it does it ([`Request`]); `Infallible` for a kind that is asked
+    /// nothing.
+    type Request: Request<Self> = Infallible;
 }
 
 /// A child in a [`NodeKind::Children`] list: the kind `K`, kept by the
@@ -35,20 +40,45 @@ pub trait ChildList: 'static {
     /// Which child and its handle, then the address below it: a sum with
     /// one alternative for each child.
     type Addr: Copy + Eq + core::fmt::Debug;
+    /// Which child and its key, then the key address below it: a sum with
+    /// one alternative for each child.
+    type KeyAddr: Clone + PartialEq + 'static;
     /// The kinds of the children and of every node below them that are the
     /// target of a link, pushed onto `out`.
     fn link_targets(out: &mut Vec<TypeId>);
+    /// `addr` with its first `levels` levels (at least one) taken from
+    /// `prefix`; `None` when the two go to different children there.
+    fn splice(addr: &Self::Addr, prefix: &Self::Addr, levels: usize) -> Option<Self::Addr>;
 }
 impl ChildList for HNil {
     type Addr = CNil;
+    type KeyAddr = CNil;
     fn link_targets(_: &mut Vec<TypeId>) {}
+    fn splice(addr: &CNil, _: &CNil, _: usize) -> Option<CNil> {
+        match *addr {}
+    }
 }
 impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildList for HCons<Child<K, S>, T> {
     type Addr = Coproduct<(S::Handle, Address<K>), T::Addr>;
+    type KeyAddr = Coproduct<(S::Key, KeyAddress<K>), T::KeyAddr>;
     fn link_targets(out: &mut Vec<TypeId>) {
         K::Linked::targets(out);
         K::Children::link_targets(out);
         T::link_targets(out);
+    }
+    fn splice(addr: &Self::Addr, prefix: &Self::Addr, levels: usize) -> Option<Self::Addr> {
+        match (addr, prefix) {
+            (Coproduct::Inl((_, below)), Coproduct::Inl((h, from))) => Some(Coproduct::Inl((
+                *h,
+                if levels <= 1 {
+                    *below
+                } else {
+                    below.splice(from, levels - 1)?
+                },
+            ))),
+            (Coproduct::Inr(a), Coproduct::Inr(b)) => T::splice(a, b, levels).map(Coproduct::Inr),
+            _ => None,
+        }
     }
 }
 
@@ -70,6 +100,12 @@ pub trait ChildIndex<I>: ChildList {
     fn project(
         addr: &Self::Addr,
     ) -> Option<(<Self::Storage as ChildStorage>::Handle, Address<Self::Kind>)>;
+    /// The key address, in the list's terms, of the node at `below` under
+    /// the child kept under `key`.
+    fn inject_key(
+        key: <Self::Storage as ChildStorage>::Key,
+        below: KeyAddress<Self::Kind>,
+    ) -> Self::KeyAddr;
 }
 impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildIndex<Here> for HCons<Child<K, S>, T> {
     type Kind = K;
@@ -82,6 +118,9 @@ impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildIndex<Here> for HCons<Chil
             Coproduct::Inl(at) => Some(*at),
             Coproduct::Inr(_) => None,
         }
+    }
+    fn inject_key(key: S::Key, below: KeyAddress<K>) -> Self::KeyAddr {
+        Coproduct::Inl((key, below))
     }
 }
 impl<I, K: NodeKind, S: ChildStorage, T: ChildIndex<I>> ChildIndex<There<I>>
@@ -99,6 +138,12 @@ impl<I, K: NodeKind, S: ChildStorage, T: ChildIndex<I>> ChildIndex<There<I>>
             Coproduct::Inl(_) => None,
             Coproduct::Inr(rest) => T::project(rest),
         }
+    }
+    fn inject_key(
+        key: <T::Storage as ChildStorage>::Key,
+        below: KeyAddress<T::Kind>,
+    ) -> Self::KeyAddr {
+        Coproduct::Inr(T::inject_key(key, below))
     }
 }
 

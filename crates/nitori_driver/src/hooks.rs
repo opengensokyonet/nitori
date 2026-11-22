@@ -126,7 +126,6 @@ use crate::{
     event::Triggered,
     lend::{Flat, KeyedList, NeedSet, ViewOf},
     need::{At, Here, Mut, Up},
-    request::RequestSum,
     structure::{NodeKind, Share},
 };
 
@@ -199,8 +198,8 @@ pub struct HasDeadline;
 /// Every hook but [`build`](Hooks::build) does nothing by default. Every
 /// hook but `build` is lent [`HookView`]: the component, then its
 /// [`Needs`](Hooks::Needs), lent at its node. What a hook returns is a
-/// request for the driver, of the sum `R` the driver chooses (see
-/// [`request`](crate::request)).
+/// request for the driver ([`Returns`](Hooks::Returns), see
+/// [`request`](crate::request)), handled before any call is polled.
 pub trait Hooks<O, L: PartList<L>, K>: Sized + 'static {
     /// What the hooks read and write around the node besides the
     /// component: a list of needs, as a call's, anchored at the node.
@@ -216,6 +215,11 @@ pub trait Hooks<O, L: PartList<L>, K>: Sized + 'static {
     /// [`NoDeadline`], or [`HasDeadline`] for a component that writes
     /// [`Timed`].
     type Timing = NoDeadline;
+    /// What the hooks return to the driver: `Infallible` (nothing), a
+    /// [`NodeRequest`](crate::request::NodeRequest), or a `Coproduct` of
+    /// them; the composition proves that it goes into the structure's
+    /// requests ([`IntoRequestSum`](crate::request::IntoRequestSum)).
+    type Returns: 'static = core::convert::Infallible;
     /// Whether [`before_calls`](Hooks::before_calls) does anything.
     const ACTS_BEFORE_CALLS: bool = false;
     /// The component of a new node, from the view of the parent and the
@@ -227,20 +231,20 @@ pub trait Hooks<O, L: PartList<L>, K>: Sized + 'static {
     /// Before any call at the start of a poll: in the first poll after the
     /// node is built and after `waker` was woken; nodes above first. The
     /// waker is the component's own.
-    fn before_calls<KP: HookKeys<Self, O, L, K>, R: RequestSum>(
+    fn before_calls<KP: HookKeys<Self, O, L, K>>(
         view: HookView<'_, Self, O, L, K, KP>,
         waker: &Waker,
-    ) -> Option<R> {
+    ) -> Option<Self::Returns> {
         let _ = (view, waker);
         None
     }
     /// Events it hears happened: `events` tells which, of those it
     /// subscribes to with its handler. Its deadline, if it has one, is
     /// read again afterwards.
-    fn on_events<KP: HookKeys<Self, O, L, K>, R: RequestSum>(
+    fn on_events<KP: HookKeys<Self, O, L, K>>(
         events: Triggered<'_>,
         view: HookView<'_, Self, O, L, K, KP>,
-    ) -> Option<R> {
+    ) -> Option<Self::Returns> {
         let _ = (events, view);
         None
     }
@@ -292,10 +296,10 @@ pub trait Timed<O, L: PartList<L>, K>: Hooks<O, L, K, Timing = HasDeadline> {
     /// the deadline it reads just before is not later than `now`;
     /// afterwards the deadline is later than `now` or gone (debug builds
     /// check it).
-    fn expire<KP: HookKeys<Self, O, L, K>, R: RequestSum>(
+    fn expire<KP: HookKeys<Self, O, L, K>>(
         view: HookView<'_, Self, O, L, K, KP>,
         now: Self::Instant,
-    ) -> Option<R>;
+    ) -> Option<Self::Returns>;
 }
 
 /// How the driver reads a component's deadline, by its
@@ -312,20 +316,20 @@ pub trait Timing<C: Hooks<O, L, K>, O, L: PartList<L>, K, T> {
     /// Its deadline.
     fn deadline<KP: HookKeys<C, O, L, K>>(view: &HookView<'_, C, O, L, K, KP>) -> Option<T>;
     /// Its deadline came.
-    fn expire<KP: HookKeys<C, O, L, K>, R: RequestSum>(
+    fn expire<KP: HookKeys<C, O, L, K>>(
         view: HookView<'_, C, O, L, K, KP>,
         now: T,
-    ) -> Option<R>;
+    ) -> Option<C::Returns>;
 }
 impl<C: Hooks<O, L, K>, O, L: PartList<L>, K, T> Timing<C, O, L, K, T> for NoDeadline {
     const TIMED: bool = false;
     fn deadline<KP: HookKeys<C, O, L, K>>(_: &HookView<'_, C, O, L, K, KP>) -> Option<T> {
         None
     }
-    fn expire<KP: HookKeys<C, O, L, K>, R: RequestSum>(
+    fn expire<KP: HookKeys<C, O, L, K>>(
         _: HookView<'_, C, O, L, K, KP>,
         _: T,
-    ) -> Option<R> {
+    ) -> Option<C::Returns> {
         None
     }
 }
@@ -336,10 +340,10 @@ impl<C: Timed<O, L, K, Instant = T>, O, L: PartList<L>, K, T> Timing<C, O, L, K,
     fn deadline<KP: HookKeys<C, O, L, K>>(view: &HookView<'_, C, O, L, K, KP>) -> Option<T> {
         C::deadline(view)
     }
-    fn expire<KP: HookKeys<C, O, L, K>, R: RequestSum>(
+    fn expire<KP: HookKeys<C, O, L, K>>(
         view: HookView<'_, C, O, L, K, KP>,
         now: T,
-    ) -> Option<R> {
+    ) -> Option<C::Returns> {
         C::expire(view, now)
     }
 }

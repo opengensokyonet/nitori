@@ -35,7 +35,7 @@ pub trait Store<N, K, H>: Default {
 /// The structure chooses it for each child; the host does not replace it.
 pub trait ChildStorage: 'static {
     /// The key of a child under its parent.
-    type Key: Clone + Eq;
+    type Key: Clone + Eq + 'static;
     /// What the driver keeps to reach a child again.
     type Handle: Copy + Eq + core::fmt::Debug;
     /// The store of children `N`.

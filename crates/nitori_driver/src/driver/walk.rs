@@ -8,13 +8,16 @@ use frunk_core::{
     indices::{Here as I0, There},
 };
 
-use super::place::{DriverComposition, NthPlace, PlaceInfo, PlaceNth, PlaceOps, PlacesOf};
+use super::place::{
+    DriverComposition, NthPlace, PlaceInfo, PlaceNth, PlaceOps, PlacesOf, RequestsOf,
+};
 use crate::{
     call::{
-        CallSlotsOf, LendOne, NthItem, PackNth, RootOf, RunningAt, SlotAt, SlotCall, SlotDesc,
-        SlotYield,
+        CallSlotsOf, LendOne, ListShape, NthItem, PackNth, RootOf, RunningAt, SlotAt, SlotCall,
+        SlotDesc, SlotYield,
     },
     event::Subscription,
+    request::IntoRequestSum,
     structure::{Address, FromAddress},
 };
 
@@ -125,18 +128,20 @@ where
 // ---------------------------------------------------------------- call slots
 
 /// The running calls of one slot, by node number, and what they yielded
-/// with the addresses `A` of their nodes.
+/// and the driver has not handled yet; `A` is the address of the tree.
 pub struct SlotStore<Run, Y, A> {
     /// The call at each node number, while it runs.
     pub calls: Vec<Option<Pin<Box<Run>>>>,
-    /// What the calls yielded, with their nodes' addresses, in order.
-    pub yields: Vec<(A, Y)>,
+    /// What the calls yielded, in order.
+    pub yields: Vec<Y>,
+    _addr: PhantomData<fn() -> A>,
 }
 impl<Run, Y, A> Default for SlotStore<Run, Y, A> {
     fn default() -> Self {
         Self {
             calls: Vec::new(),
             yields: Vec::new(),
+            _addr: PhantomData,
         }
     }
 }
@@ -173,6 +178,9 @@ pub trait CallWalk<Q: DriverComposition> {
     fn info(out: &mut Vec<SlotInfo>);
     /// Do `v` at the slot `s`; `None` past the last slot.
     fn visit<V: SlotVisit<Q>>(s: usize, store: &mut Self::Store, v: V) -> Option<V::Out>;
+    /// What the calls of the slot `s` yielded, taken out into the
+    /// requests.
+    fn take_requests(s: usize, store: &mut Self::Store, out: &mut Vec<RequestsOf<Q>>);
 }
 /// One step of [`CallWalk`], by whether the list is empty from `I` on.
 pub trait SlotStep<Q: DriverComposition, I> {
@@ -182,6 +190,8 @@ pub trait SlotStep<Q: DriverComposition, I> {
     fn info(out: &mut Vec<SlotInfo>);
     /// See [`CallWalk::visit`].
     fn visit<V: SlotVisit<Q>>(s: usize, store: &mut Self::Store, v: V) -> Option<V::Out>;
+    /// See [`CallWalk::take_requests`].
+    fn take_requests(s: usize, store: &mut Self::Store, out: &mut Vec<RequestsOf<Q>>);
 }
 impl<Q: DriverComposition, I> CallWalk<Q> for Cursor<I>
 where
@@ -195,6 +205,9 @@ where
     fn visit<V: SlotVisit<Q>>(s: usize, store: &mut Self::Store, v: V) -> Option<V::Out> {
         <<CallSlotsOf<Q> as EmptyFrom<I>>::Empty as SlotStep<Q, I>>::visit(s, store, v)
     }
+    fn take_requests(s: usize, store: &mut Self::Store, out: &mut Vec<RequestsOf<Q>>) {
+        <<CallSlotsOf<Q> as EmptyFrom<I>>::Empty as SlotStep<Q, I>>::take_requests(s, store, out)
+    }
 }
 impl<Q: DriverComposition, I> SlotStep<Q, I> for Yes {
     type Store = HNil;
@@ -202,6 +215,7 @@ impl<Q: DriverComposition, I> SlotStep<Q, I> for Yes {
     fn visit<V: SlotVisit<Q>>(_: usize, _: &mut HNil, _: V) -> Option<V::Out> {
         None
     }
+    fn take_requests(_: usize, _: &mut HNil, _: &mut Vec<RequestsOf<Q>>) {}
 }
 type YieldAt<Q, I> = <SlotAt<Q, I> as SlotYield<Q>>::Yield;
 /// The store of the slot at `I`.
@@ -210,6 +224,7 @@ impl<Q: DriverComposition, I: Number> SlotStep<Q, I> for No
 where
     CallSlotsOf<Q>: NthItem<Q, I, Item: SlotDesc<At: FromAddress<RootOf<Q>> + 'static>>,
     Q::Pack: PackNth<Q, CallSlotsOf<Q>, I>,
+    Q::Yields: YieldNth<Q, CallSlotsOf<Q>, I>,
     Cursor<There<I>>: CallWalk<Q>,
 {
     type Store = HCons<SlotStoreAt<Q, I>, <Cursor<There<I>> as CallWalk<Q>>::Store>;
@@ -240,4 +255,91 @@ where
             <Cursor<There<I>> as CallWalk<Q>>::visit(s, &mut store.tail, v)
         }
     }
+    fn take_requests(s: usize, store: &mut Self::Store, out: &mut Vec<RequestsOf<Q>>) {
+        if s == I::VALUE {
+            out.extend(
+                store
+                    .head
+                    .yields
+                    .drain(..)
+                    .map(<Q::Yields as YieldNth<Q, CallSlotsOf<Q>, I>>::convert),
+            );
+        } else {
+            <Cursor<There<I>> as CallWalk<Q>>::take_requests(s, &mut store.tail, out)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- yields
+
+/// How what the call of each slot of the list `L` yields goes into the
+/// requests of `Q`.
+pub trait YieldPack<Q: DriverComposition, L: ListShape<Q>> {
+    /// The other slots'.
+    type Tail: YieldPack<Q, L::Tail>;
+    /// What the first slot's call yielded, in the requests.
+    fn convert(y: <L::Head as SlotYield<Q>>::Yield) -> RequestsOf<Q>;
+}
+impl<Q: DriverComposition> YieldPack<Q, HNil> for HNil {
+    type Tail = HNil;
+    fn convert(y: core::convert::Infallible) -> RequestsOf<Q> {
+        match y {}
+    }
+}
+impl<Q, S, L, J, T> YieldPack<Q, HCons<S, L>> for HCons<J, T>
+where
+    Q: DriverComposition,
+    S: SlotDesc + SlotYield<Q>,
+    S::Yield: IntoRequestSum<RequestsOf<Q>, J>,
+    L: ListShape<Q>,
+    T: YieldPack<Q, L>,
+{
+    type Tail = T;
+    fn convert(y: S::Yield) -> RequestsOf<Q> {
+        y.into_sum()
+    }
+}
+/// The conversion of what the slot at `I` yields, through the pack's
+/// bounds only.
+pub trait YieldNth<Q: DriverComposition, L: NthItem<Q, I>, I> {
+    /// What the slot's call yielded, in the requests.
+    fn convert(y: <L::Item as SlotYield<Q>>::Yield) -> RequestsOf<Q>;
+}
+impl<Q: DriverComposition, L: ListShape<Q>, P: YieldPack<Q, L>> YieldNth<Q, L, I0> for P {
+    fn convert(y: <L::Head as SlotYield<Q>>::Yield) -> RequestsOf<Q> {
+        P::convert(y)
+    }
+}
+impl<Q: DriverComposition, L: ListShape<Q>, P: YieldPack<Q, L>, I> YieldNth<Q, L, There<I>> for P
+where
+    L::Tail: NthItem<Q, I>,
+    P::Tail: YieldNth<Q, L::Tail, I>,
+{
+    fn convert(y: <<L::Tail as NthItem<Q, I>>::Item as SlotYield<Q>>::Yield) -> RequestsOf<Q> {
+        <P::Tail as YieldNth<Q, L::Tail, I>>::convert(y)
+    }
+}
+/// Every slot of a list proved to yield what goes into the requests of
+/// `Q` (`I`, one variable for the list); the pack is the list of their
+/// positions.
+pub trait ProveYields<Q, I> {
+    /// The pack.
+    type Out;
+}
+impl<Q> ProveYields<Q, HNil> for HNil {
+    type Out = HNil;
+}
+impl<Q, S, L, J, IT> ProveYields<Q, HCons<J, IT>> for HCons<S, L>
+where
+    Q: DriverComposition,
+    S: SlotYield<Q>,
+    S::Yield: IntoRequestSum<RequestsOf<Q>, J>,
+    L: ProveYields<Q, IT>,
+{
+    type Out = HCons<J, L::Out>;
+}
+/// The pack of the slots `L` of `Q`; [`composition!`](crate::composition)
+/// defines the opaque pack with it.
+pub fn prove_yields<Q, L: ProveYields<Q, I>, I>() -> PhantomData<L::Out> {
+    PhantomData
 }

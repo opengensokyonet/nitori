@@ -30,7 +30,6 @@ use nitori_driver::{
     },
     lend::KeyedList,
     need::{At, ByKey, Here, Kind, Mut, Ref, ToChild, Up},
-    request::RequestSum,
     structure::{End, NodePath, Share},
 };
 
@@ -130,10 +129,10 @@ impl<O: 'static, L: PartList<L, Args: StreamArgsList> + 'static, K: 'static> Hoo
             reliable: args.reliable(),
         }
     }
-    fn before_calls<KP: HookKeys<Self, O, L, K>, R: RequestSum>(
+    fn before_calls<KP: HookKeys<Self, O, L, K>>(
         _: HookView<'_, Self, O, L, K, KP>,
         _: &Waker,
-    ) -> Option<R> {
+    ) -> Option<Self::Returns> {
         put("streams before calls");
         None
     }
@@ -226,10 +225,10 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Control> for ControlSeen {
     ) -> Self {
         ControlSeen(0)
     }
-    fn on_events<KP: HookKeys<Self, Base, L, Control>, R: RequestSum>(
+    fn on_events<KP: HookKeys<Self, Base, L, Control>>(
         _: Triggered<'_>,
         view: HookView<'_, Self, Base, L, Control, KP>,
-    ) -> Option<R> {
+    ) -> Option<Self::Returns> {
         view.head.0 += 1;
         None
     }
@@ -261,10 +260,10 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Body> for BodyReceived {
     ) -> Self {
         BodyReceived(0)
     }
-    fn on_events<KP: HookKeys<Self, Base, L, Body>, R: RequestSum>(
+    fn on_events<KP: HookKeys<Self, Base, L, Body>>(
         events: Triggered<'_>,
         view: HookView<'_, Self, Base, L, Body, KP>,
-    ) -> Option<R> {
+    ) -> Option<Self::Returns> {
         assert!(events.contains::<DataArrived>());
         view.head.0 += 1;
         None
@@ -388,10 +387,10 @@ fn hooks_of_every_share_part_by_part() {
 fn streams_built_from_the_parent_events_from_beside_and_above() {
     log();
     let mut d = Driver::<H>::new(TestClock::default(), args()).unwrap();
-    let control = d.add::<Control, _, _, _>(End, ()).unwrap();
-    let s1 = d.add::<Stream, _, _, _>(End, StreamId(1)).unwrap();
-    let s2 = d.add::<Stream, _, _, _>(End, StreamId(2)).unwrap();
-    let b1 = d.add::<Body, _, _, _>(s1, ()).unwrap();
+    let control = d.add::<Control, _, _>(End, ()).unwrap();
+    let s1 = d.add::<Stream, _, _>(End, StreamId(1)).unwrap();
+    let s2 = d.add::<Stream, _, _>(End, StreamId(2)).unwrap();
+    let b1 = d.add::<Body, _, _>(s1, ()).unwrap();
     let root = d.root().unwrap();
     assert_eq!(
         s1.node(root).unwrap().data.head.head,
@@ -413,7 +412,7 @@ fn streams_built_from_the_parent_events_from_beside_and_above() {
     // second stream's data does not reach it
     assert_eq!(b1.node(root).unwrap().data.head.head, BodyReceived(1));
     // a body added later hears what arrives from then on only
-    let b2 = d.add::<Body, _, _, _>(s2, ()).unwrap();
+    let b2 = d.add::<Body, _, _>(s2, ()).unwrap();
     assert_eq!(
         b2.node(d.root().unwrap()).unwrap().data.head.head,
         BodyReceived(0)

@@ -19,7 +19,10 @@ mod node;
 mod path;
 mod storage;
 
-pub use address::{Address, ChildAddresses, Visit, addresses_under, removal_order, walk_node};
+pub use address::{
+    Address, ChildAddresses, KeyAddress, Visit, addresses_under, removal_order, resolve_node,
+    walk_node,
+};
 pub use edit::{
     InsertError, LastChildren, LastKind, MoveError, ParentChildren, insert, move_to, remove,
 };

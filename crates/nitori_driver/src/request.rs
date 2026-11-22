@@ -1,22 +1,489 @@
-//! What a call or a hook hands the driver to change the structure.
+//! Requests: what a call or a hook asks a node to change in its own
+//! subtree.
 //!
-//! Requests are not defined yet: each kind of node will declare its own
-//! and handle them on its own subtree, and what a call yields or a hook
-//! returns will be the sum of every kind's requests with the address of
-//! the node they are for. Until then the sum is [`NoRequest`], and the
-//! hooks are written for any sum ([`RequestSum`]) so that their signatures
-//! stay when it comes.
-use core::fmt;
+//! Each kind of node declares what it can be asked ([`NodeKind::Request`],
+//! `Infallible` for nothing) and handles it ([`Request::apply`]) with an
+//! edit handle ([`Edit`]) that reaches only the node's own subtree: it
+//! adds, ends and replaces the node's children, moves a grandchild from one
+//! child to another, and ends the node itself. The handle's operations do
+//! what the structure says goes with them: building and ending the nodes
+//! others link to, the order of removal, the end hooks with the reason.
+//!
+//! A request names its node by its key address from the root
+//! ([`NodeRequest`]). What a call yields ([`CallKind::Yield`](crate::call::CallKind::Yield))
+//! or a hook returns ([`Hooks::Returns`](crate::hooks::Hooks::Returns)) is
+//! one request of a kind of the structure, a sum of some of them, or
+//! `Infallible`; it goes into the sum of every kind's requests the
+//! structure gives ([`RequestSumOf`]), and the composition proves that it
+//! does ([`IntoRequestSum`]). A request for a kind that is not in the
+//! structure does not compile.
+//!
+//! The driver handles a request at once, before it polls any call: it
+//! finds the node by the address, and drops the request when no node of
+//! the kind is there.
+//!
+//! A component of the root asks the root for its layer:
+//!
+//! ```
+//! #![feature(impl_trait_in_assoc_type)]
+//! # use core::{convert::Infallible, pin::Pin, task::{Context, Waker}, time::Duration};
+//! # use frunk_core::{HList, hlist::HNil};
+//! # use nitori_driver::{
+//! #     call::ShareCalls,
+//! #     composition,
+//! #     driver::Driver,
+//! #     hooks::{ArgsOf, BuildKeyed, BuildView, HookKeys, HookView, Hooks, Part, PartList},
+//! #     lend::KeyedList,
+//! #     request::{Edit, Editor, NodeRequest, Request},
+//! #     structure::{AtMostOne, Child, KeyAddress, NodeKind, Share},
+//! # };
+//! # #[derive(Clone, Default)]
+//! # struct Clock;
+//! # impl nitori_clock::MonotonicClock for Clock {
+//! #     type Instant = Duration;
+//! #     type Sleep = core::future::Pending<()>;
+//! #     fn now(&self) -> Duration { Duration::ZERO }
+//! #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+//! #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+//! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+//! # }
+//! struct Root;
+//! struct Layer;
+//! struct Other;
+//! impl NodeKind for Root {
+//!     type Children = HList![Child<Layer, AtMostOne>];
+//!     type Linked = HNil;
+//!     type Request = AddLayer;
+//! }
+//! impl NodeKind for Layer {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for Other {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! /// The root builds its layer.
+//! struct AddLayer;
+//! impl Request<Root> for AddLayer {
+//!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
+//!         edit.add::<Layer, _>(());
+//!     }
+//! }
+//! # struct Part1;
+//! # impl<L> Part<L> for Part1 {
+//! #     type Args = ();
+//! # }
+//! # impl ShareCalls<Root> for Part1 {
+//! #     type Calls = HNil;
+//! # }
+//! # impl ShareCalls<Layer> for Part1 {
+//! #     type Calls = HNil;
+//! # }
+//! # impl Share<Layer> for Part1 {
+//! #     type Data = HNil;
+//! # }
+//! # impl Share<Root> for Part1 {
+//! #     type Data = HList![Starter];
+//! # }
+//! /// On the root: asks for its layer before the first calls.
+//! struct Starter;
+//! impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Starter {
+//!     const ACTS_BEFORE_CALLS: bool = true;
+//!     type Returns = NodeRequest<Root, Root>;
+//! #   fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #       Starter
+//! #   }
+//!     fn before_calls<KP: HookKeys<Self, Part1, L, Root>>(
+//!         _: HookView<'_, Self, Part1, L, Root, KP>,
+//!         _: &Waker,
+//!     ) -> Option<NodeRequest<Root, Root>> {
+//!         Some(NodeRequest::new(KeyAddress::here(), AddLayer))
+//!     }
+//! }
+//! struct Q;
+//! composition!(impl driver for Q: Root, HList![Part1], Clock);
+//!
+//! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()]).unwrap();
+//! let _ = Pin::new(&mut driver).poll(&mut Context::from_waker(Waker::noop()));
+//! assert!(driver.root().unwrap().children.head.is_some());
+//! ```
+//!
+//! A request for a kind that is not in the structure does not compile:
+//!
+//! ```compile_fail
+//! #![feature(impl_trait_in_assoc_type)]
+//! # use core::{convert::Infallible, pin::Pin, task::{Context, Waker}, time::Duration};
+//! # use frunk_core::{HList, hlist::HNil};
+//! # use nitori_driver::{
+//! #     call::ShareCalls,
+//! #     composition,
+//! #     driver::Driver,
+//! #     hooks::{ArgsOf, BuildKeyed, BuildView, HookKeys, HookView, Hooks, Part, PartList},
+//! #     lend::KeyedList,
+//! #     request::{Edit, Editor, NodeRequest, Request},
+//! #     structure::{AtMostOne, Child, KeyAddress, NodeKind, Share},
+//! # };
+//! # #[derive(Clone, Default)]
+//! # struct Clock;
+//! # impl nitori_clock::MonotonicClock for Clock {
+//! #     type Instant = Duration;
+//! #     type Sleep = core::future::Pending<()>;
+//! #     fn now(&self) -> Duration { Duration::ZERO }
+//! #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+//! #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+//! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+//! # }
+//! struct Root;
+//! struct Layer;
+//! struct Other;
+//! impl NodeKind for Root {
+//!     type Children = HList![Child<Layer, AtMostOne>];
+//!     type Linked = HNil;
+//!     type Request = AddLayer;
+//! }
+//! impl NodeKind for Layer {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for Other {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! /// The root builds its layer.
+//! struct AddLayer;
+//! impl Request<Root> for AddLayer {
+//!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
+//!         edit.add::<Layer, _>(());
+//!     }
+//! }
+//! # struct Part1;
+//! # impl<L> Part<L> for Part1 {
+//! #     type Args = ();
+//! # }
+//! # impl ShareCalls<Root> for Part1 {
+//! #     type Calls = HNil;
+//! # }
+//! # impl ShareCalls<Layer> for Part1 {
+//! #     type Calls = HNil;
+//! # }
+//! # impl Share<Layer> for Part1 {
+//! #     type Data = HNil;
+//! # }
+//! # impl Share<Root> for Part1 {
+//! #     type Data = HList![Starter];
+//! # }
+//! /// On the root: asks for its layer before the first calls.
+//! struct Starter;
+//! impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Starter {
+//!     const ACTS_BEFORE_CALLS: bool = true;
+//!     type Returns = NodeRequest<Root, Other>;
+//! #   fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #       Starter
+//! #   }
+//! }
+//! struct Q;
+//! composition!(impl driver for Q: Root, HList![Part1], Clock);
+//! ```
+//!
+//! A kind handles its requests on its own subtree; another subtree is not
+//! reachable through the handle:
+//!
+//! ```compile_fail
+//! use frunk_core::{HList, hlist::HNil};
+//! use nitori_driver::{
+//!     request::{Edit, Editor, Request},
+//!     structure::{AtMostOne, Child, NodeKind},
+//! };
+//! struct Root;
+//! struct Left;
+//! struct Right;
+//! impl NodeKind for Root {
+//!     type Children = HList![Child<Left, AtMostOne>, Child<Right, AtMostOne>];
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for Left {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//!     type Request = AddRight;
+//! }
+//! impl NodeKind for Right {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! /// The left node asks to build its sibling: not in its subtree.
+//! struct AddRight;
+//! impl Request<Left> for AddRight {
+//!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Left>) {
+//!         edit.add::<Right, _>(());
+//!     }
+//! }
+//! ```
+use core::{any::TypeId, convert::Infallible, fmt, marker::PhantomData};
 
-/// The sum of the requests a hook can return, for whatever structure the
-/// driver has.
-pub trait RequestSum: 'static {}
+use frunk_core::{
+    coproduct::{CNil, CoprodInjector, Coproduct, CoproductEmbedder},
+    hlist::{HCons, HNil},
+};
 
-/// The sum of no requests: nothing changes the structure from inside yet.
-pub enum NoRequest {}
-impl RequestSum for NoRequest {}
-impl fmt::Debug for NoRequest {
-    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+use crate::{
+    driver::{Place, walk::Number},
+    structure::{ChildOfKind, KeyAddress, KeyAt, MoveError, NodeKind, PathFrom},
+};
+
+/// A request a node of the kind `K` handles on its own subtree.
+pub trait Request<K: NodeKind>: 'static {
+    /// Do what is asked, through `edit`. The driver polls no call before it
+    /// returns.
+    fn apply<E: Editor>(self, edit: Edit<'_, E, K>);
+}
+impl<K: NodeKind> Request<K> for Infallible {
+    fn apply<E: Editor>(self, _: Edit<'_, E, K>) {
+        match self {}
+    }
+}
+
+pub(crate) mod sealed {
+    use core::any::TypeId;
+
+    use crate::structure::{KeyAddress, MoveError, NodeKind};
+
+    /// What the driver does for an edit handle, by node number.
+    pub trait EditOps {
+        /// Add the child at the position `child` of the node `node`, under
+        /// `key`; `false` when the key is taken.
+        fn add_child<KK: Clone + 'static>(&mut self, node: usize, child: usize, key: KK) -> bool;
+        /// End the child at `child` kept under `key`, for `reason`;
+        /// `false` when none is there or others link to it.
+        fn end_child<KK: 'static, RR: 'static>(
+            &mut self,
+            node: usize,
+            child: usize,
+            key: &KK,
+            reason: RR,
+        ) -> bool;
+        /// End the child at `child` kept under `key`, for `reason`, and
+        /// build a new one in its place; `false` when none is there.
+        fn replace_child<KK: Clone + 'static, RR: 'static>(
+            &mut self,
+            node: usize,
+            child: usize,
+            key: KK,
+            reason: RR,
+        ) -> bool;
+        /// Move the grandchild at `grandchild` kept under `key` from the
+        /// child at `child` under `from` to the one under `to`.
+        #[allow(clippy::too_many_arguments)]
+        fn move_grandchild<KF: 'static, KG: 'static>(
+            &mut self,
+            node: usize,
+            child: usize,
+            from: &KF,
+            grandchild: usize,
+            key: &KG,
+            to: &KF,
+        ) -> Result<(), MoveError>;
+        /// End the node `node`, for `reason`.
+        fn end_node<RR: 'static>(&mut self, node: usize, reason: RR);
+    }
+
+    /// Finding a node of the tree whose root is of the kind `R`.
+    pub trait FindNode<R: NodeKind> {
+        /// The number and the kind of the node at `at`, when it is there.
+        fn find_node(&self, at: &KeyAddress<R>) -> Option<(usize, TypeId)>;
+    }
+}
+
+/// What carries out an edit handle's operations: the driver.
+pub trait Editor: sealed::EditOps {}
+impl<E: sealed::EditOps> Editor for E {}
+
+/// The edit handle a request of a node of the kind `K` is handled with: it
+/// reaches the node's own subtree only.
+///
+/// Each operation does what the structure says goes with it: a node built
+/// is built from its parent's view and starts its calls; a node that links
+/// to another ([`NodeKind::Linked`]) has it built before it when it is not
+/// there, and ended after it when no other node links to it any more; a
+/// node ends after the nodes below it, its end hooks told the reason. The
+/// handle is taken by value and ending the node itself consumes it.
+pub struct Edit<'e, E, K> {
+    editor: &'e mut E,
+    node: usize,
+    _kind: PhantomData<fn() -> K>,
+}
+impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
+    pub(crate) fn new(editor: &'e mut E, node: usize) -> Self {
+        Self {
+            editor,
+            node,
+            _kind: PhantomData,
+        }
+    }
+    /// Build a child of the kind `CK` under `key`; its position `I` is
+    /// inferred from its kind. `false` when a child of the kind is kept
+    /// under the key: nothing is built.
+    pub fn add<CK: NodeKind, I: Number>(&mut self, key: KeyAt<K::Children, I>) -> bool
+    where
+        K::Children: ChildOfKind<CK, I>,
+    {
+        self.editor.add_child(self.node, I::VALUE, key)
+    }
+    /// End the child of the kind `CK` kept under `key`, with the nodes
+    /// below it, for `reason`. `false` when none is there, or when nodes
+    /// link to it: the structure ends it after the last of them.
+    pub fn end<CK: NodeKind, I: Number>(
+        &mut self,
+        key: &KeyAt<K::Children, I>,
+        reason: CK::EndReason,
+    ) -> bool
+    where
+        K::Children: ChildOfKind<CK, I>,
+    {
+        self.editor.end_child(self.node, I::VALUE, key, reason)
+    }
+    /// End the child of the kind `CK` kept under `key` for `reason` and
+    /// build a new one in its place, with nothing in between: no call is
+    /// polled and no event is handled before the new one is built. `false`
+    /// when none is there: none is built.
+    pub fn replace<CK: NodeKind, I: Number>(
+        &mut self,
+        key: KeyAt<K::Children, I>,
+        reason: CK::EndReason,
+    ) -> bool
+    where
+        K::Children: ChildOfKind<CK, I>,
+    {
+        self.editor.replace_child(self.node, I::VALUE, key, reason)
+    }
+    /// Move the grandchild of the kind `GK` kept under `key`, with the
+    /// nodes below it, from the child of the kind `CK` kept under `from`
+    /// to the one kept under `to`, keeping its key. It ends where it was
+    /// for the nodes above ([`NodeEnding`](crate::event::NodeEnding)) and
+    /// starts where it goes ([`NodeStarted`](crate::event::NodeStarted));
+    /// its calls go on.
+    pub fn move_grandchild<CK: NodeKind, I: Number, GK: NodeKind, J: Number>(
+        &mut self,
+        from: &KeyAt<K::Children, I>,
+        key: &KeyAt<CK::Children, J>,
+        to: &KeyAt<K::Children, I>,
+    ) -> Result<(), MoveError>
+    where
+        K::Children: ChildOfKind<CK, I>,
+        CK::Children: ChildOfKind<GK, J>,
+    {
+        self.editor
+            .move_grandchild(self.node, I::VALUE, from, J::VALUE, key, to)
+    }
+    /// End the node itself, with every node below it, for `reason`.
+    pub fn end_self(self, reason: K::EndReason) {
+        self.editor.end_node(self.node, reason);
+    }
+}
+impl<E, K> fmt::Debug for Edit<'_, E, K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Edit<{}>({})", core::any::type_name::<K>(), self.node)
+    }
+}
+
+/// A request for the node of the kind `K` at the key address `at` from the
+/// root, of the kind `R`.
+pub struct NodeRequest<R: NodeKind, K: NodeKind> {
+    /// The node it is for.
+    pub at: KeyAddress<R>,
+    /// What it asks.
+    pub request: K::Request,
+}
+impl<R: NodeKind, K: NodeKind> NodeRequest<R, K> {
+    /// The request `request` for the node at `at`.
+    pub fn new(at: KeyAddress<R>, request: K::Request) -> Self {
+        Self { at, request }
+    }
+}
+impl<R: NodeKind, K: NodeKind> fmt::Debug for NodeRequest<R, K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NodeRequest<{}>", core::any::type_name::<K>())
+    }
+}
+
+/// A sum of requests for the nodes of a tree whose root is of the kind
+/// `R`, handed to the node each is for.
+pub trait RequestSum<R: NodeKind>: 'static {
+    /// Find the node and have it handle the request; dropped when no node
+    /// of its kind is at its address.
+    #[doc(hidden)]
+    fn deliver<E: Editor + sealed::FindNode<R>>(self, editor: &mut E);
+}
+impl<R: NodeKind> RequestSum<R> for CNil {
+    fn deliver<E: Editor + sealed::FindNode<R>>(self, _: &mut E) {
+        match self {}
+    }
+}
+impl<R: NodeKind, K: NodeKind, T: RequestSum<R>> RequestSum<R> for Coproduct<NodeRequest<R, K>, T> {
+    fn deliver<E: Editor + sealed::FindNode<R>>(self, editor: &mut E) {
+        match self {
+            Coproduct::Inl(r) => {
+                if let Some((node, kind)) = editor.find_node(&r.at)
+                    && kind == TypeId::of::<K>()
+                {
+                    r.request.apply(Edit::new(editor, node));
+                }
+            }
+            Coproduct::Inr(rest) => rest.deliver(editor),
+        }
+    }
+}
+
+/// The sum of the requests of the nodes of a list of places of a tree
+/// whose root is of the kind `R`: one for each place, in order.
+pub trait PlaceRequests<R: NodeKind> {
+    /// The sum.
+    type Sum: RequestSum<R>;
+}
+impl<R: NodeKind> PlaceRequests<R> for HNil {
+    type Sum = CNil;
+}
+impl<R: NodeKind, X: PathFrom<R>, T: PlaceRequests<R>> PlaceRequests<R> for HCons<Place<X>, T> {
+    type Sum = Coproduct<NodeRequest<R, X::Target>, T::Sum>;
+}
+/// The sum of every kind's requests of the tree whose root is of the kind
+/// `R`, by place in tree order.
+pub type RequestSumOf<R> =
+    <<R as crate::driver::PlacesUnder<crate::structure::End>>::Out as PlaceRequests<R>>::Sum;
+
+/// What goes into the sum of requests `S`: `Infallible`, one
+/// [`NodeRequest`], or a sum of some of them; `I` is inferred where the
+/// composition is proved.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not go into the requests of this structure",
+    label = "what a call yields or a hook returns",
+    note = "a call yields, and a hook returns, `Infallible`, a `NodeRequest<Root, Kind>` for a kind of the structure, or a `Coproduct` of such"
+)]
+pub trait IntoRequestSum<S, I> {
+    /// The request in the sum.
+    fn into_sum(self) -> S;
+}
+/// [`IntoRequestSum`] for `Infallible`.
+pub struct NoRequests;
+/// [`IntoRequestSum`] for one request, at the position `I` of the sum.
+pub struct OneRequest<I>(PhantomData<fn() -> I>);
+/// [`IntoRequestSum`] for a sum of requests, at the positions `I`.
+pub struct SomeRequests<I>(PhantomData<fn() -> I>);
+impl<S> IntoRequestSum<S, NoRequests> for Infallible {
+    fn into_sum(self) -> S {
+        match self {}
+    }
+}
+impl<S, R: NodeKind, K: NodeKind, I> IntoRequestSum<S, OneRequest<I>> for NodeRequest<R, K>
+where
+    S: CoprodInjector<NodeRequest<R, K>, I>,
+{
+    fn into_sum(self) -> S {
+        S::inject(self)
+    }
+}
+impl<S, C: CoproductEmbedder<S, I>, I> IntoRequestSum<S, SomeRequests<I>> for C {
+    fn into_sum(self) -> S {
+        self.embed()
     }
 }

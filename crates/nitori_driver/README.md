@@ -40,7 +40,12 @@ parts and calls.
   calls polled, deadlines last, events handed on until nothing more is
   published, nodes built and ended in the order of removal.
 
-The requests that change the structure are not here yet (`request`).
+- `request`: each kind of node declares the requests it handles and
+  handles them on its own subtree with an edit handle (add, end and
+  replace its children, move a grandchild between them, end itself);
+  calls yield and hooks return requests addressed to a node by keys, which
+  the composition proves are of the structure's kinds, and the driver
+  handles them before it polls another call.
 
 The crate that writes a composition enables the nightly feature
 `impl_trait_in_assoc_type`; a `#[call]` function that yields needs

@@ -503,11 +503,14 @@ macro_rules! composition {
         $crate::composition!(impl for $q: $r, $p);
         impl $crate::driver::DriverComposition for $q {
             type Clock = $clock;
-            type Requests = $crate::request::NoRequest;
             type Remains = $crate::structure::RemainsOf<$p, $r>;
             type Places = impl $crate::driver::PlacePack<Self, $crate::driver::PlacesOf<Self>>;
+            type Yields = impl $crate::driver::walk::YieldPack<Self, $crate::call::CallSlotsOf<Self>>;
             fn places() -> ::core::marker::PhantomData<Self::Places> {
                 $crate::driver::prove_places::<Self, $crate::driver::PlacesOf<Self>, _>()
+            }
+            fn yields() -> ::core::marker::PhantomData<Self::Yields> {
+                $crate::driver::walk::prove_yields::<Self, $crate::call::CallSlotsOf<Self>, _>()
             }
         }
     };

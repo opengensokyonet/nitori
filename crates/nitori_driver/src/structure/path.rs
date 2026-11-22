@@ -53,11 +53,16 @@ pub trait PathFrom<K: NodeKind>: Copy {
     type Target: NodeKind;
     /// The driver's address of the same node.
     fn address(&self) -> Address<K>;
+    /// The driver's address of the node at `below` under the same node.
+    fn address_with(&self, below: Address<Self::Target>) -> Address<K>;
 }
 impl<K: NodeKind> PathFrom<K> for End {
     type Target = K;
     fn address(&self) -> Address<K> {
         Address::here()
+    }
+    fn address_with(&self, below: Address<K>) -> Address<K> {
+        below
     }
 }
 impl<K: NodeKind, I, H, R> PathFrom<K> for Step<I, H, R>
@@ -71,6 +76,12 @@ where
         Address::below(<K::Children as ChildIndex<I>>::inject(
             self.handle,
             self.rest.address(),
+        ))
+    }
+    fn address_with(&self, below: Address<R::Target>) -> Address<K> {
+        Address::below(<K::Children as ChildIndex<I>>::inject(
+            self.handle,
+            self.rest.address_with(below),
         ))
     }
 }

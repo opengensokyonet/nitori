@@ -7,7 +7,12 @@ use frunk_core::{
     hlist::HNil,
     indices::{Here as I0, There},
 };
-use nitori_driver::structure::{AtMostOne, ByOwnKey, Child, End, NodeKind, Share, SlotVec, Step};
+use std::cell::RefCell;
+
+use nitori_driver::{
+    request::{Edit, Editor, Request},
+    structure::{AtMostOne, ByOwnKey, Child, End, NodeKind, Share, SlotVec, Step},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerId(pub u32);
@@ -28,6 +33,22 @@ impl NodeKind for Connection {
         Child<Path, SlotVec<PathId>>,
     ];
     type Linked = HNil;
+    type Request = Noted;
+}
+
+thread_local! {
+    static NOTED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+/// What the connection is asked: a number, noted and nothing changed.
+pub struct Noted(pub u64);
+impl Request<Connection> for Noted {
+    fn apply<E: Editor>(self, _: Edit<'_, E, Connection>) {
+        NOTED.with(|n| n.borrow_mut().push(self.0));
+    }
+}
+/// The numbers noted since the last time.
+pub fn noted() -> Vec<u64> {
+    NOTED.with(|n| core::mem::take(&mut *n.borrow_mut()))
 }
 impl NodeKind for Session {
     type Children = HNil;
