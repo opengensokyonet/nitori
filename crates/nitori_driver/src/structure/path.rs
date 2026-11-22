@@ -184,3 +184,40 @@ where
         (Step::new(self.handle, parent), h)
     }
 }
+
+/// A typed path from a node of the kind `K` read back from the driver's
+/// address of the same node.
+pub trait FromAddress<K: NodeKind>: PathFrom<K> + Sized {
+    /// The path, when `addr` is an address of this path type.
+    fn from_address(addr: &Address<K>) -> Option<Self>;
+}
+impl<K: NodeKind> FromAddress<K> for End {
+    fn from_address(addr: &Address<K>) -> Option<End> {
+        addr.below_here().is_none().then_some(End)
+    }
+}
+impl<K: NodeKind, I, H: Copy, R> FromAddress<K> for Step<I, H, R>
+where
+    K::Children: ChildIndex<I, Storage: ChildStorage<Handle = H>>,
+    R: FromAddress<KindAt<K::Children, I>>,
+{
+    fn from_address(addr: &Address<K>) -> Option<Self> {
+        let (handle, below) = <K::Children as ChildIndex<I>>::project(addr.below_here()?)?;
+        Some(Step::new(handle, R::from_address(&below)?))
+    }
+}
+
+/// The path of the parent of the node a path leads to: `()` for the root.
+pub trait ParentPath {
+    /// The parent's path.
+    type Parent: Copy;
+}
+impl ParentPath for End {
+    type Parent = ();
+}
+impl<I, H: Copy, R> ParentPath for Step<I, H, R>
+where
+    Step<I, H, R>: SplitLast<Parent: Copy>,
+{
+    type Parent = <Step<I, H, R> as SplitLast>::Parent;
+}

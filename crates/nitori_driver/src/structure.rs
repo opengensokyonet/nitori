@@ -27,6 +27,10 @@ pub use kind::{
     ByOwnKey, Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, Link,
     LinkList, NodeKind, StorageAt,
 };
-pub use node::{ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, Share, Shares};
-pub use path::{Append, End, KeyedPath, NodePath, PathFrom, SplitLast, Step};
+pub use node::{
+    ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, RemainsList, RemainsOf, Share, Shares,
+};
+pub use path::{
+    Append, End, FromAddress, KeyedPath, NodePath, ParentPath, PathFrom, SplitLast, Step,
+};
 pub use storage::{AtMostOne, ChildStorage, Occupied, SlotVec, SlotVecStore, Store, StoreOf};

@@ -20,6 +20,10 @@ pub trait NodeKind: 'static + Sized {
     /// The nodes a node of this kind links to, an `HList` of [`Link`]s
     /// (`HNil` for none).
     type Linked: LinkList<Self>;
+    /// Why a node of this kind ends, as its components' end hooks are told
+    /// ([`Hooks::end`](crate::hooks::Hooks::end)); `()` by default. A node
+    /// that ends because a node above it ends is told the default.
+    type EndReason: Default + 'static = ();
 }
 
 /// A child in a [`NodeKind::Children`] list: the kind `K`, kept by the
@@ -60,12 +64,24 @@ pub trait ChildIndex<I>: ChildList {
         handle: <Self::Storage as ChildStorage>::Handle,
         below: Address<Self::Kind>,
     ) -> Self::Addr;
+    /// The handle and the address below it, when `addr` is under the child
+    /// at this position.
+    #[allow(clippy::type_complexity)]
+    fn project(
+        addr: &Self::Addr,
+    ) -> Option<(<Self::Storage as ChildStorage>::Handle, Address<Self::Kind>)>;
 }
 impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildIndex<Here> for HCons<Child<K, S>, T> {
     type Kind = K;
     type Storage = S;
     fn inject(handle: S::Handle, below: Address<K>) -> Self::Addr {
         Coproduct::Inl((handle, below))
+    }
+    fn project(addr: &Self::Addr) -> Option<(S::Handle, Address<K>)> {
+        match addr {
+            Coproduct::Inl(at) => Some(*at),
+            Coproduct::Inr(_) => None,
+        }
     }
 }
 impl<I, K: NodeKind, S: ChildStorage, T: ChildIndex<I>> ChildIndex<There<I>>
@@ -75,6 +91,14 @@ impl<I, K: NodeKind, S: ChildStorage, T: ChildIndex<I>> ChildIndex<There<I>>
     type Storage = T::Storage;
     fn inject(handle: <T::Storage as ChildStorage>::Handle, below: Address<T::Kind>) -> Self::Addr {
         Coproduct::Inr(T::inject(handle, below))
+    }
+    fn project(
+        addr: &Self::Addr,
+    ) -> Option<(<T::Storage as ChildStorage>::Handle, Address<T::Kind>)> {
+        match addr {
+            Coproduct::Inl(_) => None,
+            Coproduct::Inr(rest) => T::project(rest),
+        }
     }
 }
 

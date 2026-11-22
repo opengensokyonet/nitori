@@ -14,7 +14,26 @@ use super::{Child, ChildIndex, ChildList, ChildStorage, NodeKind, StoreOf};
 pub trait Share<K> {
     /// The components.
     type Data: HList + 'static;
+    /// What the part keeps of its share after the root of the tree ended
+    /// ([`Hooks::remains`](crate::hooks::Hooks::remains)); `()` by default.
+    /// Only the root's is kept.
+    type Remains: Default + 'static = ();
 }
+
+/// What the parts `Self` keep of their shares in a node of the kind `K`
+/// after it ended, one per part, in the order of the parts.
+pub trait RemainsList<K>: 'static {
+    /// The list.
+    type Remains: Default + HList + 'static;
+}
+impl<K> RemainsList<K> for HNil {
+    type Remains = HNil;
+}
+impl<K, Pt: Share<K> + 'static, T: RemainsList<K>> RemainsList<K> for HCons<Pt, T> {
+    type Remains = HCons<Pt::Remains, T::Remains>;
+}
+/// What the parts `P` keep after a node of the kind `K` ended.
+pub type RemainsOf<P, K> = <P as RemainsList<K>>::Remains;
 
 /// The shares of a list of parts in a node of the kind `K`, one list per
 /// part, in the order of the parts.

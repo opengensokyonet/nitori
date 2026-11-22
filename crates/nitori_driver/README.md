@@ -29,10 +29,18 @@ parts and calls.
   of theirs) and contributed ones (every part's piece for a family, in part
   order, dispatched by a sum or run in turn).
 - `hooks`: what the driver calls on every component of a node, with the
-  component as `Self` and every part's construction arguments.
+  component as `Self`: associated functions lent the component and its own
+  needs, `build` lent the parent's, every part's construction arguments,
+  and a deadline for a component that writes `Timed`.
+- `event`: events are types, published through a need at a node on the way
+  up and heard by anchor and steps, or by default from the node, the nodes
+  above it and below it.
+- `driver`: the future that runs a composition: the places of the tree and
+  every hook proved at its place, waking without a lock, the ready nodes'
+  calls polled, deadlines last, events handed on until nothing more is
+  published, nodes built and ended in the order of removal.
 
-Waking, timers, events, starting and ending calls as nodes come and go, and
-the requests that change the structure are not here yet.
+The requests that change the structure are not here yet (`request`).
 
 The crate that writes a composition enables the nightly feature
 `impl_trait_in_assoc_type`; a `#[call]` function that yields needs

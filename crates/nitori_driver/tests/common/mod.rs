@@ -2,6 +2,7 @@
 //! the entries the routes link to, and an HTTP connection with streams.
 #![allow(dead_code)]
 
+pub mod clock;
 pub mod http;
 pub mod net;
 

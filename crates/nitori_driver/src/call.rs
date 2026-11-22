@@ -488,13 +488,29 @@ pub type PartsOf<Q> = <Q as Composition>::Parts;
 /// order.
 pub type CallSlotsOf<Q> = <RootOf<Q> as SlotsUnder<PartsOf<Q>, End>>::Slots;
 
-/// Write a composition: `composition!(impl for Q: Root, Parts)`.
+/// Write a composition: `composition!(impl for Q: Root, Parts)`, or, for a
+/// composition a [`Driver`](crate::driver::Driver) runs,
+/// `composition!(impl driver for Q: Root, Parts, Clock)`, which also
+/// proves every hook of every component at its place and checks that
+/// every component with a deadline has the clock's instant.
 ///
 /// The calls come from the parts' shares; every position is inferred by
 /// the compiler inside the impl, once. The crate that writes it enables
 /// the nightly feature `impl_trait_in_assoc_type`.
 #[macro_export]
 macro_rules! composition {
+    (impl driver for $q:ty: $r:ty, $p:ty, $clock:ty) => {
+        $crate::composition!(impl for $q: $r, $p);
+        impl $crate::driver::DriverComposition for $q {
+            type Clock = $clock;
+            type Requests = $crate::request::NoRequest;
+            type Remains = $crate::structure::RemainsOf<$p, $r>;
+            type Places = impl $crate::driver::PlacePack<Self, $crate::driver::PlacesOf<Self>>;
+            fn places() -> ::core::marker::PhantomData<Self::Places> {
+                $crate::driver::prove_places::<Self, $crate::driver::PlacesOf<Self>, _>()
+            }
+        }
+    };
     (impl for $q:ty: $r:ty, $p:ty) => {
         impl $crate::call::Composition for $q {
             type Root = $r;
