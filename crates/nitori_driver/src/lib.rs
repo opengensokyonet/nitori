@@ -6,6 +6,11 @@
 
 extern crate alloc;
 
+/// The lists and sums of frunk, which the structure, the needs and the
+/// views are made of; the one re-export of it among the crates that use
+/// this one.
+pub use frunk_core;
+
 pub mod call;
 pub mod capability;
 pub mod hooks;

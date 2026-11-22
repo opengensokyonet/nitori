@@ -14,6 +14,7 @@ Each package documents itself in its own README or crate documentation. Dependen
 
 - [`crates/nitori_call`](crates/nitori_call/README.md): operations written as ordinary async functions that run on a resource their caller lends one poll at a time; depends on `nitori_call_macros`.
 - `crates/nitori_call_macros`: the `#[call]` and `#[capability]` procedural macros of `nitori_call`.
+- [`crates/nitori_driver`](crates/nitori_driver/README.md): the tree of state a driver keeps and lends to its calls: the structure, the needs of calls, capabilities and component hooks; depends on `nitori_call`.
 
 ### IO
 
