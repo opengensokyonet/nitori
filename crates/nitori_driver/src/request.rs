@@ -409,7 +409,8 @@ type GrandchildOp<E, K, I, CK, J> = <<ChildOp<E, K, I> as ChildEdit<
 /// Each operation does what the structure says goes with it: a node built
 /// is built from its parent's view and starts its calls; a node that links
 /// to another ([`NodeKind::Linked`]) has it built before it when it is not
-/// there, and ended after it when no other node links to it any more; a
+/// there, and ended after it when no other node links to it any more (a
+/// node replaced keeps it for the new one, see [`replace`](Edit::replace)); a
 /// node ends after the nodes below it, its end hooks told the reason. The
 /// handle is taken by value and ending the node itself consumes it.
 pub struct Edit<'e, E, K> {
@@ -458,6 +459,13 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
     /// build a new one in its place from `start`, with nothing in between:
     /// no call is polled and no event is handled before the new one is
     /// built. Refused as [`end`](Edit::end) is, and then none is built.
+    /// The node the child links to ([`NodeKind::Linked`]) stays: the old
+    /// child is not counted as the last to link to it, and the new one
+    /// links to it as it is, with no
+    /// [`LinkedStart`](crate::structure::LinkedStart); it does not end or
+    /// start again. The nodes below the old child are ended as by
+    /// [`end`](Edit::end), the nodes they were the last to link to with
+    /// them.
     pub fn replace<CK: NodeKind, I>(
         &mut self,
         key: KeyAt<K::Children, I>,

@@ -1,6 +1,6 @@
 //! The cases the fourth review of the driver found: a node ended while it
-//! is added, a node others link to asking to end itself, and a node
-//! replaced in the poll that runs its actions.
+//! is added, a node others link to asking to end itself, a node replaced
+//! in the poll that runs its actions, and replacing a node that links.
 #![feature(impl_trait_in_assoc_type)]
 mod common;
 
@@ -16,13 +16,13 @@ use nitori_driver::{
     call::ShareCalls,
     composition,
     driver::Driver,
-    event::{Hear, NodeStarted, Triggered},
-    hooks::{ArgsOf, BuildKeyed, BuildView, HookKeys, HookView, Hooks, Part, PartList},
+    event::{Hear, NodeEnding, NodeStarted, Triggered},
+    hooks::{ArgsOf, BuildKeyed, BuildView, EndCause, HookKeys, HookView, Hooks, Part, PartList},
     lend::KeyedList,
     request::{Edit, Editor, LinkedToError, NodeRequest, Request},
     structure::{
         Address, ByOwnKey, Child, End, KeyAddress, LinkedStart, NodeKind, NodePath, PathFrom,
-        Share, SlotVec, Store,
+        Share, SlotVec, Step, Store,
     },
 };
 
@@ -388,4 +388,185 @@ fn a_node_replaced_in_a_poll_is_not_run_by_the_old_ones_marks() {
     );
     let _ = poll(&mut d);
     assert_eq!(RUNS.with(Cell::get), 1, "it is run in the next one");
+}
+
+// ---------------------------------------------------------------- replacing a node that links
+
+mod relinked {
+    use super::*;
+
+    thread_local! {
+        pub static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        pub static ASK: RefCell<Option<ReplaceRoute>> = const { RefCell::new(None) };
+    }
+    pub fn put(s: impl Into<String>) {
+        LOG.with(|l| l.borrow_mut().push(s.into()));
+    }
+    pub fn log() -> Vec<String> {
+        LOG.with(|l| core::mem::take(&mut *l.borrow_mut()))
+    }
+    pub struct Root;
+    pub struct Peer;
+    /// Two kinds of node that link to a peer by their own key.
+    pub struct Route;
+    pub struct Path;
+    impl NodeKind for Root {
+        type Children = HList![
+            Child<Peer, SlotVec<u32>>,
+            Child<Route, SlotVec<u32>>,
+            Child<Path, SlotVec<u32>>,
+        ];
+        type Linked = HNil;
+        type Request = ReplaceRoute;
+    }
+    impl NodeKind for Peer {
+        type Children = HNil;
+        type Linked = HNil;
+    }
+    impl NodeKind for Route {
+        type Children = HNil;
+        type Linked = HList![ByOwnKey<Peer>];
+    }
+    impl LinkedStart<Peer> for Route {
+        fn linked_start(_: &mut ()) {
+            put("linked start");
+        }
+    }
+    impl NodeKind for Path {
+        type Children = HNil;
+        type Linked = HList![ByOwnKey<Peer>];
+    }
+    impl LinkedStart<Peer> for Path {
+        fn linked_start(_: &mut ()) {
+            put("linked start");
+        }
+    }
+    /// The root replaces the route under the key.
+    pub struct ReplaceRoute(pub u32);
+    impl Request<Root> for ReplaceRoute {
+        fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
+            edit.replace::<Route, _>(self.0, (), ()).unwrap();
+        }
+    }
+    impl ShareCalls<Root> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Peer> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Route> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Path> for Base {
+        type Calls = HNil;
+    }
+    impl Share<Root> for Base {
+        type Data = HList![Watcher];
+    }
+    impl Share<Peer> for Base {
+        type Data = HList![PeerLog];
+    }
+    impl Share<Route> for Base {
+        type Data = HNil;
+    }
+    impl Share<Path> for Base {
+        type Data = HNil;
+    }
+    /// Hears the peers start and end, and asks what the test queues.
+    pub struct Watcher;
+    impl<L: PartList<L> + 'static> Hooks<Base, L, Root> for Watcher {
+        const ACTS_BEFORE_CALLS: bool = true;
+        type Subscribes = HList![Hear<NodeStarted<Peer>>, Hear<NodeEnding<Peer>>];
+        type Returns = NodeRequest<Root, Root>;
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Root>>>(
+            _: BuildView<'_, Self, Base, L, Root, KP>,
+            _: &ArgsOf<L>,
+            _: &mut (),
+        ) -> Self {
+            Watcher
+        }
+        fn on_events<KP: HookKeys<Self, Base, L, Root>>(
+            events: Triggered<'_>,
+            _: HookView<'_, Self, Base, L, Root, KP>,
+        ) -> Option<Self::Returns> {
+            if events.contains::<NodeStarted<Peer>>() {
+                put("peer started");
+            }
+            if events.contains::<NodeEnding<Peer>>() {
+                put("peer ending");
+            }
+            None
+        }
+        fn before_calls<KP: HookKeys<Self, Base, L, Root>>(
+            _: HookView<'_, Self, Base, L, Root, KP>,
+            waker: &Waker,
+        ) -> Option<Self::Returns> {
+            waker.wake_by_ref();
+            ASK.with(|a| a.borrow_mut().take())
+                .map(|r| NodeRequest::new(KeyAddress::here(), r))
+        }
+    }
+    /// Logs a peer's build and end.
+    pub struct PeerLog;
+    impl<L: PartList<L> + 'static> Hooks<Base, L, Peer> for PeerLog {
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Peer>>>(
+            _: BuildView<'_, Self, Base, L, Peer, KP>,
+            _: &ArgsOf<L>,
+            _: &mut (),
+        ) -> Self {
+            put("peer built");
+            PeerLog
+        }
+        fn end<KP: HookKeys<Self, Base, L, Peer>>(
+            _: HookView<'_, Self, Base, L, Peer, KP>,
+            cause: EndCause<'_, ()>,
+        ) {
+            put(format!("peer ended {cause:?}"));
+        }
+    }
+    pub struct Q;
+    composition!(impl driver for Q: Root, HList![Base], TestClock);
+    /// The path of a route.
+    pub type RouteAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
+}
+
+/// Replacing the last node that links to a peer keeps the peer: it does
+/// not end or start again, and the new node links to it.
+#[test]
+fn replacing_the_last_node_linking_to_a_peer_keeps_it() {
+    use relinked::*;
+    let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
+    d.add::<Route, _, _, _>(End, 1, ()).unwrap();
+    let _ = poll(&mut d);
+    let peer = d.root().unwrap().children.head.find(&1).unwrap();
+    assert_eq!(log(), ["linked start", "peer built", "peer started"]);
+    ASK.with(|a| *a.borrow_mut() = Some(ReplaceRoute(1)));
+    let _ = poll(&mut d);
+    assert!(log().is_empty(), "the peer did not end or start");
+    assert_eq!(d.root().unwrap().children.head.find(&1), Some(peer));
+    // it is linked to by the new route: removing that one ends it
+    let route = d.root().unwrap().children.tail.head.find(&1).unwrap();
+    let route: RouteAt = Step::new(route, End);
+    d.remove(route, ()).unwrap();
+    assert_eq!(log(), ["peer ended Unlinked", "peer ending"]);
+}
+
+/// Replacing a node that links to a peer another node links to keeps the
+/// peer, which ends after the last of them.
+#[test]
+fn replacing_a_node_linking_to_a_shared_peer_keeps_it() {
+    use relinked::*;
+    let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
+    d.add::<Route, _, _, _>(End, 1, ()).unwrap();
+    let path = d.add::<Path, _, _, _>(End, 1, ()).unwrap();
+    let _ = poll(&mut d);
+    let peer = d.root().unwrap().children.head.find(&1).unwrap();
+    assert_eq!(log(), ["linked start", "peer built", "peer started"]);
+    ASK.with(|a| *a.borrow_mut() = Some(ReplaceRoute(1)));
+    let _ = poll(&mut d);
+    assert!(log().is_empty(), "the peer did not end or start");
+    assert_eq!(d.root().unwrap().children.head.find(&1), Some(peer));
+    d.remove(path, ()).unwrap();
+    assert!(log().is_empty(), "the new route still links to it");
+    assert_eq!(d.root().unwrap().children.head.find(&1), Some(peer));
 }

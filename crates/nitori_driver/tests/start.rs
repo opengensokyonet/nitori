@@ -234,21 +234,21 @@ fn a_start_reaches_every_component_and_moves_once() {
             "done true",
         ]
     );
-    // the old item ends, reading its key, and the peer it was the last
-    // to link to ends after it; the new one starts from the start given
-    // and builds its peer again
+    // the old item ends, reading its key; the peer it linked to stays,
+    // and the new one starts from the start given and links to it
+    use nitori_driver::structure::Store;
+    let peer = d.root().unwrap().children.tail.head.find(&4).unwrap();
     ask(&mut d, RootRequest::Replace(4, start("again", 41)));
     assert_eq!(
         log(),
         [
             "end 4 Some(Token(40))",
-            "linked start",
-            "peer 4 peer of again",
             "first again 4",
             "second again None",
             "done true",
         ]
     );
+    assert_eq!(d.root().unwrap().children.tail.head.find(&4), Some(peer));
 }
 
 #[test]

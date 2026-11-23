@@ -139,6 +139,11 @@ where
         reason: EndReasonOf<TargetOf<Q, Pl::At>>,
     ) -> usize {
         self.editing(|d, todo| {
+            // the node it links to stays: the new one links to it in its
+            // place, so the old one is not the last to end
+            if let super::NodeSlot::Live(n) = &mut d.nodes[id] {
+                n.link = None;
+            }
             Driver::end_typed::<Pl, Pos>(d, id, reason, todo);
             // Invariant: the root is there while a request is handled; the
             // key was freed just above, and nothing was added since; and
