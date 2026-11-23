@@ -12,9 +12,10 @@ use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{format_ident, quote};
 use syn::{
     Block, Error, Expr, FnArg, GenericArgument, GenericParam, Generics, Ident, ItemFn, ItemTrait,
-    Lifetime, LifetimeParam, Pat, Path, PathArguments, Result, ReturnType, Signature, Token,
-    TraitItem, TraitItemFn, Type, TypeParam, TypeParamBound, TypeReference, Visibility,
-    WhereClause, WherePredicate, parse_macro_input, parse_quote, parse_quote_spanned,
+    Lifetime, LifetimeParam, ParenthesizedGenericArguments, Pat, Path, PathArguments, Result,
+    ReturnType, Signature, Token, TraitItem, TraitItemFn, Type, TypeBareFn, TypeParam,
+    TypeParamBound, TypeReference, Visibility, WhereClause, WherePredicate, parse_macro_input,
+    parse_quote, parse_quote_spanned,
     punctuated::Punctuated,
     spanned::Spanned,
     visit::{self, Visit},
@@ -1727,6 +1728,12 @@ impl VisitMut for LifetimeNamer {
         if lifetime.ident == "_" {
             *lifetime = self.fresh();
         }
+    }
+    // Elided lifetimes in a function pointer type and in the `Fn(..)` sugar
+    // are bound there, for every lifetime; naming them would narrow the type
+    // to one lifetime.
+    fn visit_type_bare_fn_mut(&mut self, _: &mut TypeBareFn) {}
+    fn visit_parenthesized_generic_arguments_mut(&mut self, _: &mut ParenthesizedGenericArguments) {
     }
 }
 
