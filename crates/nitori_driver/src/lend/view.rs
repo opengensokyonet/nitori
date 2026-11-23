@@ -12,7 +12,7 @@ use crate::need::{At, KeyedTag, Mut, MutList, Opt, OthersTag, Plain, Ref, StepTa
 
 /// The keyed needs of a list of needs, in list order.
 pub trait Flat {
-    /// The keyed needs, an `HList` of [`KeyedDesc`](super::KeyedDesc)s.
+    /// The keyed needs, an `HList` of [`KeyedDesc`](super::keyed::KeyedDesc)s.
     type Keyed: KeyedShape;
 }
 impl Flat for HNil {

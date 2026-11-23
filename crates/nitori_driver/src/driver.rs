@@ -732,7 +732,6 @@ pub use place::{
     AddressOf, ClockInstantOf, ClockOf, DriverComposition, InstantOf, RequestsOf, RootNode,
     TargetOf,
 };
-#[allow(unused_imports)]
 pub(crate) use place::{
     FindPlace, NthPlace, Place, PlaceAt, PlaceDesc, PlaceInfo, PlaceKey, PlaceKeyOf, PlaceNth,
     PlaceOps, PlacePositionsAt, PlacesOf, PlacesUnder,
@@ -922,9 +921,8 @@ impl<A> NodeSlot<A> {
 }
 
 /// What one round of events handles at one position.
-#[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
-pub struct Hit {
+struct Hit {
     node: usize,
     serial: u64,
     target: Target,

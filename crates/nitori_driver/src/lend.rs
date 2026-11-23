@@ -541,36 +541,17 @@ pub(crate) mod view;
 pub(crate) mod writes;
 
 pub(crate) use cells::linked;
-#[allow(unused_imports)]
-pub(crate) use cells::{
-    All, Cell, ChainAtPos, ChainCells, ChildrenCells, False, FromSplit, GivenKey, IndexEq,
-    LinkAtPos, LinkSpec, LinkTo, NoChain, NoLink, OffChain, OnChain, OptChildren, OptNodeCells,
-    OptStoreCells, Others, OwnKeyCell, OwnKeyPlace, OwnKeyRef, OwnKeySource, RoleCells, RoleChain,
-    RoleLink, RoleOf, RoleOther, SplitError, SplitKey, True, Wrap, WrapOpt,
-};
-#[allow(unused_imports)]
-pub(crate) use check::{
-    Distinct, FindAll, FindCell, FindOthers, Locate, LocateIn, NoneAt, Pairwise, Places,
-};
+pub(crate) use cells::{All, Cell, ChainCells, FromSplit, GivenKey, LinkSpec, Others, OwnKeyCell};
+pub(crate) use check::{Locate, Pairwise, Places};
 pub use keyed::{Keyed, KeyedList, KeyedRef};
-#[allow(unused_imports)]
 pub(crate) use keyed::{
-    KeyedCell, KeyedDesc, KeyedItem, KeyedMany, KeyedManyP, KeyedP, KeyedPos, KeyedRefItem,
-    KeyedShape, NoKeyed, NoKeyedPos, Refs, SharedKeyed,
+    KeyedCell, KeyedItem, KeyedMany, KeyedManyP, KeyedP, KeyedPos, KeyedRefItem, KeyedShape, Refs,
+    SharedKeyed,
 };
-#[allow(unused_imports)]
-pub(crate) use pass::{
-    CellOf, Cx, Freeze, FreezeOne, KeyedPositions, Pass1, Pass2, RefShape, Shape, WrapManyPosition,
-    WrapPosition,
-};
-#[allow(unused_imports)]
-pub(crate) use view::{
-    Build, NeedList, TagFlat, TagFlatMany, TagFlatRef, TagNeed, TagNeedBuild, TagNeedRef,
-    TagNeedRefBuild,
-};
+pub(crate) use pass::{CellOf, Cx, Freeze, FreezeOne, KeyedPositions, Pass1, Pass2, Shape};
+pub(crate) use view::{Build, NeedList};
 pub use view::{Flat, NeedSet, ViewOf};
-#[allow(unused_imports)]
-pub(crate) use writes::{TypeIds, Writes};
+pub(crate) use writes::Writes;
 
 use frunk_core::hlist::{HCons, HNil};
 
@@ -618,7 +599,7 @@ pub type Raw2Of<'a, N, R, P, X, IL, I1, I2, T = (), Kc = FromSplit> =
 /// The list of needs `Self` lent at the path `X` from the root `R`, for
 /// the parts `P`, with the instant `T` ([`Now`](crate::need::Now)); `I` is
 /// every position, inferred here once. The key [`OwnKey`](crate::need::OwnKey)
-/// reads comes from `Kc` ([`OwnKeySource`]).
+/// reads comes from `Kc` ([`OwnKeySource`](cells::OwnKeySource)).
 #[diagnostic::on_unimplemented(
     message = "the needs `{Self}` cannot be lent at `{X}`",
     label = "a need is not met",
