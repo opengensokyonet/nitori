@@ -169,10 +169,7 @@ impl Request<Conn> for ConnRequest {
             Self::RebuildEstablished => edit
                 .replace::<Established, _>((), (), EstablishedEnd::ZeroRttRejected)
                 .is_ok(),
-            Self::EndConnection => {
-                edit.end_self(());
-                true
-            }
+            Self::EndConnection => edit.end_self(()).is_ok(),
         };
         if !done {
             put("refused");

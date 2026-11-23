@@ -280,7 +280,7 @@ impl<K: NodeKind> Request<K> for Infallible {
 pub(crate) mod sealed {
     use frunk_core::indices::{Here, There};
 
-    use super::{EndError, ReplaceError};
+    use super::{EndError, LinkedToError, ReplaceError};
     use crate::{
         driver::{AddError, DriverOps},
         structure::{ChildList, ChildStorage, MoveError, NodeKind},
@@ -292,8 +292,8 @@ pub(crate) mod sealed {
     pub trait EditOps<K: NodeKind>: DriverOps {
         /// The operations on each child, in the order of `K`'s children.
         type Children: ChildEdits<Self::Q, K::Children>;
-        /// End the node, for `reason`; nothing when others link to it.
-        fn end_node(&mut self, reason: K::EndReason);
+        /// End the node, for `reason`; refused when others link to it.
+        fn end_node(&mut self, reason: K::EndReason) -> Result<(), LinkedToError>;
     }
     /// The operations on each child of a list `L`, in a composition `Q`:
     /// the first's, then the others'.
@@ -501,8 +501,11 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
         )
     }
     /// End the node itself, with every node below it, for `reason`.
-    pub fn end_self(self, reason: K::EndReason) {
-        self.editor.end_node(reason);
+    /// Refused when nodes link to it: it is not ended then, and the
+    /// structure ends it after the last of them, told it was unlinked
+    /// ([`EndCause::Unlinked`](crate::hooks::EndCause::Unlinked)).
+    pub fn end_self(self, reason: K::EndReason) -> Result<(), LinkedToError> {
+        self.editor.end_node(reason)
     }
 }
 impl<E, K> fmt::Debug for Edit<'_, E, K> {

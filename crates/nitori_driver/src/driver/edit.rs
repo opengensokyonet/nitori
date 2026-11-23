@@ -233,12 +233,13 @@ where
     Driver<Q>: DriverOps<Q = Q>,
 {
     type Children = Pos::Children;
-    fn end_node(&mut self, reason: EndReasonOf<TargetOf<Q, Pl::At>>) {
+    fn end_node(&mut self, reason: EndReasonOf<TargetOf<Q, Pl::At>>) -> Result<(), LinkedToError> {
         let node = self.node;
         if DriverOps::linked_to(self, node) {
-            return;
+            return Err(LinkedToError);
         }
         DriverOps::end_typed::<Pl, Pos>(self, node, reason);
+        Ok(())
     }
 }
 

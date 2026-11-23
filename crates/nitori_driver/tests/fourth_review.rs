@@ -5,7 +5,11 @@
 #![feature(impl_trait_in_assoc_type)]
 mod common;
 
-use std::cell::Cell;
+use core::{pin::Pin, task::Poll};
+use std::{
+    cell::{Cell, RefCell},
+    task::{Context, Waker},
+};
 
 use common::clock::TestClock;
 use frunk_core::{HList, hlist::HNil, hlist_pat};
@@ -16,11 +20,21 @@ use nitori_driver::{
     event::{Hear, NodeStarted, Triggered},
     hooks::{ArgsOf, BuildKeyed, BuildView, HookKeys, HookView, Hooks, Part, PartList},
     lend::KeyedList,
-    request::{Edit, Editor, NodeRequest, Request},
+    request::{Edit, Editor, LinkedToError, NodeRequest, Request},
     structure::{
-        Address, Child, End, KeyAddress, NodeKind, NodePath, PathFrom, Share, SlotVec, Store,
+        Address, ByOwnKey, Child, End, KeyAddress, LinkedStart, NodeKind, NodePath, PathFrom,
+        Share, SlotVec, Store,
     },
 };
+
+fn poll<Q: nitori_driver::driver::DriverComposition>(d: &mut Driver<Q>) -> Poll<()>
+where
+    Driver<Q>: core::future::Future<Output = ()>,
+    nitori_driver::__private::Cursor<frunk_core::indices::Here>:
+        nitori_driver::__private::CallWalk<Q>,
+{
+    Pin::new(d).poll(&mut Context::from_waker(Waker::noop()))
+}
 
 pub struct Base;
 impl<L> Part<L> for Base {
@@ -163,4 +177,106 @@ fn a_node_ended_while_it_is_added_gives_its_number_to_another_leaf() {
     let root = d.root().unwrap();
     assert!(root.children.head.find(&1).is_none());
     assert!(root.children.head.find(&2).is_some());
+}
+
+// ---------------------------------------------------------------- a linked node ending itself
+
+mod linked {
+    use super::*;
+
+    thread_local! {
+        pub static ASK: RefCell<Option<NodeRequest<Root, Entry>>> = const { RefCell::new(None) };
+        pub static ENDED: RefCell<Option<Result<(), LinkedToError>>> = const { RefCell::new(None) };
+    }
+    pub struct Root;
+    pub struct Entry;
+    pub struct Route;
+    impl NodeKind for Root {
+        type Children = HList![Child<Entry, SlotVec<u32>>, Child<Route, SlotVec<u32>>];
+        type Linked = HNil;
+    }
+    impl NodeKind for Entry {
+        type Children = HNil;
+        type Linked = HNil;
+        type Request = EndMe;
+    }
+    impl NodeKind for Route {
+        type Children = HNil;
+        type Linked = HList![ByOwnKey<Entry>];
+    }
+    impl LinkedStart<Entry> for Route {
+        fn linked_start(_: &mut ()) {}
+    }
+    /// The entry asks to end itself.
+    pub struct EndMe;
+    impl Request<Entry> for EndMe {
+        fn apply<E: Editor<Entry>>(self, edit: Edit<'_, E, Entry>) {
+            let ended = edit.end_self(());
+            ENDED.with(|e| *e.borrow_mut() = Some(ended));
+        }
+    }
+    impl ShareCalls<Root> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Entry> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Route> for Base {
+        type Calls = HNil;
+    }
+    impl Share<Root> for Base {
+        type Data = HList![Asker];
+    }
+    impl Share<Entry> for Base {
+        type Data = HNil;
+    }
+    impl Share<Route> for Base {
+        type Data = HNil;
+    }
+    /// Hands over what the test queues, before the root's calls.
+    pub struct Asker;
+    impl<L: PartList<L> + 'static> Hooks<Base, L, Root> for Asker {
+        const ACTS_BEFORE_CALLS: bool = true;
+        type Returns = NodeRequest<Root, Entry>;
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Root>>>(
+            _: BuildView<'_, Self, Base, L, Root, KP>,
+            _: &ArgsOf<L>,
+            _: &mut (),
+        ) -> Self {
+            Asker
+        }
+        fn before_calls<KP: HookKeys<Self, Base, L, Root>>(
+            _: HookView<'_, Self, Base, L, Root, KP>,
+            _: &Waker,
+        ) -> Option<Self::Returns> {
+            ASK.with(|a| a.borrow_mut().take())
+        }
+    }
+    pub struct Q;
+    composition!(impl driver for Q: Root, HList![Base], TestClock);
+}
+
+/// A node others link to that asks to end itself is told it was refused,
+/// and ends after the last of them.
+#[test]
+fn a_linked_node_ending_itself_is_refused() {
+    use linked::*;
+    let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
+    let route = d.add::<Route, _, _, _>(End, 1, ()).unwrap();
+    ASK.with(|a| {
+        *a.borrow_mut() = Some(NodeRequest::new(KeyAddress::child::<Entry, _>(1), EndMe));
+    });
+    let _ = poll(&mut d);
+    assert_eq!(ENDED.with(|e| *e.borrow()), Some(Err(LinkedToError)));
+    assert!(d.root().unwrap().children.head.find(&1).is_some());
+    assert!(d.remove(route, ()));
+    assert!(d.root().unwrap().children.head.find(&1).is_none());
+    // one no node links to ends
+    d.add::<Entry, _, _, _>(End, 2, ()).unwrap();
+    ASK.with(|a| {
+        *a.borrow_mut() = Some(NodeRequest::new(KeyAddress::child::<Entry, _>(2), EndMe));
+    });
+    let _ = poll(&mut d);
+    assert_eq!(ENDED.with(|e| *e.borrow()), Some(Ok(())));
+    assert!(d.root().unwrap().children.head.find(&2).is_none());
 }
