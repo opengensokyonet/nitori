@@ -749,6 +749,32 @@ fn a_new_outer_waker_polls_every_call_again() {
 }
 
 #[test]
+fn an_old_waker_woken_first_leaves_the_new_outer_waker_to_be_woken() {
+    log();
+    clear_stash();
+    let mut d = Driver::<Q>::new(TestClock::default(), args(), ()).unwrap();
+    d.add::<Path, _, _, _>(End, PathId(1), ()).unwrap();
+    let (count1, w1) = outer();
+    for _ in 0..4 {
+        let _ = poll(&mut d, &w1);
+    }
+    let (count2, w2) = outer();
+    let _ = poll(&mut d, &w2);
+    log();
+    // a resource keeps the waker of the old outer waker and the new one
+    let mut bump = stashed("bump");
+    let new = bump.pop().unwrap();
+    let old = bump.pop().unwrap();
+    let before = count1.0.load(Ordering::SeqCst);
+    old.wake_by_ref();
+    assert_eq!(count1.0.load(Ordering::SeqCst), before + 1);
+    new.wake_by_ref();
+    assert_eq!(count2.0.load(Ordering::SeqCst), 1);
+    let _ = poll(&mut d, &w2);
+    assert_eq!(log(), ["bump waits"]);
+}
+
+#[test]
 fn dropped_tells_every_component_then_ends() {
     log();
     let mut d = Driver::<Q>::new(TestClock::default(), args(), ()).unwrap();
@@ -771,53 +797,8 @@ fn dropped_tells_every_component_then_ends() {
     );
 }
 
-// ---------------------------------------------------------------- a panic
-
-/// A part with a call on the timer that panics.
-pub struct Boomer;
-empty_share!(Boomer: Connection, Session, Peer, Path, Route);
-impl Share<Timer> for Boomer {
-    type Data = HNil;
-}
-impl ShareCalls<Timer> for Boomer {
-    type Calls = HList![Boom];
-}
-impl<L> nitori_driver::hooks::Part<L> for Boomer {
-    type Args = ();
-}
-pub struct Boom;
-impl<Q: Composition> CallKind<Q> for Boom {
-    type Needs = HNil;
-    type Op = Booming;
-    fn start() -> Booming {
-        Booming::new()
-    }
-}
-#[call]
-pub async fn booming<W: CallFamily<C = Boom>>(host: &mut impl LentAccess<Family = W>) {
-    let _ = host;
-    panic!("boom");
-}
-pub struct QB;
-composition!(impl driver for QB: Connection, HList![Base, Watch, Boomer], TestClock);
-
-#[test]
-fn a_panic_tells_the_root_only() {
-    log();
-    let mut d =
-        Driver::<QB>::new(TestClock::default(), frunk_core::hlist![(), (), ()], ()).unwrap();
-    d.add::<Peer, _, _, _>(End, PeerId(1), ()).unwrap();
-    let p = d.add::<Path, _, _, _>(End, PathId(1), ()).unwrap();
-    let r = d.add::<Route, _, _, _>(p, PeerId(1), ()).unwrap();
-    d.add::<Timer, _, _, _>(r, (), ()).unwrap();
-    log();
-    let (_, w) = outer();
-    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| poll(&mut d, &w)));
-    assert!(unwound.is_err());
-    log();
-    drop(d);
-    assert_eq!(log(), ["aborted Connection Panicked", "remains"]);
-}
+#[path = "driver/panic.rs"]
+mod panic;
 
 #[allow(dead_code)]
 fn _kinds_have_default_reasons(_: <Path as NodeKind>::EndReason) {}

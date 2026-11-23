@@ -56,9 +56,11 @@
 //!
 //! A driver dropped before the root ended tells every component that it
 //! was dropped ([`Hooks::aborted`](crate::hooks::Hooks::aborted)), the
-//! nodes above first, and ends every node. After a panic through a poll
-//! only the root's components are told, their remains are kept, and no
-//! node ends.
+//! nodes above first, and ends every node. After a panic through a poll,
+//! or through [`Driver::new`], [`Driver::add`], [`Driver::remove`] or
+//! [`Driver::end`], only the root's components are told, their remains are
+//! kept, and no node ends; a later poll, `add`, `remove` or `end` of a
+//! driver a panic went through ends it so and does nothing more.
 //!
 //!
 //! A layer whose deadline is a count at the root, and which hears its own
@@ -392,8 +394,9 @@ where
     serial: u64,
     remains: Option<Q::Remains>,
     ended: bool,
-    /// The driver's poll runs: still set when it is dropped or polled
-    /// again, a panic unwound through it.
+    /// An entry of the driver runs (a poll, `new`, `add`, `remove`,
+    /// `end`): still set when it is dropped or entered again, a panic
+    /// unwound through one.
     running: bool,
     /// What a drop before the end runs; taken where the driver is made,
     /// which has the bounds it needs.

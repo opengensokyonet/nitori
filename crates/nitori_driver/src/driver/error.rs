@@ -68,7 +68,7 @@ impl AddError {
 #[derive(Debug, Snafu, PartialEq, Eq)]
 #[snafu(module)]
 pub enum RemoveError {
-    /// No node at the path.
+    /// No node at the path, or the driver ended.
     #[snafu(display("no node at the path to remove"))]
     NoNode,
     /// Nodes link to it.

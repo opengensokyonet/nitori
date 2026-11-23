@@ -4,13 +4,16 @@
 //! A waker sets its bit in its node's marks; the node whose marks were
 //! empty goes on the ready stack, a list linked through the nodes' heads
 //! by node number, pushed with a compare-and-swap and taken whole with a
-//! swap. Then, the first time since the poll began, the outer waker the
-//! waker was made with is woken.
+//! swap. Then the outer waker the waker was made with is woken, unless the
+//! outer waker woken last since the poll began is the same one.
 //!
 //! The outer waker is not kept where wakers on other threads read it: a
 //! position's waker holds the outer waker of the poll it was made in, and
 //! the driver makes them again, and polls every call once, when it is
-//! polled with another outer waker. Nothing here needs a lock or `unsafe`.
+//! polled with another outer waker. Which outer waker was woken is kept by
+//! its number (its epoch): a resource may still wake a waker of an older
+//! outer waker, which wakes that one and leaves the current one to be
+//! woken by its own wakers. Nothing here needs a lock or `unsafe`.
 //!
 //! A node's number is not given to another node while a waker of the old
 //! one is alive or the old one is on the stack: its head stays in the
@@ -37,16 +40,39 @@ use crate::{
     structure::{ChildAddresses, End, NodeKind, RemainsOf},
 };
 
+/// [`Shared::notified`] when no outer waker was woken since the poll
+/// began.
+pub(crate) const NOT_NOTIFIED: u64 = u64::MAX;
+
 /// What every waker of a driver shares.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Shared {
     /// The ready stack: the number of the node on top, plus one; 0 when
     /// empty.
     top: AtomicUsize,
-    /// Whether the outer waker was woken since this poll began.
-    pub(crate) notified: AtomicBool,
+    /// The epoch of the outer waker woken last since this poll began;
+    /// [`NOT_NOTIFIED`] when none was.
+    pub(crate) notified: AtomicU64,
     /// The driver ended: wakes do nothing.
     pub(crate) closed: AtomicBool,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            top: AtomicUsize::new(0),
+            notified: AtomicU64::new(NOT_NOTIFIED),
+            closed: AtomicBool::new(false),
+        }
+    }
+}
+
+/// An outer waker and its epoch: the driver's count of the outer wakers it
+/// was polled with, when it was polled with this one.
+#[derive(Clone, Copy)]
+pub(crate) struct Outer<'w> {
+    pub(crate) waker: &'w Waker,
+    pub(crate) epoch: u64,
 }
 
 /// The head of a node: its marks and its link in the ready stack.
@@ -85,8 +111,13 @@ impl NodeHead {
 
 impl Shared {
     /// Mark `bits` of `head`'s node; a node whose marks were empty goes on
-    /// the stack. Then wake `outer`, the first time since the poll began.
-    pub(crate) fn mark(&self, head: &NodeHead, bits: u64, outer: Option<&Waker>) {
+    /// the stack. Then wake `outer`, unless the outer waker woken last
+    /// since the poll began is of the same epoch.
+    ///
+    /// A wake through an older outer waker does not keep the current one
+    /// from being woken: it puts its own epoch, so the next wake through
+    /// the current one sees another epoch and wakes again.
+    pub(crate) fn mark(&self, head: &NodeHead, bits: u64, outer: Option<Outer<'_>>) {
         if self.closed.load(SeqCst) || head.dead.load(SeqCst) || bits == 0 {
             return;
         }
@@ -104,9 +135,9 @@ impl Shared {
             }
         }
         if let Some(outer) = outer
-            && !self.notified.swap(true, SeqCst)
+            && self.notified.swap(outer.epoch, SeqCst) != outer.epoch
         {
-            outer.wake_by_ref();
+            outer.waker.wake_by_ref();
         }
     }
     /// Take the whole stack: the numbers of the nodes marked, in the order
@@ -137,13 +168,22 @@ pub(crate) struct PositionWaker {
     pub(crate) head: Arc<NodeHead>,
     pub(crate) bit: u64,
     pub(crate) outer: Waker,
+    /// The epoch of `outer`.
+    pub(crate) epoch: u64,
 }
 impl Wake for PositionWaker {
     fn wake(self: Arc<Self>) {
         self.wake_by_ref();
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.mark(&self.head, self.bit, Some(&self.outer));
+        self.shared.mark(
+            &self.head,
+            self.bit,
+            Some(Outer {
+                waker: &self.outer,
+                epoch: self.epoch,
+            }),
+        );
     }
 }
 
@@ -173,6 +213,7 @@ where
                     head: n.head.clone(),
                     bit: 1 << bit,
                     outer,
+                    epoch,
                 }));
                 n.wakers[bit] = Some((epoch, w.clone()));
                 w
@@ -181,7 +222,11 @@ where
     }
     pub(super) fn mark(&self, id: usize, bits: u64) {
         if let Some(n) = self.live(id) {
-            self.shared.mark(&n.head, bits, self.outer.as_ref());
+            let outer = self.outer.as_ref().map(|waker| Outer {
+                waker,
+                epoch: self.epoch,
+            });
+            self.shared.mark(&n.head, bits, outer);
         }
     }
     /// Take the nodes marked, with their marks, in the order of their

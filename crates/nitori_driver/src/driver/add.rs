@@ -93,12 +93,13 @@ where
         Q::Places: PlaceNth<Q, PlacesOf<Q>, N>,
         N: Number,
     {
-        if self.ended {
+        if self.end_if_panicked() {
             return Err(AddError::Ended);
         }
         let Some(parent_id) = self.find(&parent.address()) else {
             return Err(AddError::no_parent());
         };
+        self.running = true;
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
         let added = self.add_typed::<PlaceAt<Q, N>, PlacePositionsAt<Q, N>>(
@@ -122,6 +123,7 @@ where
         // operations, which keep their hits aside
         todo.append(&mut self.pending);
         self.settle(todo);
+        self.running = false;
         path
     }
 }

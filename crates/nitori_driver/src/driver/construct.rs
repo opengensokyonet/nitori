@@ -179,10 +179,14 @@ where
             running: false,
             on_drop: Self::end_dropped,
         };
+        // a hook that panics leaves `running` set, so the drop of the
+        // driver on the way out ends it as after a panic
+        driver.running = true;
         let id = driver.register(Address::here(), 0, None);
         let mut todo = Vec::new();
         driver.started(id, &mut todo);
         driver.settle(todo);
+        driver.running = false;
         Ok(driver)
     }
 }

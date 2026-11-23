@@ -122,7 +122,9 @@ where
                 }
             }
         }
-        self.shared.notified.store(false, SeqCst);
+        self.shared
+            .notified
+            .store(super::wake::NOT_NOTIFIED, SeqCst);
         let now = self.clock.now();
         self.outbox.set_now(now);
         let deferred = core::mem::take(&mut self.deferred);
@@ -346,7 +348,7 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let driver = self.get_mut();
         if driver.running {
-            // a panic unwound through the last poll
+            // a panic unwound through the last poll, or another entry
             driver.end_dropped();
             return Poll::Ready(());
         }

@@ -72,8 +72,8 @@ where
     /// Remove the node at `at`, for `reason`, with every node below it
     /// (each told that a node above ended), as a request's edit handle
     /// does. The path is at least one step long: the root is ended with
-    /// [`end`](Driver::end). Refused when no node is at the path, or when
-    /// nodes link to it: a node others link to is removed after the last
+    /// [`end`](Driver::end). Refused when no node is at the path (always,
+    /// once the driver ended), or when nodes link to it: a node others link to is removed after the last
     /// of them, not on its own. A path is by handles, as
     /// [`add`](Driver::add) says: one kept after its node ended may reach
     /// a node added later.
@@ -133,6 +133,9 @@ where
         PlacesOf<Q>: FindPlace<X, N> + NthPlace<RootOf<Q>, N, Item = Place<X>>,
         Q::Places: PlaceNth<Q, PlacesOf<Q>, N>,
     {
+        if self.end_if_panicked() {
+            return Err(RemoveError::NoNode);
+        }
         let id = self.find(&at.address()).ok_or(RemoveError::NoNode)?;
         debug_assert_ne!(
             id,
@@ -144,10 +147,12 @@ where
                 source: LinkedToError,
             });
         }
+        self.running = true;
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
         self.end_typed::<Place<X>, PlacePositionsAt<Q, N>>(id, reason, &mut todo);
         self.settle(todo);
+        self.running = false;
         Ok(())
     }
 }
@@ -171,13 +176,15 @@ where
     /// does not reach the root's components, as it does when a node is
     /// removed with [`remove`](Driver::remove).
     pub fn end(&mut self, reason: EndReasonOf<RootOf<Q>>) {
-        if self.ended {
+        if self.end_if_panicked() {
             return;
         }
+        self.running = true;
         self.outbox.set_now(self.clock.now());
         let id = self.root_id();
         let mut todo = Vec::new();
         self.end_typed::<Place<End>, PlacePositionsAt<Q, I0>>(id, reason, &mut todo);
+        self.running = false;
     }
     /// End the node `id` of the place `Pl`, with the nodes below it, for
     /// `reason`; the root ends the driver.

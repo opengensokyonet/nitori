@@ -1,5 +1,6 @@
 //! A driver dropped before the root ended, or after a panic through a
-//! poll.
+//! poll or another entry ([`Driver::new`], [`add`](Driver::add),
+//! [`remove`](Driver::remove), [`end`](Driver::end)).
 use alloc::{vec, vec::Vec};
 
 use frunk_core::indices::Here as I0;
@@ -37,9 +38,20 @@ where
     PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
     <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
 {
+    /// If a panic went through an entry (a poll, `new`, `add`, `remove`,
+    /// `end`) and the caller caught it, end the driver as after a panic:
+    /// the root's components are told and write their remains. Then
+    /// whether the driver ended, now or before.
+    pub(super) fn end_if_panicked(&mut self) -> bool {
+        if self.running {
+            self.end_dropped();
+        }
+        self.ended
+    }
     /// Dropped before the root ended: every component is told, the nodes
-    /// above first, and every node ends. After a panic, only the root's
-    /// components are told and write their remains, and no node ends.
+    /// above first, and every node ends. After a panic through an entry,
+    /// only the root's components are told and write their remains, and
+    /// no node ends: the tree may be half changed.
     pub(super) fn end_dropped(&mut self) {
         if self.ended {
             return;
