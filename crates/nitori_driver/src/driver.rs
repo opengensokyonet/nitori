@@ -1353,6 +1353,10 @@ where
     /// reuses its slots ([`SlotVec`](crate::structure::SlotVec)) may give
     /// the same handle to a node added later, which the same path then
     /// reaches. A request names its node by keys and does not have this.
+    /// The node may end before `add` returns: the events its start
+    /// publishes are handled first, and a request a handler returns may
+    /// end it. It was added all the same; the path is the one it had, and
+    /// may reach no node or one added after it.
     #[allow(clippy::type_complexity)]
     pub fn add<CK, X, I, N>(
         &mut self,
@@ -1393,15 +1397,21 @@ where
             start,
             &mut todo,
         );
+        // the path is read before the events are handled: a handler may
+        // end the node, and its number may go to another node
+        let path = added.map(|id| {
+            // Invariant: `add_typed` registered the node just now.
+            let addr = self.live(id).expect("the node just added is there").addr;
+            // Invariant: the node was added under `parent` at the position
+            // `I`, so its address is one of the path type `parent` and `I`
+            // give.
+            FromAddress::from_address(&addr).expect("the address of a node added at the path")
+        });
         // the linked node a link built was built through the edit
         // operations, which keep their hits aside
         todo.append(&mut self.pending);
         self.settle(todo);
-        let id = added?;
-        let addr = self.live(id).map(|n| n.addr).ok_or(AddError::Ended)?;
-        // Invariant: the node was added under `parent` at the position `I`,
-        // so its address is one of the path type `parent` and `I` give.
-        Ok(FromAddress::from_address(&addr).expect("the address of a node added at the path"))
+        path
     }
 
     /// Remove the node at `at`, for `reason`, with every node below it
