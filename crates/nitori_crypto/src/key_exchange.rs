@@ -179,9 +179,10 @@ pub struct KeyGenerationFailedError {
 
 /// The peer's share is not a valid share of the group.
 ///
-/// This covers a share of the wrong length, a point not on the curve, an
-/// X25519 share whose shared secret is all zeros (RFC 8446 §7.4.2), and an
-/// ML-KEM encapsulation key that fails the check of FIPS 203 §7.2.
+/// This covers a share of the wrong length, a point not in the uncompressed
+/// form of RFC 8446 §4.2.8.2, a point not on the curve, an X25519 share
+/// whose shared secret is all zeros (RFC 8446 §7.4.2), and an ML-KEM
+/// encapsulation key that fails the check of FIPS 203 §7.2.
 ///
 /// The cryptography libraries behind the backends report only one error
 /// without details for all of these cases, so this type does not tell them

@@ -3,7 +3,7 @@ use nitori_crypto::{
     InvalidPeerShareError, InvalidPeerShareSnafu, KeyGenerationFailedError,
     KeyGenerationFailedSnafu, NamedGroup, Secret,
 };
-use snafu::OptionExt;
+use snafu::{OptionExt, ensure};
 
 /// The private key of an ECDH exchange.
 pub(crate) struct Ecdh {
@@ -36,14 +36,19 @@ impl Ecdh {
 
     /// The shared secret with `peer_share`, after `prefix`.
     ///
-    /// aws-lc-rs rejects shares of the wrong length, points off the curve
-    /// and an all-zero X25519 result.
+    /// A share not of the form RFC 8446 §4.2.8.2 gives is rejected here;
+    /// aws-lc-rs rejects points off the curve and an all-zero X25519
+    /// result.
     pub(crate) fn agree(
         &self,
         group: NamedGroup,
         peer_share: &[u8],
         prefix: &[u8],
     ) -> Result<Secret, InvalidPeerShareError> {
+        ensure!(
+            is_share_form(self.key.algorithm(), peer_share),
+            InvalidPeerShareSnafu { group }
+        );
         agreement::agree(
             &self.key,
             UnparsedPublicKey::new(self.key.algorithm(), peer_share),
@@ -58,4 +63,26 @@ impl Ecdh {
         .ok()
         .context(InvalidPeerShareSnafu { group })
     }
+}
+
+/// Whether `share` has the form RFC 8446 §4.2.8.2 gives a share of
+/// `algorithm`: 32 bytes for X25519, an uncompressed point for the NIST
+/// curves.
+///
+/// aws-lc-rs also parses a SubjectPublicKeyInfo and, on the NIST curves,
+/// compressed and hybrid points, none of which TLS allows.
+fn is_share_form(algorithm: &agreement::Algorithm, share: &[u8]) -> bool {
+    if *algorithm == agreement::X25519 {
+        return share.len() == 32;
+    }
+    let point_len = if *algorithm == agreement::ECDH_P256 {
+        65
+    } else if *algorithm == agreement::ECDH_P384 {
+        97
+    } else {
+        // The backend creates keys only for X25519 and these three curves.
+        debug_assert!(*algorithm == agreement::ECDH_P521);
+        133
+    };
+    share.len() == point_len && share.first() == Some(&0x04)
 }
