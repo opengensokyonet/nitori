@@ -1,7 +1,7 @@
 //! A call: an operation together with the view its caller lends on each poll.
 use crate::{
     Accesses, ReceiverFamily, ReceiverSlot, Receivers,
-    access::{RootWaker, polled_directly},
+    access::RootWaker,
     receivers::{Single, cells::CellSet},
 };
 use alloc::{sync::Arc, task::Wake, vec::Vec};
@@ -9,7 +9,7 @@ use core::{
     cell::{Cell, OnceCell, UnsafeCell},
     convert::Infallible,
     fmt,
-    future::{Future, poll_fn},
+    future::Future,
     marker::{PhantomData, PhantomPinned},
     mem,
     ops::ControlFlow,
@@ -55,10 +55,18 @@ impl<R: Receivers, Op> RootOperation<R> for Op where
 {
 }
 
+mod emit;
+
 /// Where an operation's emitted item waits for its caller, and whether the
 /// current poll discards items instead.
+///
+/// The caller takes the item at the end of the poll that emitted it, so the
+/// cell is empty between polls.
 pub(crate) struct ItemCell<Y> {
     item: Cell<Option<Y>>,
+    /// How many items the caller has taken, wrapping; an emission waits for
+    /// it to change.
+    delivered: Cell<usize>,
     discard: Cell<bool>,
     /// The waker of the current poll; null outside one.
     root: RootWaker,
@@ -67,12 +75,21 @@ impl<Y> ItemCell<Y> {
     pub(crate) fn new() -> Self {
         Self {
             item: Cell::new(None),
+            delivered: Cell::new(0),
             discard: Cell::new(false),
             root: RootWaker::new(),
         }
     }
     pub(crate) fn set_discard(&self, discard: bool) {
         self.discard.set(discard);
+    }
+    /// Take the item for the caller.
+    fn deliver(&self) -> Option<Y> {
+        let item = self.item.take();
+        if item.is_some() {
+            self.delivered.set(self.delivered.get().wrapping_add(1));
+        }
+        item
     }
 }
 
@@ -105,31 +122,7 @@ impl<Y> Emitter<'_, Y> {
     /// delivers it. When the caller discards items, drops `item` and
     /// completes at once.
     pub fn emit(&mut self, item: Y) -> impl Future<Output = ()> + '_ {
-        let mut item = Some(item);
-        poll_fn(move |cx| {
-            let Some(pending) = item.take() else {
-                return Poll::Ready(());
-            };
-            // SAFETY: the owner of the cell outlives its operation.
-            let cell = unsafe { &*self.cell };
-            if cell.discard.get() {
-                return Poll::Ready(());
-            }
-            match cell.item.take() {
-                // An earlier emission in this poll is not yet delivered.
-                Some(earlier) => {
-                    cell.item.set(Some(earlier));
-                    item = Some(pending);
-                }
-                None => cell.item.set(Some(pending)),
-            }
-            // Intermediate executors only repoll branches whose waker fired.
-            // With none, the item itself makes the poll ready.
-            if !polled_directly(cell.root.get(), cx) {
-                cx.waker().wake_by_ref();
-            }
-            Poll::Pending
-        })
+        emit::Emit::new(self, item)
     }
 }
 impl Emitter<'_, Infallible> {
@@ -375,7 +368,7 @@ pub(crate) unsafe fn step_operation<Op, Fut: Future, Y>(
     match poll {
         Poll::Ready(result) => {
             *state = State::Finished;
-            match emitted.item.take() {
+            match emitted.deliver() {
                 Some(item) => {
                     *state = State::Returned(result);
                     Poll::Ready(ControlFlow::Continue(item))
@@ -383,7 +376,7 @@ pub(crate) unsafe fn step_operation<Op, Fut: Future, Y>(
                 None => Poll::Ready(ControlFlow::Break(result)),
             }
         }
-        Poll::Pending => match emitted.item.take() {
+        Poll::Pending => match emitted.deliver() {
             Some(item) => Poll::Ready(ControlFlow::Continue(item)),
             None => Poll::Pending,
         },
