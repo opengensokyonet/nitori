@@ -246,8 +246,10 @@ mod linked {
         }
         fn before_calls<KP: HookKeys<Self, Base, L, Root>>(
             _: HookView<'_, Self, Base, L, Root, KP>,
-            _: &Waker,
+            waker: &Waker,
         ) -> Option<Self::Returns> {
+            // runs again in the next poll, whatever the outer waker is
+            waker.wake_by_ref();
             ASK.with(|a| a.borrow_mut().take())
         }
     }
