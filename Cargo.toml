@@ -9,6 +9,7 @@ members = [
     "crates/nitori_crypto_aws_lc",
     "crates/nitori_crypto_ring",
     "crates/nitori_driver",
+    "crates/nitori_driver_macros",
     "crates/nitori_id",
     "crates/nitori_io",
     "crates/nitori_sync",
@@ -29,6 +30,7 @@ nitori_call_macros = { path = "crates/nitori_call_macros" }
 nitori_clock = { path = "crates/nitori_clock" }
 nitori_crypto = { path = "crates/nitori_crypto" }
 nitori_crypto_ring = { path = "crates/nitori_crypto_ring" }
+nitori_driver_macros = { path = "crates/nitori_driver_macros" }
 nitori_io = { path = "crates/nitori_io", default-features = false }
 pin-project-lite = "0.2.17"
 proc-macro2 = "1.0.107"

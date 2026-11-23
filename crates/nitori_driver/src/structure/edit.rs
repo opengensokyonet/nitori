@@ -53,7 +53,7 @@ impl<N> InsertError<N> {
 /// position among the parent's children is inferred from its kind.
 /// Returns the child's path.
 #[allow(clippy::type_complexity)]
-pub fn insert<R, P, X, CK, I>(
+pub(crate) fn insert<R, P, X, CK, I>(
     root: &mut Node<R, P>,
     at: X,
     key: KeyAt<ParentChildren<R, X>, I>,
@@ -88,10 +88,8 @@ pub type LastKind<R, X> = KindAt<LastChildren<R, X>, <X as SplitLast>::Index>;
 
 /// Take the node at `at` out of the tree, with every node below it.
 ///
-/// The nodes below it go with it, so they are removed before it; a node
-/// that others link to is removed only after them, which is the caller's
-/// to keep (the driver does).
-pub fn remove<R, P, X>(root: &mut Node<R, P>, at: X) -> Option<Node<LastKind<R, X>, P>>
+/// The nodes below it go with it.
+pub(crate) fn remove<R, P, X>(root: &mut Node<R, P>, at: X) -> Option<Node<LastKind<R, X>, P>>
 where
     R: KindFor<P>,
     X: SplitLast,
@@ -127,7 +125,7 @@ pub enum MoveError {
 /// Both ends are checked before the node is taken out: when the move
 /// fails the node has not moved, and keeps its handle.
 #[allow(clippy::type_complexity)]
-pub fn move_to<R, P, X, B>(
+pub(crate) fn move_to<R, P, X, B>(
     root: &mut Node<R, P>,
     at: X,
     to: B,

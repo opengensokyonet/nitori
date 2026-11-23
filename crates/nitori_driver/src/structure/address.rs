@@ -8,8 +8,8 @@ use frunk_core::{
 };
 
 use super::{
-    Child, ChildIndex, ChildList, ChildOfKind, ChildStorage, ChildStores, KeyAt, KindFor, Node,
-    NodeKind, Store,
+    Child, ChildIndex, ChildList, ChildOfKind, ChildStorage, ChildStores, KeyAt, KindAt, KindFor,
+    Node, NodeKind, Store,
 };
 
 /// The driver's address of a node at or below a node of the kind `K`.
@@ -86,7 +86,7 @@ impl<K: NodeKind> Eq for KeyRoute<K> {}
 
 /// The address of a node of the kind `T` at or below a node of the kind
 /// `K` by the keys its nodes are kept under, one per level: what a request
-/// names the node it is for by ([`NodeRequest`](crate::request::NodeRequest)).
+/// names the node it is for by.
 ///
 /// It follows from the kinds alone, as [`Address`] does, and its type says
 /// the kind it leads to, so a request for another kind does not compile.
@@ -121,6 +121,24 @@ impl<K: NodeKind> KeyAddress<K, K> {
         K::Children: ChildOfKind<CK, I>,
     {
         Self::below::<CK, I, CK>(key, KeyAddress::here())
+    }
+}
+impl<K: NodeKind> KeyAddress<K, K> {
+    /// The node at `below` under the child at the position `J` kept under
+    /// `key`.
+    pub(crate) fn below_at<J, T>(
+        key: KeyAt<K::Children, J>,
+        below: KeyAddress<KindAt<K::Children, J>, T>,
+    ) -> KeyAddress<K, T>
+    where
+        K::Children: ChildIndex<J>,
+    {
+        KeyAddress(
+            KeyRoute(Some(<K::Children as ChildIndex<J>>::inject_key(
+                key, below.0,
+            ))),
+            PhantomData,
+        )
     }
 }
 impl<K: NodeKind, T> KeyAddress<K, T> {

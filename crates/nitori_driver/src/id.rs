@@ -1,0 +1,159 @@
+//! Type-level numbers: what tells two components apart where a need is
+//! proved.
+//!
+//! A need finds the node it takes from by the components the nodes have,
+//! and says why when no node or more than one has the component. Counting
+//! needs telling component types apart by trait resolution, so every
+//! component has a number ([`Numbered`]), written as a list of bits
+//! ([`BCons`], [`B0`], [`B1`], [`BNil`]), the highest first. The derive
+//! gives the number; a generic type mixes in the numbers of its type
+//! parameters ([`Mixed`]).
+//!
+//! ```
+//! use nitori_driver::id::{False, Numbered, NumberEq, True};
+//!
+//! #[derive(Numbered)]
+//! struct Credit;
+//! #[derive(Numbered)]
+//! struct Keys;
+//! #[derive(Numbered)]
+//! struct Pair<A, B>(A, B);
+//!
+//! fn same<A: Numbered, B: Numbered>()
+//! where
+//!     A::Number: NumberEq<B::Number, Out = True>,
+//! {
+//! }
+//! fn differ<A: Numbered, B: Numbered>()
+//! where
+//!     A::Number: NumberEq<B::Number, Out = False>,
+//! {
+//! }
+//! same::<Pair<Credit, Keys>, Pair<Credit, Keys>>();
+//! differ::<Pair<Credit, Keys>, Pair<Keys, Credit>>();
+//! differ::<Credit, Keys>();
+//! ```
+use core::marker::PhantomData;
+
+use frunk_core::hlist::{HCons, HNil};
+
+/// The type-level number of a type: `#[derive(Numbered)]` for a
+/// component, and for every type a generic component is generic over.
+pub use nitori_driver_macros::Numbered;
+
+/// A type with a type-level number, a list of bits the highest first.
+///
+/// Two types of one crate never have the same number: the derive refuses
+/// the second. Across crates two numbers are the same by chance about once
+/// in 2⁶⁴, which nothing checks.
+pub trait Numbered {
+    /// The number: [`BCons`] of [`B0`] and [`B1`], ending in [`BNil`].
+    type Number;
+}
+
+/// The bit 0.
+pub struct B0;
+/// The bit 1.
+pub struct B1;
+/// The end of a list of bits.
+pub struct BNil;
+/// A bit `H`, then the lower bits `T`.
+pub struct BCons<H, T>(PhantomData<fn() -> (H, T)>);
+
+/// The answer yes, as a type.
+pub struct True;
+/// The answer no, as a type.
+pub struct False;
+
+/// Whether two lists of bits are the same: [`True`] or [`False`]. The
+/// highest bits are compared first, and the first that differs decides.
+pub trait NumberEq<B> {
+    /// [`True`] or [`False`].
+    type Out;
+}
+impl NumberEq<BNil> for BNil {
+    type Out = True;
+}
+impl<T: NumberEq<U>, U> NumberEq<BCons<B0, U>> for BCons<B0, T> {
+    type Out = T::Out;
+}
+impl<T: NumberEq<U>, U> NumberEq<BCons<B1, U>> for BCons<B1, T> {
+    type Out = T::Out;
+}
+impl<T, U> NumberEq<BCons<B1, U>> for BCons<B0, T> {
+    type Out = False;
+}
+impl<T, U> NumberEq<BCons<B0, U>> for BCons<B1, T> {
+    type Out = False;
+}
+
+/// Two lists of bits of one length, bit by bit exclusive-or.
+pub trait Xor<B> {
+    /// The list of the bits that differ.
+    type Out;
+}
+impl Xor<BNil> for BNil {
+    type Out = BNil;
+}
+impl<T: Xor<U>, U> Xor<BCons<B0, U>> for BCons<B0, T> {
+    type Out = BCons<B0, T::Out>;
+}
+impl<T: Xor<U>, U> Xor<BCons<B1, U>> for BCons<B1, T> {
+    type Out = BCons<B0, T::Out>;
+}
+impl<T: Xor<U>, U> Xor<BCons<B1, U>> for BCons<B0, T> {
+    type Out = BCons<B1, T::Out>;
+}
+impl<T: Xor<U>, U> Xor<BCons<B0, U>> for BCons<B1, T> {
+    type Out = BCons<B1, T::Out>;
+}
+
+/// A list of bits rotated left by one: the highest bit becomes the lowest.
+pub trait RotateLeft {
+    /// The rotated list.
+    type Out;
+}
+impl<H, T: PushBit<H>> RotateLeft for BCons<H, T> {
+    type Out = T::Out;
+}
+/// A list of bits with the bit `H` added as the lowest.
+pub trait PushBit<H> {
+    /// The longer list.
+    type Out;
+}
+impl<H> PushBit<H> for BNil {
+    type Out = BCons<H, BNil>;
+}
+impl<H, B, T: PushBit<H>> PushBit<H> for BCons<B, T> {
+    type Out = BCons<B, T::Out>;
+}
+
+/// The numbers of the type parameters of a generic type, one per
+/// position, as they are mixed into its own number: the first rotated by
+/// one, the second by two, and so on, then all of them exclusive-or.
+pub trait MixParams {
+    /// The mixed numbers.
+    type Out;
+}
+impl<N: RotateLeft> MixParams for HCons<N, HNil> {
+    type Out = N::Out;
+}
+impl<N, M, T> MixParams for HCons<N, HCons<M, T>>
+where
+    HCons<M, T>: MixParams,
+    N: Xor<<HCons<M, T> as MixParams>::Out>,
+    <N as Xor<<HCons<M, T> as MixParams>::Out>>::Out: RotateLeft,
+{
+    type Out = <<N as Xor<<HCons<M, T> as MixParams>::Out>>::Out as RotateLeft>::Out;
+}
+
+/// The number of a generic type: its own number `Own` exclusive-or the
+/// numbers of its type parameters `Params` (an `HList`), each rotated by
+/// its position ([`MixParams`]).
+///
+/// Rotating keeps the parameters' places apart, so `Pair<A, B>` and
+/// `Pair<B, A>` differ, and so do `Wrap<Wrap<X>>` and `X`.
+pub type Mixed<Own, Params> = <Own as Xor<<Params as MixParams>::Out>>::Out;
+
+#[cfg(test)]
+mod tests;

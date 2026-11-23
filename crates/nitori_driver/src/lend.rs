@@ -1,702 +1,146 @@
-//! Lending a node and the tree around it to a list of needs.
+//! Lending: a list of needs taken from the tree around a lend point and
+//! handed over as its view.
 //!
-//! The tree is split once into disjoint cells, each tagged by its place
-//! ([`cells`](ChainCells)). Pass 1 plucks a cell for every exclusive need,
-//! so a second exclusive need of the same place finds nothing and does not
-//! compile; what is left is frozen, and pass 2 selects a cell for every
-//! shared need, any number of times ([`Pass1`], [`Pass2`]). The view's type
-//! follows from the list of needs and the keyed positions alone
-//! ([`NeedList`]); every position is inferred where the structure and the
-//! parts are concrete.
-//!
-//! When a need is not met, the item-by-item check ([`Locate`],
-//! [`Places`]) reports which one: a need whose anchor, steps or component
-//! is not on the structure, two exclusive needs of one place, or a keyed
-//! need with the word that does not fit its store.
-//!
-//! ```
-//! use frunk_core::{HList, hlist::HNil, hlist_pat};
-//! use nitori_driver::{
-//!     lend::lend,
-//!     need::{At, Here, Kind, Mut, Ref, ToChild},
-//!     structure::{AtMostOne, Child, End, Node, NodeKind, Share, insert},
-//! };
-//!
-//! struct Root;
-//! struct Layer;
-//! impl NodeKind for Root {
-//!     type Children = HList![Child<Layer, AtMostOne>];
-//!     type Linked = HNil;
-//! }
-//! impl NodeKind for Layer {
-//!     type Children = HNil;
-//!     type Linked = HNil;
-//! }
-//! #[derive(Default)]
-//! struct Count(u32);
-//! #[derive(Default)]
-//! struct Limit(u32);
-//! struct Part;
-//! impl Share<Root> for Part {
-//!     type Data = HList![Count, Limit];
-//! }
-//! impl Share<Layer> for Part {
-//!     type Data = HList![Count];
-//! }
-//!
-//! let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! insert(&mut root, End, (), Node::<Layer, _>::new(Default::default())).ok().unwrap();
-//! type Needs = HList![
-//!     At<Kind<Root>, Here, Mut<Count>>,
-//!     At<Kind<Root>, Here, Ref<Limit>>,
-//!     At<Kind<Root>, ToChild<Layer>, Mut<Count>>,
-//! ];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |view| {
-//!     let hlist_pat![count, limit, layer] = view;
-//!     count.0 += limit.0 + 1;
-//!     if let Some(layer) = layer {
-//!         layer.0 += 1;
-//!     }
-//! })
-//! .unwrap();
-//! ```
-//!
-//! # What does not compile
-//!
-//! The examples below share a structure: a root with a layer (at most
-//! one) and items by a `u32` key, each with a `Count`; the root also has
-//! a `Limit`. Lending the root to the needs of every example but the
-//! failing one compiles:
-//!
-//! ```
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![
-//!     At<Kind<Root>, Here, Mut<Count>>,
-//!     At<Up<0>, Here, Ref<Limit>>,
-//!     At<Up<0>, ToChild<Item, ByKey<u32>>, MutList<HList![Count]>>,
-//!     At<Up<0>, ToChild<Layer>, Mut<Count>>,
-//! ];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! type OnItem = HList![
-//!     At<Up<0>, Here, Mut<Count>>,
-//!     At<Kind<Root>, ToChild<Item, ByKeyOthers<u32>>, Ref<Count>>,
-//!     At<Provides<Limit>, Here, Ref<Limit>>,
-//! ];
-//! lend::<OnItem, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! // The item-by-item check, which names the need when one fails.
-//! nitori_driver::lend::explain::<OnItem, Root, HList![Part], ItemAt, _, _, _, _>();
-//! ```
-//!
-//! Two exclusive needs of one place:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Kind<Root>, Here, Mut<Count>>, At<Up<0>, Here, Mut<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! An exclusive and a shared need of one place:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Kind<Root>, Here, Mut<Count>>, At<Up<0>, Here, Ref<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! A component not on the structure (the layer has no `Limit`):
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Kind<Root>, ToChild<Layer>, Mut<Limit>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! Every child by key (`ByKey`) of a store on the chain; the item lent is kept in it:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Kind<Root>, ToChild<Item, ByKey<u32>>, Mut<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! Every other child by key (`ByKeyOthers`) of a store off the chain:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Up<0>, ToChild<Item, ByKeyOthers<u32>>, Mut<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! Two keyed needs of one store, even of different components:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![
-//!     At<Up<0>, ToChild<Item, ByKey<u32>>, Mut<Count>>,
-//!     At<Up<0>, ToChild<Item, ByKey<u32>>, MutList<HList![Count]>>,
-//! ];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! Several components by key, one of them not in the children's data:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Up<0>, ToChild<Item, ByKey<u32>>, MutList<HList![Count, Limit]>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! Several components without a step by key:
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Up<0>, Here, MutList<HList![Count, Limit]>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, End, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-//!
-//! An anchor by content with two candidates on the way up (the item and the root both have `Count`):
-//!
-//! ```compile_fail
-//! # use frunk_core::{HList, hlist::HNil};
-//! # use nitori_driver::{
-//! #     lend::lend,
-//! #     need::{At, ByKey, ByKeyOthers, Here, Kind, Mut, MutList, Provides, Ref, ToChild, Up},
-//! #     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, Step, insert},
-//! # };
-//! # struct Root;
-//! # struct Layer;
-//! # struct Item;
-//! # impl NodeKind for Root {
-//! #     type Children = HList![Child<Layer, AtMostOne>, Child<Item, SlotVec<u32>>];
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Layer {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # impl NodeKind for Item {
-//! #     type Children = HNil;
-//! #     type Linked = HNil;
-//! # }
-//! # #[derive(Default)]
-//! # struct Count(u32);
-//! # #[derive(Default)]
-//! # struct Limit(u32);
-//! # struct Part;
-//! # impl Share<Root> for Part {
-//! #     type Data = HList![Count, Limit];
-//! # }
-//! # impl Share<Layer> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # impl Share<Item> for Part {
-//! #     type Data = HList![Count];
-//! # }
-//! # type ItemAt = Step<frunk_core::indices::There<frunk_core::indices::Here>, usize, End>;
-//! # let mut root: Node<Root, HList![Part]> = Node::new(Default::default());
-//! # let item: ItemAt = insert(&mut root, End, 1, Node::new(Default::default())).ok().unwrap();
-//! type Needs = HList![At<Provides<Count>, Here, Ref<Count>>];
-//! lend::<Needs, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
-//! ```
-pub(crate) mod cells;
-pub(crate) mod check;
-pub(crate) mod keyed;
-mod now;
-pub(crate) mod own_key;
-pub(crate) mod pass;
-pub(crate) mod view;
-pub(crate) mod writes;
-
-pub(crate) use cells::{All, Cell, ChainCells, FromSplit, GivenKey, LinkSpec, Others, OwnKeyCell};
-pub(crate) use check::{Locate, Pairwise, Places};
-pub use keyed::{Keyed, KeyedList, KeyedRef};
-pub(crate) use keyed::{
-    KeyedCell, KeyedItem, KeyedMany, KeyedManyP, KeyedP, KeyedPos, KeyedRefItem, KeyedShape, Refs,
-    SharedKeyed,
-};
-pub(crate) use pass::{CellOf, Cx, Freeze, FreezeOne, KeyedPositions, Pass1, Pass2, Shape};
-pub(crate) use view::{Build, NeedList};
-pub use view::{Flat, NeedSet, ViewOf};
-pub(crate) use writes::Writes;
-
-use frunk_core::hlist::{HCons, HNil};
-
+//! A lend point is a kind of node (its place in the structure, as types)
+//! and a node's full key (the keys from the root down to it). A lending
+//! walks the tree once into one table of rows per kind ([`table`]), takes
+//! what each need's plan names in two passes ([`plan`]), and makes the
+//! view of each need from its handles ([`Lend`]). Where the needs are
+//! proved, their checks ([`check`]) give the reasons a list does not hold.
+// The engine computes with types; a marker over several of them is what
+// it is made of.
+#![allow(clippy::type_complexity)]
 use crate::{
-    event::{Outbox, OutboxCell},
-    need::ChainOf,
-    structure::{KindFor, Node, NodeKind, PathFrom},
+    need::{Need, Pos},
+    structure::{KindFor, Node, NodeKind},
 };
 
-/// The node lent is not in the tree.
-#[derive(Debug, snafu::Snafu, PartialEq, Eq)]
-#[snafu(module)]
-pub enum LendError {
-    /// No node at the path.
-    #[snafu(display("no node at the path lent"))]
-    NoNode,
+pub(crate) mod check;
+pub(crate) mod list;
+pub(crate) mod own;
+pub(crate) mod plan;
+pub(crate) mod table;
+pub(crate) mod tree;
+pub(crate) mod under;
+pub(crate) mod up;
+
+#[cfg(test)]
+mod tests;
+
+use check::{Check, Disjoint, Takes};
+use plan::{Plan, Run};
+use table::{KindTab, TabAt};
+use tree::{Ctx, Cx, Locate};
+
+/// The proof that the need `Self` can be lent at the lend point `C`, at
+/// the position `P` (inferred): what it takes and how its view is made.
+pub trait Lend<C: Ctx, P: Pos>: Need {
+    /// What the need takes.
+    type Cols: Plan;
+    /// The view, from the handles of the plan; `at` is the lend point's
+    /// full key.
+    fn build<'a>(hs: <Self::Cols as Plan>::Hs<'a>, at: &C::Fk) -> Self::View<'a, P>
+    where
+        Self: 'a;
 }
 
-/// The links of the node a path `X` from `R` leads to.
-pub type LinkedOf<R, X> = <<X as PathFrom<R>>::Target as NodeKind>::Linked;
-/// The link the split takes, for the links of the node at `X`.
-pub type LinkOf<R, P, X, IL> = <LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::Lk;
-/// Where the needs of the node at `X` from `R` are lent.
-pub type CxOf<R, P, X> = Cx<<X as ChainOf<R, HNil>>::Chain, P>;
-/// Every cell lent around the node at `X` from `R`, the key read from
-/// `Kc`.
+/// The lend point of the kind `L` in the tree whose root is `R`, for the
+/// parts `Pt`; `IL` is where `L` is in the structure (inferred).
+pub type PointCx<R, Pt, L, IL> = Cx<R, Pt, <R as Locate<L, IL>>::Route, list::Z>;
+/// The full key of a node of the kind `L`.
+pub type PointFk<R, Pt, L, IL> = <PointCx<R, Pt, L, IL> as Ctx>::Fk;
+
+/// Code that takes a view at a position it is generic over, as a call
+/// does: the driver gives it the position it inferred.
+pub trait Visit<N: Need> {
+    /// What it gives back.
+    type Out;
+    /// Use the view of `N` at the position `P`.
+    fn visit<'v, P: Pos>(self, view: N::View<'v, P>) -> Self::Out;
+}
+
+/// Lend the needs `N` at the node of the kind `L` with the full key `at`
+/// to `f`, with the context `cx` of the lending; `None` when no node has
+/// that full key.
 ///
-/// The outbox comes first; the cells of the tree follow.
-pub type CellsOf<'a, R, P, X, IL, T = (), Kc = FromSplit> =
-    HCons<OutboxCell<'a, T>, <X as ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>, Kc>>::Out>;
-/// The keyed positions of the needs `N` at `X`.
-pub type PositionsOf<N, R, P, X, IK> = <N as KeyedPositions<CxOf<R, P, X>, IK>>::KP;
-/// Pass 1's result for the needs `N` at `X`.
-pub type Raw1Of<'a, N, R, P, X, IL, I1, T = (), Kc = FromSplit> =
-    <N as Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, I1>>::Raw;
-/// What pass 1 leaves for the needs `N` at `X`.
-pub type Rem1Of<'a, N, R, P, X, IL, I1, T = (), Kc = FromSplit> =
-    <N as Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, I1>>::Rem;
-/// What pass 1 leaves, frozen.
-pub type FrozenOf<'a, N, R, P, X, IL, I1, T = (), Kc = FromSplit> =
-    <Rem1Of<'a, N, R, P, X, IL, I1, T, Kc> as Freeze>::Out;
-/// Pass 2's result for the needs `N` at `X`.
-pub type Raw2Of<'a, N, R, P, X, IL, I1, I2, T = (), Kc = FromSplit> =
-    <N as Pass2<'a, CxOf<R, P, X>, FrozenOf<'a, N, R, P, X, IL, I1, T, Kc>, I2>>::Raw;
-
-/// The list of needs `Self` lent at the path `X` from the root `R`, for
-/// the parts `P`, with the instant `T` ([`Now`](crate::need::Now)); `I` is
-/// every position, inferred here once. The key [`OwnKey`](crate::need::OwnKey)
-/// reads comes from `Kc` ([`OwnKeySource`](cells::OwnKeySource)).
-#[diagnostic::on_unimplemented(
-    message = "the needs `{Self}` cannot be lent at `{X}`",
-    label = "a need is not met",
-    note = "a need's anchor, steps or component is not on this structure, two needs take the same place and one is exclusive, or a keyed need uses the word that does not fit its store (`ByKey` off the chain, `ByKeyOthers` on it), or a `Now<I>` has another instant than the clock's, or an `OwnKey<K>` is at the root or has another key than its place's; `explain::<Needs, Root, Parts, Path, _, _, _, _>()` names the need"
-)]
-pub trait LendAt<'a, R: KindFor<P>, P, X, I, T = (), Kc = FromSplit>: NeedSet<P> {
-    /// The keyed positions.
-    type Positions: KeyedList<P, Self::Keyed>;
-    /// Lend the node at `at` and the tree around it to `f`; what the view
-    /// publishes goes to `outbox`, and the instant it holds is lent.
-    fn lend<O>(
-        root: &'a mut Node<R, P>,
-        at: X,
-        outbox: &'a Outbox<T>,
-        own: Kc,
-        f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> O,
-    ) -> Result<O, LendError>;
-}
-impl<'a, N, R, P, X, T: 'a, Kc, IL, IC, IP, IK, I1, I2>
-    LendAt<'a, R, P, X, (IL, IC, IP, IK, I1, I2), T, Kc> for N
+/// The position `P` is inferred, or given by the caller that proved it
+/// elsewhere.
+#[allow(clippy::type_complexity)]
+pub(crate) fn lend<R, Pt: 'static, L, IL, N, P, X, F, O>(
+    root: &mut Node<R, Pt>,
+    at: &PointFk<R, Pt, L, IL>,
+    cx: &mut X,
+    f: F,
+) -> Option<O>
 where
-    R: KindFor<P>,
-    X: PathFrom<R> + ChainOf<R, HNil>,
-    LinkedOf<R, X>: LinkSpec<R, P, X, IL>,
-    X: ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>, Kc>,
-    N: NeedSet<P>,
-    N: Locate<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, IC>,
-    N: Places<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, IP>,
-    <N as Places<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, IP>>::Out: Pairwise,
-    N: KeyedPositions<CxOf<R, P, X>, IK>,
-    PositionsOf<N, R, P, X, IK>: KeyedList<P, N::Keyed>,
-    N: Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, I1>,
-    Rem1Of<'a, N, R, P, X, IL, I1, T, Kc>: Freeze,
-    N: Pass2<'a, CxOf<R, P, X>, FrozenOf<'a, N, R, P, X, IL, I1, T, Kc>, I2>,
-    N: Build<
-            'a,
-            P,
-            N::Keyed,
-            PositionsOf<N, R, P, X, IK>,
-            Raw1Of<'a, N, R, P, X, IL, I1, T, Kc>,
-            Raw2Of<'a, N, R, P, X, IL, I1, I2, T, Kc>,
+    R: KindFor<Pt> + NodeKind + Locate<L, IL>,
+    PointCx<R, Pt, L, IL>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL>, P>,
+    N: Takes<PointCx<R, Pt, L, IL>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL>, P>,
+    P: Pos,
+    R: TabAt<
+            Pt,
+            frunk_core::hlist::HNil,
+            <R as Locate<L, IL>>::Route,
+            AtFk = PointFk<R, Pt, L, IL>,
         >,
+    N::Cols: Run<R, Pt, X>,
+    F: for<'v> FnOnce(N::View<'v, P>) -> O,
 {
-    type Positions = PositionsOf<N, R, P, X, IK>;
-    fn lend<O>(
-        root: &'a mut Node<R, P>,
-        at: X,
-        outbox: &'a Outbox<T>,
-        own: Kc,
-        f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> O,
-    ) -> Result<O, LendError> {
-        let link = <LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::find(root, &at)?;
-        let cells = HCons {
-            head: Cell::new(outbox),
-            tail: at.cells(root, link, own)?,
-        };
-        let (raw1, rem) = <N as Pass1<'a, CxOf<R, P, X>, _, I1>>::take(cells);
-        let frozen = rem.freeze();
-        let raw2 = <N as Pass2<'a, CxOf<R, P, X>, _, I2>>::get(&frozen);
-        Ok(f(
-            <N as Build<'a, P, N::Keyed, Self::Positions, _, _>>::view(raw1, raw2),
-        ))
+    let mut tab = <R as KindTab<Pt, frunk_core::hlist::HNil>>::Table::default();
+    R::fill(root, frunk_core::hlist::HNil, &mut tab);
+    if !R::rows(&tab).iter().any(|(f, _)| f == at) {
+        return None;
     }
+    let ex = <N::Cols as Run<R, Pt, X>>::take(&mut tab, cx);
+    let store = <N::Cols as Run<R, Pt, X>>::gather(&tab);
+    let hs = <N::Cols as Run<R, Pt, X>>::handles(ex, &store);
+    Some(f(N::build(hs, at)))
 }
 
-/// Lend the node at `at` and the tree around it to the needs `N`, and run
-/// `f` on their view; what the view publishes ([`Publish`](crate::event::Publish))
-/// goes to `outbox`.
-///
-/// Every position is inferred here; the type parameters after `N` are
-/// written `_`. A node on the path not in the tree is an error; a linked
-/// node not there breaks an invariant of the structure and panics.
-pub fn lend<'a, N, R, P, X, I, T>(
-    root: &'a mut Node<R, P>,
-    at: X,
-    outbox: &'a Outbox,
-    f: impl FnOnce(ViewOf<'a, N, P, N::Positions>) -> T,
-) -> Result<T, LendError>
+/// [`lend`], handing the view to code generic over its position.
+#[allow(clippy::type_complexity)]
+pub(crate) fn lend_visit<R, Pt: 'static, L, IL, N, P, X, V>(
+    root: &mut Node<R, Pt>,
+    at: &PointFk<R, Pt, L, IL>,
+    cx: &mut X,
+    v: V,
+) -> Option<V::Out>
 where
-    R: KindFor<P>,
-    N: LendAt<'a, R, P, X, I>,
+    R: KindFor<Pt> + NodeKind + Locate<L, IL>,
+    PointCx<R, Pt, L, IL>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL>, P>,
+    N: Takes<PointCx<R, Pt, L, IL>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL>, P>,
+    P: Pos,
+    R: TabAt<
+            Pt,
+            frunk_core::hlist::HNil,
+            <R as Locate<L, IL>>::Route,
+            AtFk = PointFk<R, Pt, L, IL>,
+        >,
+    N::Cols: Run<R, Pt, X>,
+    V: Visit<N>,
 {
-    N::lend(root, at, outbox, FromSplit, f)
+    lend::<R, Pt, L, IL, N, P, X, _, _>(root, at, cx, |view| v.visit::<P>(view))
 }
 
-/// The item-by-item check of the needs `N` at the path `X` from `R`, each
-/// bound on its own, so that the first error names the failing need. It
-/// does nothing; call it to read why a lend does not compile.
-pub fn explain<N, R, P, X, IL, IC, IP, IK>()
+/// Prove the needs `N` at the kind `L` of the tree whose root is `R`, for
+/// the parts `Pt`, without lending them: what the checks of a lending
+/// report, for the examples of the documentation.
+#[doc(hidden)]
+#[allow(private_bounds)]
+pub fn assert_lends<R, Pt, L, N, IL, P>()
 where
-    R: KindFor<P>,
-    X: PathFrom<R> + ChainOf<R, HNil>,
-    LinkedOf<R, X>: LinkSpec<R, P, X, IL>,
-    X: ChainCells<'static, R, P, HNil, LinkOf<R, P, X, IL>>,
-    N: Locate<CxOf<R, P, X>, CellsOf<'static, R, P, X, IL>, IC>,
-    N: Places<CxOf<R, P, X>, CellsOf<'static, R, P, X, IL>, IP>,
-    <N as Places<CxOf<R, P, X>, CellsOf<'static, R, P, X, IL>, IP>>::Out: Pairwise,
-    N: KeyedPositions<CxOf<R, P, X>, IK>,
+    R: KindFor<Pt> + NodeKind + Locate<L, IL>,
+    PointCx<R, Pt, L, IL>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL>, P>,
+    N: Takes<PointCx<R, Pt, L, IL>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL>, P>,
+    P: Pos,
 {
 }

@@ -1,0 +1,15 @@
+[package]
+name = "nitori_driver_macros"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+description = "The derive of the type-level numbers of nitori_driver"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true

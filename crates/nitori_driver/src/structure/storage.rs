@@ -26,6 +26,11 @@ pub trait Store<N, K, H>: Default {
     fn find(&self, key: &K) -> Option<H>;
     /// The handles of every node now kept.
     fn handles(&self) -> impl Iterator<Item = H>;
+    /// Every node now kept with its key, exclusive.
+    fn iter_mut<'s>(&'s mut self) -> impl Iterator<Item = (&'s K, &'s mut N)>
+    where
+        K: 's,
+        N: 's;
 }
 
 /// A storage kind: how many children of a kind a parent has, the key of
@@ -90,6 +95,12 @@ impl<N> Store<N, (), ()> for Option<N> {
     fn handles(&self) -> impl Iterator<Item = ()> {
         self.iter().map(|_| ())
     }
+    fn iter_mut<'s>(&'s mut self) -> impl Iterator<Item = (&'s (), &'s mut N)>
+    where
+        N: 's,
+    {
+        self.as_mut().into_iter().map(|n| (&(), n))
+    }
 }
 
 /// Any number of children told apart by a key `K`: the handle is the index
@@ -145,5 +156,14 @@ impl<K: Clone + Eq, N> Store<N, K, usize> for SlotVecStore<K, N> {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| s.as_ref().map(|_| i))
+    }
+    fn iter_mut<'s>(&'s mut self) -> impl Iterator<Item = (&'s K, &'s mut N)>
+    where
+        K: 's,
+        N: 's,
+    {
+        self.slots
+            .iter_mut()
+            .filter_map(|s| s.as_mut().map(|(k, n)| (&*k, n)))
     }
 }

@@ -14,9 +14,8 @@ use super::{Child, ChildIndex, ChildList, ChildStorage, NodeKind, StoreOf};
 pub trait Share<K> {
     /// The components.
     type Data: HList + 'static;
-    /// What the part keeps of its share after the root of the tree ended
-    /// ([`Hooks::remains`](crate::hooks::Hooks::remains)); `()` by default.
-    /// Only the root's is kept.
+    /// What the part keeps of its share after the root of the tree ended;
+    /// `()` by default. Only the root's is kept.
     type Remains: Default + 'static = ();
 }
 

@@ -1,6 +1,5 @@
-//! Node kinds, their children and their links.
-use alloc::vec::Vec;
-use core::{any::TypeId, convert::Infallible, marker::PhantomData};
+//! Node kinds and their children.
+use core::{convert::Infallible, marker::PhantomData};
 
 use frunk_core::{
     coproduct::{CNil, Coproduct},
@@ -9,34 +8,21 @@ use frunk_core::{
 };
 
 use super::{Address, ChildStorage, KeyRoute};
-use crate::request::Request;
 
-/// A kind of node: the kinds of its children and the nodes it links to.
+/// A kind of node: the kinds of its children.
 ///
 /// A kind names the same children wherever it is used; two structures
 /// that need different children use different kinds.
 pub trait NodeKind: 'static + Sized {
     /// The children, an `HList` of [`Child`]`<kind, storage kind>`.
     type Children: ChildList;
-    /// The nodes a node of this kind links to, an `HList` of [`Link`]s
-    /// (`HNil` for none).
-    type Linked: LinkList<Self>;
-    /// Why a node of this kind is asked to end, as its components' end
-    /// hooks are told ([`Hooks::end`](crate::hooks::Hooks::end),
-    /// [`EndCause::Reason`](crate::hooks::EndCause::Reason)); `()` by
-    /// default. A node that ends because a node above it ends, because no
-    /// node links to it any more or because the driver was dropped is told
-    /// so instead.
+    /// Why a node of this kind is asked to end, when the one ending it
+    /// gives a reason; `()` by default.
     type EndReason: 'static = ();
-    /// What the one adding a node of this kind gives it to start from,
-    /// handed to every component's [`build`](crate::hooks::Hooks::build)
-    /// in turn; `()` by default. A component takes out what it keeps of
-    /// it, such as a value that moves once.
+    /// What the one adding a node of this kind gives it to start from;
+    /// `()` by default. Each component takes out what it keeps of it, such
+    /// as a value that moves once.
     type Start: 'static = ();
-    /// What a node of this kind is asked to change in its own subtree, and
-    /// how it does it ([`Request`]); `Infallible` for a kind that is asked
-    /// nothing.
-    type Request: Request<Self> = Infallible;
 }
 
 /// The kind and the storage kind of the first child of an empty list of
@@ -46,7 +32,6 @@ pub trait NodeKind: 'static + Sized {
 pub enum NoChild {}
 impl NodeKind for NoChild {
     type Children = HNil;
-    type Linked = HNil;
     type Start = Infallible;
 }
 impl super::storage::sealed::Sealed for NoChild {}
@@ -80,6 +65,12 @@ impl<N> super::Store<N, Infallible, Infallible> for NoStore {
     fn handles(&self) -> impl Iterator<Item = Infallible> {
         core::iter::empty()
     }
+    fn iter_mut<'s>(&'s mut self) -> impl Iterator<Item = (&'s Infallible, &'s mut N)>
+    where
+        N: 's,
+    {
+        core::iter::empty()
+    }
 }
 
 /// A child in a [`NodeKind::Children`] list: the kind `K`, kept by the
@@ -94,9 +85,6 @@ pub trait ChildList: 'static {
     /// Which child and its key, then the key address below it: a sum with
     /// one alternative for each child.
     type KeyAddr: Clone + PartialEq + 'static;
-    /// The kinds of the children and of every node below them that are the
-    /// target of a link, pushed onto `out`.
-    fn link_targets(out: &mut Vec<TypeId>);
     /// `addr` with its first `levels` levels (at least one) taken from
     /// `prefix`; `None` when the two go to different children there.
     fn splice(addr: &Self::Addr, prefix: &Self::Addr, levels: usize) -> Option<Self::Addr>;
@@ -113,7 +101,6 @@ impl ChildList for HNil {
     type Tail = HNil;
     type Addr = CNil;
     type KeyAddr = CNil;
-    fn link_targets(_: &mut Vec<TypeId>) {}
     fn splice(addr: &CNil, _: &CNil, _: usize) -> Option<CNil> {
         match *addr {}
     }
@@ -124,11 +111,6 @@ impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildList for HCons<Child<K, S>
     type Tail = T;
     type Addr = Coproduct<(S::Handle, Address<K>), T::Addr>;
     type KeyAddr = Coproduct<(S::Key, KeyRoute<K>), T::KeyAddr>;
-    fn link_targets(out: &mut Vec<TypeId>) {
-        K::Linked::targets(out);
-        K::Children::link_targets(out);
-        T::link_targets(out);
-    }
     fn splice(addr: &Self::Addr, prefix: &Self::Addr, levels: usize) -> Option<Self::Addr> {
         match (addr, prefix) {
             (Coproduct::Inl((_, below)), Coproduct::Inl((h, from))) => Some(Coproduct::Inl((
@@ -229,51 +211,3 @@ pub type StorageAt<L, I> = <L as ChildIndex<I>>::Storage;
 pub type KeyAt<L, I> = <StorageAt<L, I> as ChildStorage>::Key;
 /// The handle of the child at `I` of the list `L`.
 pub type HandleAt<L, I> = <StorageAt<L, I> as ChildStorage>::Handle;
-
-/// The links of a node of the kind `K`.
-pub trait LinkList<K: NodeKind> {
-    /// The kinds the links point to, pushed onto `out`.
-    fn targets(out: &mut Vec<TypeId>);
-}
-impl<K: NodeKind> LinkList<K> for HNil {
-    fn targets(_: &mut Vec<TypeId>) {}
-}
-impl<K: NodeKind, L: Link<K>, T: LinkList<K>> LinkList<K> for HCons<L, T> {
-    fn targets(out: &mut Vec<TypeId>) {
-        out.push(TypeId::of::<L::Target>());
-        T::targets(out);
-    }
-}
-
-/// The start a node of the kind `Self` gives the node of the kind `CK` it
-/// links to, when that node is not there yet and is built first; not
-/// called when it is there.
-pub trait LinkedStart<CK: NodeKind>: NodeKind {
-    /// The linked node's start, from the linking node's own; a part of it
-    /// may be taken out.
-    fn linked_start(start: &mut Self::Start) -> CK::Start;
-}
-
-/// A link of a node of the kind `K` to a node that is not above it.
-///
-/// The linked node is there as long as the node linking to it is: the
-/// structure starts and ends them together, and a node is removed only
-/// after the last node linking to it.
-pub trait Link<K: NodeKind> {
-    /// The kind of the linked node.
-    type Target: NodeKind;
-    /// The linked node's start, when the node linking to it builds it.
-    fn linked_start(start: &mut K::Start) -> <Self::Target as NodeKind>::Start;
-}
-
-/// A link to the root's child of the kind `CK` kept under the linking
-/// node's own key, the key it has under its own parent. Its position among
-/// the root's children is inferred where the root is known; the linking
-/// kind says what start the linked node gets ([`LinkedStart`]).
-pub struct ByOwnKey<CK>(PhantomData<fn() -> CK>);
-impl<K: LinkedStart<CK>, CK: NodeKind> Link<K> for ByOwnKey<CK> {
-    type Target = CK;
-    fn linked_start(start: &mut K::Start) -> CK::Start {
-        K::linked_start(start)
-    }
-}

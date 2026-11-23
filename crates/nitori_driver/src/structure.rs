@@ -3,9 +3,9 @@
 //!
 //! The code that uses the driver declares its structure. A node kind
 //! ([`NodeKind`]) lists its children, each a kind and a storage kind
-//! ([`Child`]), and the nodes it links to ([`NodeKind::Linked`]). The kinds
-//! below a kind are declared the same way, so the structure is a tree of
-//! kinds with one root. A kind may not be its own child or descendant.
+//! ([`Child`]). The kinds below a kind are declared the same way, so the
+//! structure is a tree of kinds with one root. A kind may not be its own
+//! child or descendant, and is at one place of the structure only.
 //!
 //! What a node holds comes from the parts: each part keeps a share
 //! ([`Share`]) in each kind of node, and a node's data is the list of the
@@ -22,11 +22,12 @@ mod storage;
 pub use address::{Address, ChildAddresses, KeyAddress, KeyRoute, resolve_node};
 pub use edit::{
     InsertError, LastChildren, LastKind, MoveError, NoParentError, OccupiedError, ParentChildren,
-    insert, move_to, remove,
 };
+#[allow(unused_imports)]
+pub(crate) use edit::{insert, move_to, remove};
 pub use kind::{
-    ByOwnKey, Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, Link,
-    LinkList, LinkedStart, NoChild, NoStore, NodeKind, StorageAt,
+    Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, NoChild,
+    NoStore, NodeKind, StorageAt,
 };
 pub use node::{
     ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, RemainsList, RemainsOf, Share, Shares,

@@ -257,9 +257,17 @@ name = "nitori_driver"
 version = "0.0.0"
 dependencies = [
  "frunk_core",
- "nitori_call",
- "nitori_clock",
+ "nitori_driver_macros",
  "snafu",
+]
+
+[[package]]
+name = "nitori_driver_macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
