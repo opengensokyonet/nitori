@@ -37,7 +37,10 @@ pub trait MonotonicClock: Clone {
     /// The current instant.
     fn now(&self) -> Self::Instant;
     /// `at` plus `by`, or `None` when the sum is past the last instant the
-    /// type can represent.
+    /// type can represent. A clock may also give `None` for a sum its
+    /// timer cannot sleep until, so that
+    /// [`sleep_until`](Self::sleep_until) can be given every instant it
+    /// returns.
     fn checked_add(&self, at: Self::Instant, by: Duration) -> Option<Self::Instant>;
     /// A timer that ends at `at`.
     fn sleep_until(&self, at: Self::Instant) -> Self::Sleep;
