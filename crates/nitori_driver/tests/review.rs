@@ -24,10 +24,12 @@ use nitori_driver::{
     },
     lend::KeyedList,
     need::{At, Here, Kind, Mut, ToChild, Up},
-    request::{Edit, Editor, NodeRequest, Request},
+    request::{
+        Edit, Editor, EndError, LinkedToError, NoChildError, NodeRequest, ReplaceError, Request,
+    },
     structure::{
-        AtMostOne, ByOwnKey, Child, End, KeyAddress, LinkedStart, MoveError, NodeKind, NodePath,
-        Share, SlotVec, Store,
+        AtMostOne, ByOwnKey, Child, End, KeyAddress, LinkedStart, MoveError, NoParentError,
+        NodeKind, NodePath, OccupiedError, Share, SlotVec, Store,
     },
 };
 
@@ -158,7 +160,9 @@ fn a_failed_move_leaves_the_node_where_it_was() {
     let _ = poll(&mut d);
     assert_eq!(
         RESULT.with(|r| r.borrow_mut().take()),
-        Some(Err(MoveError::Occupied))
+        Some(Err(MoveError::Occupied {
+            source: OccupiedError
+        }))
     );
     let a1n = a1.node(d.root().unwrap()).unwrap();
     assert_eq!(a1n.children.head.key(1), Some(&11));
@@ -219,11 +223,11 @@ mod linked {
     pub struct ReplaceEntry(pub u32);
     thread_local! {
         pub static QUEUE: RefCell<Vec<ReplaceEntry>> = const { RefCell::new(Vec::new()) };
-        pub static REPLACED: Cell<Option<bool>> = const { Cell::new(None) };
+        pub static REPLACED: RefCell<Option<Result<(), ReplaceError>>> = const { RefCell::new(None) };
     }
     impl Request<Root> for ReplaceEntry {
         fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
-            REPLACED.with(|r| r.set(Some(edit.replace::<Entry, _>(self.0, (), ()))));
+            REPLACED.with(|r| *r.borrow_mut() = Some(edit.replace::<Entry, _>(self.0, (), ())));
         }
     }
     impl ShareCalls<Root> for Base {
@@ -288,7 +292,25 @@ fn a_linked_node_is_not_replaced() {
     QUEUE.with(|q| q.borrow_mut().push(ReplaceEntry(1)));
     wake();
     let _ = poll(&mut d);
-    assert_eq!(REPLACED.with(Cell::get), Some(false));
+    assert_eq!(
+        REPLACED.with(|r| r.borrow_mut().take()),
+        Some(Err(ReplaceError::End {
+            source: EndError::LinkedTo {
+                source: LinkedToError
+            }
+        }))
+    );
+    QUEUE.with(|q| q.borrow_mut().push(ReplaceEntry(5)));
+    wake();
+    let _ = poll(&mut d);
+    assert_eq!(
+        REPLACED.with(|r| r.borrow_mut().take()),
+        Some(Err(ReplaceError::End {
+            source: EndError::NoChild {
+                source: NoChildError
+            }
+        }))
+    );
     d.add::<Other, _, _, _>(End, 8, ()).unwrap();
     assert!(d.remove(p1, ()));
     let r = d.root().unwrap();
@@ -549,12 +571,16 @@ fn an_add_fails_for_its_reason() {
     let a1 = d.add::<A, _, _, _>(End, 1, ()).unwrap();
     assert_eq!(
         d.add::<A, _, _, _>(End, 1, ()).err(),
-        Some(AddError::Occupied)
+        Some(AddError::Occupied {
+            source: OccupiedError
+        })
     );
     assert!(d.remove(a1, ()));
     assert_eq!(
         d.add::<B, _, _, _>(a1, 1, ()).err(),
-        Some(AddError::NoParent)
+        Some(AddError::NoParent {
+            source: NoParentError
+        })
     );
     d.end(());
     assert_eq!(d.add::<A, _, _, _>(End, 2, ()).err(), Some(AddError::Ended));

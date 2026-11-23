@@ -259,6 +259,7 @@ dependencies = [
  "frunk_core",
  "nitori_call",
  "nitori_clock",
+ "snafu",
 ]
 
 [[package]]

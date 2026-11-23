@@ -540,8 +540,6 @@ pub(crate) mod pass;
 pub(crate) mod view;
 pub(crate) mod writes;
 
-use core::fmt;
-
 pub(crate) use cells::linked;
 #[allow(unused_imports)]
 pub(crate) use cells::{
@@ -583,19 +581,12 @@ use crate::{
 };
 
 /// The node lent is not in the tree.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, snafu::Snafu, PartialEq, Eq)]
 pub enum LendError {
     /// No node at the path.
+    #[snafu(display("no node at the path lent"))]
     NoNode,
 }
-impl fmt::Display for LendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NoNode => "no node at the path lent",
-        })
-    }
-}
-impl core::error::Error for LendError {}
 
 /// The links of the node a path `X` from `R` leads to.
 pub type LinkedOf<R, X> = <<X as PathFrom<R>>::Target as NodeKind>::Linked;

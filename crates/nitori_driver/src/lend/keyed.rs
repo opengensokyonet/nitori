@@ -463,7 +463,10 @@ impl<'w, P, N: KeyedDesc, KP: KeyedPos<P, N>> Keyed<'w, P, N, KP> {
     /// The children kept under several keys at once, exclusive, in the
     /// order of `keys`. A key not there finds `None`, and so does a key
     /// after its first place in `keys`.
-    pub fn get_many_mut<const M: usize>(&mut self, keys: [&N::Key; M]) -> [Option<N::Mut<'_>>; M]
+    pub fn get_mut_each_once<const M: usize>(
+        &mut self,
+        keys: [&N::Key; M],
+    ) -> [Option<N::Mut<'_>>; M]
     where
         N::Key: PartialEq,
     {

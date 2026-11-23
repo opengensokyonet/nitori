@@ -140,7 +140,7 @@ fn every_child_by_key() {
             paths.get_mut(&PathId(0)).unwrap().0 = 10;
             paths.get_mut(&PathId(2)).unwrap().0 = 20;
             if let [Some(a), Some(b), dup] =
-                paths.get_many_mut([&PathId(0), &PathId(2), &PathId(0)])
+                paths.get_mut_each_once([&PathId(0), &PathId(2), &PathId(0)])
             {
                 core::mem::swap(a, b);
                 assert!(dup.is_none());
@@ -224,7 +224,7 @@ fn several_components_by_key() {
             for (id, hlist_pat![_, state]) in paths.iter_mut() {
                 state.0 += u64::from(id.0);
             }
-            if let [Some(a), Some(b)] = paths.get_many_mut([&PathId(0), &PathId(2)]) {
+            if let [Some(a), Some(b)] = paths.get_mut_each_once([&PathId(0), &PathId(2)]) {
                 let hlist_pat![a_streams, _] = a;
                 let hlist_pat![b_streams, _] = b;
                 core::mem::swap(a_streams, b_streams);

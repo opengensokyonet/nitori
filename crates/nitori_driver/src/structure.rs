@@ -21,7 +21,8 @@ mod storage;
 
 pub use address::{Address, ChildAddresses, KeyAddress, resolve_node};
 pub use edit::{
-    InsertError, LastChildren, LastKind, MoveError, ParentChildren, insert, move_to, remove,
+    InsertError, LastChildren, LastKind, MoveError, NoParentError, OccupiedError, ParentChildren,
+    insert, move_to, remove,
 };
 pub use kind::{
     ByOwnKey, Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, Link,

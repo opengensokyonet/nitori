@@ -69,7 +69,7 @@
 //! struct AddLayer;
 //! impl Request<Root> for AddLayer {
 //!     fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
-//!         edit.add::<Layer, _>((), ());
+//!         let _ = edit.add::<Layer, _>((), ());
 //!     }
 //! }
 //! # struct Part1;
@@ -156,7 +156,7 @@
 //! struct AddLayer;
 //! impl Request<Root> for AddLayer {
 //!     fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
-//!         edit.add::<Layer, _>((), ());
+//!         let _ = edit.add::<Layer, _>((), ());
 //!     }
 //! }
 //! # struct Part1;
@@ -217,11 +217,13 @@
 //! struct AddRight;
 //! impl Request<Left> for AddRight {
 //!     fn apply<E: Editor<Left>>(self, mut edit: Edit<'_, E, Left>) {
-//!         edit.add::<Right, _>((), ());
+//!         let _ = edit.add::<Right, _>((), ());
 //!     }
 //! }
 //! ```
 use core::{convert::Infallible, fmt, marker::PhantomData};
+
+use snafu::Snafu;
 
 use frunk_core::{
     coproduct::{CNil, CoprodInjector, Coproduct, CoproductEmbedder},
@@ -229,7 +231,7 @@ use frunk_core::{
 };
 
 use crate::{
-    driver::Place,
+    driver::{AddError, Place},
     structure::{ChildOfKind, KeyAddress, KeyAt, MoveError, NodeKind, PathFrom, StorageAt},
 };
 
@@ -248,8 +250,9 @@ impl<K: NodeKind> Request<K> for Infallible {
 pub(crate) mod sealed {
     use frunk_core::indices::{Here, There};
 
+    use super::{EndError, ReplaceError};
     use crate::{
-        driver::DriverOps,
+        driver::{AddError, DriverOps},
         structure::{ChildList, ChildStorage, MoveError, NodeKind},
     };
 
@@ -275,20 +278,26 @@ pub(crate) mod sealed {
     pub trait ChildEdit<Q, CK: NodeKind, S: ChildStorage> {
         /// The moves of each grandchild under these children.
         type Grandchildren: GrandchildEdits<Q, S, CK::Children>;
-        /// Add one under `key`, from `start`; `false` when the key is
-        /// taken.
-        fn add<E: DriverOps<Q = Q>>(e: &mut E, key: S::Key, start: CK::Start) -> bool;
-        /// End the one under `key`, for `reason`; `false` when none is
-        /// there or others link to it.
-        fn end<E: DriverOps<Q = Q>>(e: &mut E, key: &S::Key, reason: CK::EndReason) -> bool;
+        /// Add one under `key`, from `start`.
+        fn add<E: DriverOps<Q = Q>>(
+            e: &mut E,
+            key: S::Key,
+            start: CK::Start,
+        ) -> Result<(), AddError>;
+        /// End the one under `key`, for `reason`.
+        fn end<E: DriverOps<Q = Q>>(
+            e: &mut E,
+            key: &S::Key,
+            reason: CK::EndReason,
+        ) -> Result<(), EndError>;
         /// End the one under `key` for `reason` and build a new one from
-        /// `start`; `false` when none is there.
+        /// `start`.
         fn replace<E: DriverOps<Q = Q>>(
             e: &mut E,
             key: S::Key,
             start: CK::Start,
             reason: CK::EndReason,
-        ) -> bool;
+        ) -> Result<(), ReplaceError>;
     }
     /// The moves of each grandchild of a list `L` under children kept by
     /// `S`.
@@ -385,9 +394,14 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
         }
     }
     /// Build a child of the kind `CK` under `key`, starting from `start`;
-    /// its position `I` is inferred from its kind. `false` when a child of
-    /// the kind is kept under the key: nothing is built.
-    pub fn add<CK: NodeKind, I>(&mut self, key: KeyAt<K::Children, I>, start: CK::Start) -> bool
+    /// its position `I` is inferred from its kind. When a child of the
+    /// kind is kept under the key, or the node could not be built, nothing
+    /// is built.
+    pub fn add<CK: NodeKind, I>(
+        &mut self,
+        key: KeyAt<K::Children, I>,
+        start: CK::Start,
+    ) -> Result<(), AddError>
     where
         K::Children: ChildOfKind<CK, I>,
         ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
@@ -396,13 +410,13 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
         <ChildOp<E, K, I> as ChildEdit<Qe<E>, CK, _>>::add(self.editor, key, start)
     }
     /// End the child of the kind `CK` kept under `key`, with the nodes
-    /// below it, for `reason`. `false` when none is there, or when nodes
+    /// below it, for `reason`. Refused when none is there, or when nodes
     /// link to it: the structure ends it after the last of them.
     pub fn end<CK: NodeKind, I>(
         &mut self,
         key: &KeyAt<K::Children, I>,
         reason: CK::EndReason,
-    ) -> bool
+    ) -> Result<(), EndError>
     where
         K::Children: ChildOfKind<CK, I>,
         ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
@@ -413,13 +427,13 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
     /// End the child of the kind `CK` kept under `key` for `reason` and
     /// build a new one in its place from `start`, with nothing in between:
     /// no call is polled and no event is handled before the new one is
-    /// built. `false` when none is there: none is built.
+    /// built. Refused as [`end`](Edit::end) is, and then none is built.
     pub fn replace<CK: NodeKind, I>(
         &mut self,
         key: KeyAt<K::Children, I>,
         start: CK::Start,
         reason: CK::EndReason,
-    ) -> bool
+    ) -> Result<(), ReplaceError>
     where
         K::Children: ChildOfKind<CK, I>,
         ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
@@ -465,6 +479,53 @@ impl<E, K> fmt::Debug for Edit<'_, E, K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Edit<{}>", core::any::type_name::<K>())
     }
+}
+
+/// No child of this kind is kept under the key.
+#[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
+#[snafu(display("no child of this kind under this key"))]
+#[snafu(context(suffix(ErrorSnafu)))]
+#[snafu(visibility(pub(crate)))]
+pub struct NoChildError;
+/// Nodes link to the node: the structure ends it after the last of them.
+#[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
+#[snafu(display("nodes link to it; it ends after the last of them"))]
+#[snafu(context(suffix(ErrorSnafu)))]
+#[snafu(visibility(pub(crate)))]
+pub struct LinkedToError;
+/// Why an edit handle did not end a child.
+#[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(visibility(pub(crate)))]
+pub enum EndError {
+    /// No child of the kind is kept under the key.
+    #[snafu(display("the child was not ended"))]
+    NoChild {
+        /// Why.
+        source: NoChildError,
+    },
+    /// Nodes link to it.
+    #[snafu(display("the child was not ended"))]
+    LinkedTo {
+        /// Why.
+        source: LinkedToError,
+    },
+}
+/// Why an edit handle did not replace a child.
+#[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(visibility(pub(crate)))]
+pub enum ReplaceError {
+    /// The child could not be ended; none is built.
+    #[snafu(display("the child was not replaced"))]
+    End {
+        /// Why.
+        source: EndError,
+    },
+    /// The child ended, and the new one could not be built.
+    #[snafu(display("the child ended and its replacement was not built"))]
+    Add {
+        /// Why.
+        source: AddError,
+    },
 }
 
 /// A request for the node of the kind `K` at the key address `at` from the

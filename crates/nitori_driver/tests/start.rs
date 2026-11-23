@@ -80,8 +80,8 @@ pub enum RootRequest {
 impl Request<Root> for RootRequest {
     fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
         let done = match self {
-            Self::Add(k, s) => edit.add::<Item, _>(k, s),
-            Self::Replace(k, s) => edit.replace::<Item, _>(k, s, ()),
+            Self::Add(k, s) => edit.add::<Item, _>(k, s).is_ok(),
+            Self::Replace(k, s) => edit.replace::<Item, _>(k, s, ()).is_ok(),
         };
         put(format!("done {done}"));
     }

@@ -9,6 +9,8 @@
 //! matched to a place at run time.
 use core::{convert::Infallible, marker::PhantomData};
 
+use snafu::ResultExt;
+
 use frunk_core::{
     coproduct::{CNil, Coproduct},
     hlist::{HCons, HNil},
@@ -28,7 +30,8 @@ use crate::{
     driver::Place,
     hooks::{EndReasonOf, StartOf},
     request::{
-        Edit, Editor, NodeRequest, Request,
+        AddSnafu, Edit, Editor, EndError, EndSnafu, LinkedToError, NoChildError, NodeRequest,
+        ReplaceError, Request,
         sealed::{ChildEdit, ChildEdits, EditOps, GrandchildEdit, GrandchildEdits},
     },
     structure::{
@@ -80,7 +83,7 @@ pub trait DriverOps {
         key: PlaceKeyOf<Self::Q, Pl::At>,
         start: StartOf<TargetOf<Self::Q, Pl::At>>,
         reason: EndReasonOf<TargetOf<Self::Q, Pl::At>>,
-    ) -> bool;
+    ) -> Result<usize, AddError>;
     /// Move the node `id` under the node `to`.
     fn move_node(&mut self, id: usize, to: usize) -> Result<(), MoveError>;
 }
@@ -135,10 +138,10 @@ where
         key: PlaceKeyOf<Q, Pl::At>,
         start: StartOf<TargetOf<Q, Pl::At>>,
         reason: EndReasonOf<TargetOf<Q, Pl::At>>,
-    ) -> bool {
+    ) -> Result<usize, AddError> {
         self.editing(|d, todo| {
             Driver::end_typed::<Pl, Pos>(d, id, reason, todo);
-            d.add_typed::<Pl, Pos>(p, parent, key, start, todo).is_ok()
+            d.add_typed::<Pl, Pos>(p, parent, key, start, todo)
         })
     }
     fn move_node(&mut self, id: usize, to: usize) -> Result<(), MoveError> {
@@ -213,7 +216,7 @@ where
         key: PlaceKeyOf<Q, Pc::At>,
         start: StartOf<TargetOf<Q, Pc::At>>,
         reason: EndReasonOf<TargetOf<Q, Pc::At>>,
-    ) -> bool {
+    ) -> Result<usize, AddError> {
         self.driver
             .replace_typed::<Pc, Ps>(p, parent, id, key, start, reason)
     }
@@ -262,13 +265,18 @@ where
 pub struct NoChildPlace;
 impl<Q> ChildEdit<Q, NoChild, NoChild> for NoChildPlace {
     type Grandchildren = NoGrandchildPlace;
-    fn add<E: DriverOps<Q = Q>>(_: &mut E, key: Infallible, _: Infallible) -> bool {
+    fn add<E: DriverOps<Q = Q>>(_: &mut E, key: Infallible, _: Infallible) -> Result<(), AddError> {
         match key {}
     }
-    fn end<E: DriverOps<Q = Q>>(_: &mut E, key: &Infallible, _: ()) -> bool {
+    fn end<E: DriverOps<Q = Q>>(_: &mut E, key: &Infallible, _: ()) -> Result<(), EndError> {
         match *key {}
     }
-    fn replace<E: DriverOps<Q = Q>>(_: &mut E, key: Infallible, _: Infallible, _: ()) -> bool {
+    fn replace<E: DriverOps<Q = Q>>(
+        _: &mut E,
+        key: Infallible,
+        _: Infallible,
+        _: (),
+    ) -> Result<(), ReplaceError> {
         match key {}
     }
 }
@@ -300,37 +308,54 @@ where
     GrandchildPlaces<Xc, Pc, Pc::Children>: GrandchildEdits<Q, S, CK::Children>,
 {
     type Grandchildren = GrandchildPlaces<Xc, Pc, Pc::Children>;
-    fn add<E: DriverOps<Q = Q>>(e: &mut E, key: S::Key, start: CK::Start) -> bool {
+    fn add<E: DriverOps<Q = Q>>(e: &mut E, key: S::Key, start: CK::Start) -> Result<(), AddError> {
         let node = e.node();
         e.add_child::<Place<Xc>, Pc>(N::VALUE, node, key, start)
-            .is_ok()
+            .map(drop)
     }
-    fn end<E: DriverOps<Q = Q>>(e: &mut E, key: &S::Key, reason: CK::EndReason) -> bool {
-        let Some(id) = e.find_child::<Place<Xc>, Pc>(e.node(), key) else {
-            return false;
-        };
-        if e.linked_to(id) {
-            return false;
-        }
+    fn end<E: DriverOps<Q = Q>>(
+        e: &mut E,
+        key: &S::Key,
+        reason: CK::EndReason,
+    ) -> Result<(), EndError> {
+        let id = end_target::<E, Xc, Pc>(e, key)?;
         e.end_typed::<Place<Xc>, Pc>(id, reason);
-        true
+        Ok(())
     }
     fn replace<E: DriverOps<Q = Q>>(
         e: &mut E,
         key: S::Key,
         start: CK::Start,
         reason: CK::EndReason,
-    ) -> bool {
+    ) -> Result<(), ReplaceError> {
         let node = e.node();
-        let Some(id) = e.find_child::<Place<Xc>, Pc>(node, &key) else {
-            return false;
-        };
-        // as for `end`: a node others link to ends after the last of them
-        if e.linked_to(id) {
-            return false;
-        }
+        let id = end_target::<E, Xc, Pc>(e, &key).context(EndSnafu)?;
         e.replace_typed::<Place<Xc>, Pc>(N::VALUE, node, id, key, start, reason)
+            .map(drop)
+            .context(AddSnafu)
     }
+}
+
+/// The child of the place `Xc` under the editor's node kept under `key`,
+/// when it can be ended: it is there, and no node links to it (a node
+/// others link to ends after the last of them).
+fn end_target<E, Xc, Pc>(e: &E, key: &PlaceKeyOf<E::Q, Xc>) -> Result<usize, EndError>
+where
+    E: DriverOps,
+    Xc: ParentPath + PathFrom<RootOf<E::Q>> + PlaceKey<RootOf<E::Q>> + 'static,
+    Pc: PlaceOps<E::Q, Place<Xc>>,
+{
+    let id = e
+        .find_child::<Place<Xc>, Pc>(e.node(), key)
+        .ok_or(EndError::NoChild {
+            source: NoChildError,
+        })?;
+    if e.linked_to(id) {
+        return Err(EndError::LinkedTo {
+            source: LinkedToError,
+        });
+    }
+    Ok(id)
 }
 
 /// The moves of the grandchildren under the children at the place `Xc`
@@ -497,13 +522,18 @@ impl<Q, L: ChildList> ChildEdits<Q, L> for NoPlaceEdits {
 }
 impl<Q, CK: NodeKind, S: ChildStorage> ChildEdit<Q, CK, S> for NoPlaceEdits {
     type Grandchildren = NoPlaceEdits;
-    fn add<E: DriverOps<Q = Q>>(_: &mut E, _: S::Key, _: CK::Start) -> bool {
+    fn add<E: DriverOps<Q = Q>>(_: &mut E, _: S::Key, _: CK::Start) -> Result<(), AddError> {
         unreachable!("{NO_PLACE}")
     }
-    fn end<E: DriverOps<Q = Q>>(_: &mut E, _: &S::Key, _: CK::EndReason) -> bool {
+    fn end<E: DriverOps<Q = Q>>(_: &mut E, _: &S::Key, _: CK::EndReason) -> Result<(), EndError> {
         unreachable!("{NO_PLACE}")
     }
-    fn replace<E: DriverOps<Q = Q>>(_: &mut E, _: S::Key, _: CK::Start, _: CK::EndReason) -> bool {
+    fn replace<E: DriverOps<Q = Q>>(
+        _: &mut E,
+        _: S::Key,
+        _: CK::Start,
+        _: CK::EndReason,
+    ) -> Result<(), ReplaceError> {
         unreachable!("{NO_PLACE}")
     }
 }

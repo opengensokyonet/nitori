@@ -341,22 +341,15 @@ pub trait RoleCells<'a, CK: KindFor<P>, S: ChildStorage, P, Pre, Pos, Ch, Lk, Kc
     ) -> Result<Self::Out, SplitError>;
 }
 /// Why splitting the tree around a node failed.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, snafu::Snafu, PartialEq, Eq)]
 pub enum SplitError {
     /// A node on the path is not there.
+    #[snafu(display("a node on the path is not there"))]
     NoNode,
     /// The linked node is not there.
+    #[snafu(display("the linked node is not there"))]
     NoLinked,
 }
-impl core::fmt::Display for SplitError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::NoNode => "a node on the path is not there",
-            Self::NoLinked => "the linked node is not there",
-        })
-    }
-}
-impl core::error::Error for SplitError {}
 impl<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> for RoleOther
 where
     CK: KindFor<P>,

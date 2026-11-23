@@ -160,15 +160,15 @@ pub enum ConnRequest {
 impl Request<Conn> for ConnRequest {
     fn apply<E: Editor<Conn>>(self, mut edit: Edit<'_, E, Conn>) {
         let done = match self {
-            Self::AddLogicalPath(k) => edit.add::<LogicalPath, _>(k, ()),
-            Self::EndLogicalPath(k) => edit.end::<LogicalPath, _>(&k, ()),
-            Self::AddEstablished => edit.add::<Established, _>((), ()),
-            Self::EndEstablished => {
-                edit.end::<Established, _>(&(), EstablishedEnd::ConnectionClosed)
-            }
-            Self::RebuildEstablished => {
-                edit.replace::<Established, _>((), (), EstablishedEnd::ZeroRttRejected)
-            }
+            Self::AddLogicalPath(k) => edit.add::<LogicalPath, _>(k, ()).is_ok(),
+            Self::EndLogicalPath(k) => edit.end::<LogicalPath, _>(&k, ()).is_ok(),
+            Self::AddEstablished => edit.add::<Established, _>((), ()).is_ok(),
+            Self::EndEstablished => edit
+                .end::<Established, _>(&(), EstablishedEnd::ConnectionClosed)
+                .is_ok(),
+            Self::RebuildEstablished => edit
+                .replace::<Established, _>((), (), EstablishedEnd::ZeroRttRejected)
+                .is_ok(),
             Self::EndConnection => {
                 edit.end_self(());
                 true
@@ -188,8 +188,8 @@ pub enum PathRequest {
 impl Request<LogicalPath> for PathRequest {
     fn apply<E: Editor<LogicalPath>>(self, mut edit: Edit<'_, E, LogicalPath>) {
         let done = match self {
-            Self::AddLinkPath(l) => edit.add::<LinkPath, _>(l, ()),
-            Self::EndLinkPath(l) => edit.end::<LinkPath, _>(&l, ()),
+            Self::AddLinkPath(l) => edit.add::<LinkPath, _>(l, ()).is_ok(),
+            Self::EndLinkPath(l) => edit.end::<LinkPath, _>(&l, ()).is_ok(),
             Self::MoveRecovery { from, to } => edit
                 .move_grandchild::<LinkPath, _, Recovery, _>(&from, &(), &to)
                 .map_err(|e| put(format!("move: {e}")))
@@ -208,8 +208,8 @@ pub enum LinkRequest {
 impl Request<LinkPath> for LinkRequest {
     fn apply<E: Editor<LinkPath>>(self, mut edit: Edit<'_, E, LinkPath>) {
         let done = match self {
-            Self::AddRecovery => edit.add::<Recovery, _>((), ()),
-            Self::EndRecovery => edit.end::<Recovery, _>(&(), ()),
+            Self::AddRecovery => edit.add::<Recovery, _>((), ()).is_ok(),
+            Self::EndRecovery => edit.end::<Recovery, _>(&(), ()).is_ok(),
         };
         if !done {
             put("refused");
@@ -828,7 +828,7 @@ mod http_like {
     pub struct CloseStream(pub StreamId);
     impl Request<H> for CloseStream {
         fn apply<E: Editor<H>>(self, mut edit: Edit<'_, E, H>) {
-            edit.end::<Stream, _>(&self.0, ());
+            let _ = edit.end::<Stream, _>(&self.0, ());
         }
     }
 

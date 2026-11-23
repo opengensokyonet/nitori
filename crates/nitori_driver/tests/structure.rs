@@ -40,7 +40,7 @@ fn insert_find_and_remove() {
     assert_eq!(timer.node(&root).unwrap().data.head.head, Rtt(33));
     // A key already there: the node comes back.
     match insert(&mut root, End, PathId(2), new::<Path, P2>()) {
-        Err(InsertError::Occupied(_)) => {}
+        Err(InsertError::Occupied { .. }) => {}
         _ => panic!("the path 2 is there"),
     }
     // A parent not there.
@@ -48,7 +48,7 @@ fn insert_find_and_remove() {
     remove(&mut root, gone).unwrap();
     assert!(matches!(
         insert(&mut root, gone, PeerId(1), new::<Route, P2>()),
-        Err(InsertError::NoParent(_))
+        Err(InsertError::NoParent { .. })
     ));
     // Removing the path 0 takes its route and the route's timer with it.
     let removed = remove(&mut root, p0).unwrap();
@@ -69,7 +69,10 @@ fn move_keeps_the_node_and_its_key() {
     assert_eq!(moved_timer.node(&root).unwrap().data.head.head, Rtt(41));
     // The destination has the key already: the route goes back.
     let back: RouteAt = insert(&mut root, p0, PeerId(7), new()).ok().unwrap();
-    assert_eq!(move_to(&mut root, back, p2), Err(MoveError::Occupied));
+    assert!(matches!(
+        move_to(&mut root, back, p2),
+        Err(MoveError::Occupied { .. })
+    ));
     assert!(back.node(&root).is_some());
     // No destination.
     let gone: PathAt = insert(&mut root, End, PathId(9), new()).ok().unwrap();

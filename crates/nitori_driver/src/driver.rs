@@ -661,7 +661,6 @@ use alloc::{
 };
 use core::{
     any::TypeId,
-    fmt,
     future::Future,
     pin::Pin,
     sync::atomic::Ordering::SeqCst,
@@ -670,6 +669,7 @@ use core::{
 
 use frunk_core::indices::Here as I0;
 use nitori_clock::MonotonicClock;
+use snafu::Snafu;
 
 pub(crate) use edit::DriverOps;
 pub use place::{
@@ -690,24 +690,28 @@ use crate::{
     hooks::{AbortCause, ArgsOf, EndReasonOf, StartOf},
     structure::{
         Address, Append, ChildAddresses, ChildAt, ChildList, ChildOfKind, End, FromAddress,
-        HandleAt, KeyAddress, KeyAt, KindFor, LinkList, MoveError, NodeKind, NodePath,
-        ParentChildren, ParentPath, PathFrom, RemainsOf, resolve_node,
+        HandleAt, KeyAddress, KeyAt, KindFor, LinkList, MoveError, NoParentError, NodeKind,
+        NodePath, OccupiedError, ParentChildren, ParentPath, PathFrom, RemainsOf, resolve_node,
     },
 };
 
 // ---------------------------------------------------------------- errors
 
 /// Why a composition cannot be driven.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Snafu, PartialEq, Eq)]
 pub enum CompositionError {
     /// A place has more than 64 calls and components that act before the
     /// calls together: a node marks each in one bit of a word.
+    #[snafu(display(
+        "the place {place} has more than 64 calls and components that act before the calls"
+    ))]
     TooManyPositions {
         /// The place's number, in tree order.
         place: usize,
     },
     /// A component's handler runs for more than 64 events: it is told
     /// them in one bit each.
+    #[snafu(display("the component {component} of the place {place} handles more than 64 events"))]
     TooManySubscriptions {
         /// The place's number, in tree order.
         place: usize,
@@ -715,53 +719,47 @@ pub enum CompositionError {
         component: usize,
     },
 }
-impl fmt::Display for CompositionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooManyPositions { place } => write!(
-                f,
-                "the place {place} has more than 64 calls and components that act before the calls"
-            ),
-            Self::TooManySubscriptions { place, component } => write!(
-                f,
-                "the component {component} of the place {place} handles more than 64 events"
-            ),
-        }
-    }
-}
-impl core::error::Error for CompositionError {}
 
 /// Why a node was not added.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Snafu, PartialEq, Eq)]
 pub enum AddError {
     /// The root ended.
+    #[snafu(display("the root ended"))]
     Ended,
     /// No node at the parent's path.
-    NoParent,
+    #[snafu(display("the node was not added"))]
+    NoParent {
+        /// Why.
+        source: NoParentError,
+    },
     /// The parent has a child of this kind under the same key.
-    Occupied,
+    #[snafu(display("the node was not added"))]
+    Occupied {
+        /// Why.
+        source: OccupiedError,
+    },
     /// A component's `build` could not be lent the parent.
-    Build(crate::lend::LendError),
+    #[snafu(display("a component of the node could not be built"))]
+    Build {
+        /// Why.
+        source: crate::lend::LendError,
+    },
     /// The node it links to was not there and could not be built.
-    Linked(Box<AddError>),
+    #[snafu(display("the node it links to could not be built"))]
+    Linked {
+        /// Why.
+        source: Box<AddError>,
+    },
 }
-impl fmt::Display for AddError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Ended => "the root ended",
-            Self::NoParent => "no node at the parent's path",
-            Self::Occupied => "the parent has a child of this kind under this key",
-            Self::Build(_) => "a component could not be built",
-            Self::Linked(_) => "the node it links to could not be built",
-        })
+impl AddError {
+    pub(crate) fn no_parent() -> Self {
+        Self::NoParent {
+            source: NoParentError,
+        }
     }
-}
-impl core::error::Error for AddError {
-    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self {
-            Self::Build(e) => Some(e),
-            Self::Linked(e) => Some(&**e),
-            _ => None,
+    pub(crate) fn occupied() -> Self {
+        Self::Occupied {
+            source: OccupiedError,
         }
     }
 }
@@ -1329,7 +1327,7 @@ where
             return Err(AddError::Ended);
         }
         let Some(parent_id) = self.find(&parent.address()) else {
-            return Err(AddError::NoParent);
+            return Err(AddError::no_parent());
         };
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
@@ -1927,7 +1925,7 @@ where
         mut start: StartOf<TargetOf<Q, Pl::At>>,
         todo: &mut Vec<Hit>,
     ) -> Result<usize, AddError> {
-        let parent_addr = self.live(parent).ok_or(AddError::NoParent)?.addr;
+        let parent_addr = self.live(parent).ok_or(AddError::no_parent())?.addr;
         debug_assert_eq!(
             self.places[p].info.parent,
             self.live(parent).map(|n| self.places[n.place].info.path),
@@ -1935,10 +1933,14 @@ where
         );
         let root = self.root.as_ref().ok_or(AddError::Ended)?;
         if Pos::find_child(root, &parent_addr, &key).is_some() {
-            return Err(AddError::Occupied);
+            return Err(AddError::occupied());
         }
-        let link = <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start)
-            .map_err(|e| AddError::Linked(Box::new(e)))?;
+        let link =
+            <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start).map_err(|e| {
+                AddError::Linked {
+                    source: Box::new(e),
+                }
+            })?;
         let root = self.root.as_mut().ok_or(AddError::Ended)?;
         let addr = match Pos::add(root, &parent_addr, key, start, &self.args, &self.outbox) {
             Ok(addr) => addr,

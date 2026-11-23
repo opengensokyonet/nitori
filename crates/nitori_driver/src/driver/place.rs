@@ -1447,14 +1447,14 @@ where
         o: &OutboxOf<Q>,
     ) -> Result<AddressOf<Q>, super::AddError> {
         if X::find_under(root, parent, &key).is_some() {
-            return Err(super::AddError::Occupied);
+            return Err(super::AddError::occupied());
         }
-        let pp = X::parent_path(parent).ok_or(super::AddError::NoParent)?;
+        let pp = X::parent_path(parent).ok_or_else(super::AddError::no_parent)?;
         let node = Self::build(Some(root), &pp, &key, args, &mut start, o)
-            .map_err(super::AddError::Build)?;
+            .map_err(|source| super::AddError::Build { source })?;
         // Invariant: the parent was reached by the build and its key was
         // free just above.
-        X::attach(root, parent, key, node).ok_or(super::AddError::NoParent)
+        X::attach(root, parent, key, node).ok_or_else(super::AddError::no_parent)
     }
     fn find_child(
         root: &RootNode<Q>,
@@ -1551,7 +1551,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &ArgsOf<P_<Q>>,
         _: &OutboxOf<Q>,
     ) -> Result<AddressOf<Q>, super::AddError> {
-        Err(super::AddError::NoParent)
+        Err(super::AddError::no_parent())
     }
     fn find_child(_: &RootNode<Q>, _: &AddressOf<Q>, _: &()) -> Option<AddressOf<Q>> {
         None
