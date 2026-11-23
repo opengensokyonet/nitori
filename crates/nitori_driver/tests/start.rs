@@ -78,7 +78,7 @@ pub enum RootRequest {
     Replace(u32, ItemStart),
 }
 impl Request<Root> for RootRequest {
-    fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
+    fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
         let done = match self {
             Self::Add(k, s) => edit.add::<Item, _>(k, s),
             Self::Replace(k, s) => edit.replace::<Item, _>(k, s, ()),
@@ -209,7 +209,7 @@ fn a_start_reaches_every_component_and_moves_once() {
     let _ = log();
     let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], 0).unwrap();
     let _ = poll(&mut d);
-    d.add::<Item, _, _>(End, 3, start("three", 30)).unwrap();
+    d.add::<Item, _, _, _>(End, 3, start("three", 30)).unwrap();
     assert_eq!(
         log(),
         [
@@ -252,7 +252,7 @@ fn a_start_reaches_every_component_and_moves_once() {
 fn a_linked_node_there_already_keeps_its_own_start() {
     let _ = log();
     let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], 0).unwrap();
-    d.add::<Peer, _, _>(End, 5, "given".into()).unwrap();
-    d.add::<Item, _, _>(End, 5, start("five", 50)).unwrap();
+    d.add::<Peer, _, _, _>(End, 5, "given".into()).unwrap();
+    d.add::<Item, _, _, _>(End, 5, start("five", 50)).unwrap();
     assert_eq!(log(), ["peer 5 given", "first five 5", "second five None"]);
 }

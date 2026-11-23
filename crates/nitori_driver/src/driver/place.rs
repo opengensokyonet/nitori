@@ -8,7 +8,7 @@
 //! and its `build` the [`Hooks::BuildNeeds`] at the parent's place, and its
 //! subscriptions are resolved at the place. [`composition!`](crate::composition)
 //! proves them all once, into the opaque [`DriverComposition::Places`].
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{any::TypeId, marker::PhantomData, ops::Add, task::Waker};
 
 use frunk_core::{
@@ -33,25 +33,6 @@ use crate::{
         RemainsList, RemainsOf, Share, Shares, SplitLast, Step, Store, move_to, remove,
     },
 };
-
-// ---------------------------------------------------------------- casts
-
-/// `a` as a `B`, when `A` is `B`. The driver reaches a place by its number
-/// and hands it a key or a reason of the type the edit handle's types
-/// give; the place's own types are the same, which only the run time sees.
-fn cast<A: 'static, B: 'static>(a: A) -> Option<B> {
-    let mut a = Some(a);
-    (&mut a as &mut dyn core::any::Any)
-        .downcast_mut::<Option<B>>()
-        .and_then(Option::take)
-}
-/// `a` as a `&B`, when `A` is `B`.
-fn cast_ref<A: 'static, B: 'static>(a: &A) -> Option<&B> {
-    (a as &dyn core::any::Any).downcast_ref::<B>()
-}
-/// The edit handle's types are the place's: the driver found the place by
-/// the position of the child the handle's types name.
-const SAME_TYPES: &str = "the place found by the position of a child has the types of that child";
 
 // ---------------------------------------------------------------- the places
 
@@ -427,18 +408,92 @@ where
 {
     type Out = HCons<<O::Data as ProveShare<Q, X, O, IO>>::Out, Ps::Out>;
 }
-/// The positions of every component of a place.
-pub struct PlacePositions<PL>(PhantomData<fn() -> PL>);
+/// The positions of a place: of every component (`PL`), the places of its
+/// children (`Ix`, a list of [`ChildPlace`]), and the place its nodes link
+/// to (`Lk`, [`LinkPlace`] or [`NoLinkPlace`]).
+#[allow(clippy::type_complexity)]
+pub struct PlacePositions<PL, Ix, Lk>(PhantomData<fn() -> (PL, Ix, Lk)>);
+/// The place `Xc` of a child, its positions `Pc`, at the number `N` among
+/// the places of the tree.
+#[allow(clippy::type_complexity)]
+pub struct ChildPlace<Xc, Pc, N>(PhantomData<fn() -> (Xc, Pc, N)>);
+/// The place `Xb` the nodes of a place link to, its positions `Pb`, at the
+/// number `N`.
+#[allow(clippy::type_complexity)]
+pub struct LinkPlace<Xb, Pb, N>(PhantomData<fn() -> (Xb, Pb, N)>);
+/// The nodes of a place link to none.
+pub struct NoLinkPlace;
+
+/// The numbers of the places of the children of a node at `X` of `Q`'s
+/// tree, from the child at `Pos` on; `I` is inferred.
+pub trait ProveChildPlaces<Q, X, Pos, I> {
+    /// A list of [`ChildPlace`].
+    type Out;
+}
+impl<Q, X, Pos> ProveChildPlaces<Q, X, Pos, HNil> for HNil {
+    type Out = HNil;
+}
+type AppendOf<X, Pos, H> = <X as Append<Pos, H>>::Out;
+impl<Q, X, Pos, CK, S, T, N, IC, IT> ProveChildPlaces<Q, X, Pos, HCons<(N, IC), IT>>
+    for HCons<Child<CK, S>, T>
+where
+    Q: Composition<Root: PlacesUnder<End>>,
+    S: ChildStorage,
+    X: Append<Pos, S::Handle>,
+    PlacesOf<Q>: FindPlace<AppendOf<X, Pos, S::Handle>, N>,
+    Place<AppendOf<X, Pos, S::Handle>>: ProvePlace<Q, IC>,
+    T: ProveChildPlaces<Q, X, There<Pos>, IT>,
+{
+    type Out = HCons<
+        ChildPlace<
+            AppendOf<X, Pos, S::Handle>,
+            <Place<AppendOf<X, Pos, S::Handle>> as ProvePlace<Q, IC>>::Pos,
+            N,
+        >,
+        T::Out,
+    >;
+}
+/// The number of the place a node's links (`Self`, its kind's
+/// [`NodeKind::Linked`]) point to, in `Q`'s tree; `I` is inferred.
+pub trait ProveLinkPlace<Q, I> {
+    /// [`LinkPlace`] or [`NoLinkPlace`].
+    type Out;
+}
+impl<Q> ProveLinkPlace<Q, ()> for HNil {
+    type Out = NoLinkPlace;
+}
+type RootChildAt<Q, L> =
+    Step<L, crate::structure::HandleAt<<RootOf<Q> as NodeKind>::Children, L>, End>;
+impl<Q, B, L, N, IB> ProveLinkPlace<Q, (L, N, IB)> for HCons<crate::structure::ByOwnKey<B>, HNil>
+where
+    Q: Composition<Root: PlacesUnder<End>>,
+    B: NodeKind,
+    <RootOf<Q> as NodeKind>::Children: crate::structure::ChildOfKind<B, L>,
+    PlacesOf<Q>: FindPlace<RootChildAt<Q, L>, N>,
+    Place<RootChildAt<Q, L>>: ProvePlace<Q, IB>,
+{
+    type Out =
+        LinkPlace<RootChildAt<Q, L>, <Place<RootChildAt<Q, L>> as ProvePlace<Q, IB>>::Pos, N>;
+}
+
 /// One place proved.
 pub trait ProvePlace<Q, I> {
     /// Its positions.
     type Pos;
 }
-impl<Q: Composition, X, I> ProvePlace<Q, I> for Place<X>
+impl<Q: Composition, X, Ip, Ic, Il> ProvePlace<Q, (Ip, Ic, Il)> for Place<X>
 where
-    PartsOf<Q>: ProveParts<Q, X, I>,
+    Q::Root: PlacesUnder<End>,
+    X: PathFrom<RootOf<Q>>,
+    PartsOf<Q>: ProveParts<Q, X, Ip>,
+    <TargetOf<Q, X> as NodeKind>::Children: ProveChildPlaces<Q, X, I0, Ic>,
+    <TargetOf<Q, X> as NodeKind>::Linked: ProveLinkPlace<Q, Il>,
 {
-    type Pos = PlacePositions<<PartsOf<Q> as ProveParts<Q, X, I>>::Out>;
+    type Pos = PlacePositions<
+        <PartsOf<Q> as ProveParts<Q, X, Ip>>::Out,
+        <<TargetOf<Q, X> as NodeKind>::Children as ProveChildPlaces<Q, X, I0, Ic>>::Out,
+        <<TargetOf<Q, X> as NodeKind>::Linked as ProveLinkPlace<Q, Il>>::Out,
+    >;
 }
 /// Every place of a list proved (`I`, one variable for the tree); the
 /// pack is the list of their positions.
@@ -1024,10 +1079,10 @@ pub trait ChildPath<R: KindFor<P>, P>: PathFrom<R> + ParentPath + PlaceKey<R> {
     where
         Self::Target: KindFor<P>;
     /// The node kept under `key` under the parent at `parent`.
-    fn find_under<KK: 'static>(
+    fn find_under(
         root: &Node<R, P>,
         parent: &Address<R>,
-        key: &KK,
+        key: &<Self as PlaceKey<R>>::Key,
     ) -> Option<Address<R>>;
     /// Move the node at `at` under the node at `to`, of its parent's place.
     fn move_under(
@@ -1046,7 +1101,7 @@ impl<R: KindFor<P>, P> ChildPath<R, P> for End {
     {
         None
     }
-    fn find_under<KK: 'static>(_: &Node<R, P>, _: &Address<R>, _: &KK) -> Option<Address<R>> {
+    fn find_under(_: &Node<R, P>, _: &Address<R>, _: &()) -> Option<Address<R>> {
         None
     }
     fn move_under(
@@ -1093,14 +1148,13 @@ where
         let h = store.insert(key, node).ok()?;
         Some(pp.append(h).address())
     }
-    fn find_under<KK: 'static>(
+    fn find_under(
         root: &Node<R, P>,
         parent: &Address<R>,
-        key: &KK,
+        key: &<Self as PlaceKey<R>>::Key,
     ) -> Option<Address<R>> {
         let pp = ParentPathOf::<Self>::from_address(parent)?;
         let parent = pp.node(root)?;
-        let key = cast_ref(key)?;
         let store = <LastChildren<R, Self> as ChildAt<IndexOf<Self>, P>>::store(&parent.children);
         Some(pp.append(store.find(key)?).address())
     }
@@ -1120,6 +1174,11 @@ where
 /// there is skipped.
 #[allow(clippy::type_complexity, missing_docs)]
 pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
+    /// The places of its children ([`ChildPlace`]s): the edit handle's
+    /// operations on each.
+    type Children: crate::request::sealed::ChildEdits<Q, <TargetOf<Q, Pl::At> as NodeKind>::Children>;
+    /// The place its nodes link to: building the linked node.
+    type Link: super::edit::LinkAdd<Q, TargetOf<Q, Pl::At>, PlaceKeyOf<Q, Pl::At>>;
     fn info() -> PlaceInfo;
     /// The new node's components, from the parent at `parent` (the root
     /// has none: `root` is `None` then).
@@ -1133,9 +1192,7 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
     ) -> Result<Node<TargetOf<Q, Pl::At>, P_<Q>>, LendError>
     where
         TargetOf<Q, Pl::At>: KindFor<P_<Q>>;
-    /// The start of the node the place's nodes link to, from a node's
-    /// start; `None` when its kind links to none.
-    fn linked_start(start: &mut Box<dyn core::any::Any>) -> Option<Box<dyn core::any::Any>>;
+
     fn deadline(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
@@ -1185,20 +1242,20 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
     /// Build a node of the place under the parent at `parent`, under `key`
     /// (of the place's store), and keep it there; `None` when the key is
     /// taken: nothing is built.
-    fn add<KK: 'static>(
+    fn add(
         root: &mut RootNode<Q>,
         parent: &AddressOf<Q>,
-        key: KK,
-        start: Box<dyn core::any::Any>,
+        key: PlaceKeyOf<Q, Pl::At>,
+        start: StartOf<TargetOf<Q, Pl::At>>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>>;
     /// The node of the place kept under `key` under the parent at
     /// `parent`.
-    fn find_child<KK: 'static>(
+    fn find_child(
         root: &RootNode<Q>,
         parent: &AddressOf<Q>,
-        key: &KK,
+        key: &PlaceKeyOf<Q, Pl::At>,
     ) -> Option<AddressOf<Q>>;
     /// Move the node at `at` under the node at `to`, of the place of its
     /// parent.
@@ -1207,16 +1264,8 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         at: &AddressOf<Q>,
         to: &AddressOf<Q>,
     ) -> Result<AddressOf<Q>, MoveError>;
-    /// Every component's end, for `reason`, of the type of the place's
-    /// kind's reason.
-    fn end_with<RR: 'static>(
-        root: &mut RootNode<Q>,
-        at: &AddressOf<Q>,
-        reason: &RR,
-        o: &OutboxOf<Q>,
-    );
 }
-impl<Q, X, PL> PlaceOps<Q, Place<X>> for PlacePositions<PL>
+impl<Q, X, PL, Ix, Lk> PlaceOps<Q, Place<X>> for PlacePositions<PL, Ix, Lk>
 where
     Q: DriverComposition,
     X: PathFrom<RootOf<Q>>
@@ -1233,7 +1282,11 @@ where
     ChainAt<Q, X>: OwnPlace,
     P_<Q>: Shares<TargetOf<Q, X>> + RemainsList<TargetOf<Q, X>>,
     PL: PartsOps<Q, X, P_<Q>>,
+    Ix: crate::request::sealed::ChildEdits<Q, <TargetOf<Q, X> as NodeKind>::Children>,
+    Lk: super::edit::LinkAdd<Q, TargetOf<Q, X>, PlaceKeyOf<Q, X>>,
 {
+    type Children = Ix;
+    type Link = Lk;
     fn info() -> PlaceInfo {
         let mut comps = Vec::new();
         PL::info(&mut comps);
@@ -1269,12 +1322,7 @@ where
             &mut root, parent, key, args, start, outbox,
         )?))
     }
-    fn linked_start(start: &mut Box<dyn core::any::Any>) -> Option<Box<dyn core::any::Any>> {
-        let start = start.downcast_mut::<StartOf<TargetOf<Q, X>>>()?;
-        <<TargetOf<Q, X> as NodeKind>::Linked as crate::structure::LinkList<
-            TargetOf<Q, X>,
-        >>::linked_start(start)
-    }
+
     fn deadline(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
@@ -1343,11 +1391,11 @@ where
     fn detach(root: &mut RootNode<Q>, at: &AddressOf<Q>) -> bool {
         X::from_address(at).is_some_and(|at| at.detach(root))
     }
-    fn add<KK: 'static>(
+    fn add(
         root: &mut RootNode<Q>,
         parent: &AddressOf<Q>,
-        key: KK,
-        start: Box<dyn core::any::Any>,
+        key: PlaceKeyOf<Q, X>,
+        mut start: StartOf<TargetOf<Q, X>>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>> {
@@ -1355,15 +1403,13 @@ where
             return None;
         }
         let pp = X::parent_path(parent)?;
-        let key: PlaceKeyOf<Q, X> = cast(key)?;
-        let mut start = *start.downcast::<StartOf<TargetOf<Q, X>>>().ok()?;
         let node = Self::build(Some(root), &pp, &key, args, &mut start, o).ok()?;
         X::attach(root, parent, key, node)
     }
-    fn find_child<KK: 'static>(
+    fn find_child(
         root: &RootNode<Q>,
         parent: &AddressOf<Q>,
-        key: &KK,
+        key: &PlaceKeyOf<Q, X>,
     ) -> Option<AddressOf<Q>> {
         X::find_under(root, parent, key)
     }
@@ -1374,14 +1420,6 @@ where
     ) -> Result<AddressOf<Q>, MoveError> {
         X::move_under(root, at, to)
     }
-    fn end_with<RR: 'static>(
-        root: &mut RootNode<Q>,
-        at: &AddressOf<Q>,
-        reason: &RR,
-        o: &OutboxOf<Q>,
-    ) {
-        Self::end(root, at, cast_ref(reason).expect(SAME_TYPES), o);
-    }
 }
 
 /// The end of a pack of places: never reached.
@@ -1389,6 +1427,8 @@ pub struct NoPlacePos;
 const NO_PLACE: &str =
     "the end of a pack of places is never reached: the driver walks the places it has";
 impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
+    type Children = super::edit::NoPlaceEdits;
+    type Link = NoLinkPlace;
     fn info() -> PlaceInfo {
         unreachable!("{NO_PLACE}")
     }
@@ -1402,9 +1442,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
     ) -> Result<RootNode<Q>, LendError> {
         unreachable!("{NO_PLACE}")
     }
-    fn linked_start(_: &mut Box<dyn core::any::Any>) -> Option<Box<dyn core::any::Any>> {
-        None
-    }
+
     fn deadline(
         _: &mut RootNode<Q>,
         _: &AddressOf<Q>,
@@ -1455,17 +1493,17 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
     fn detach(_: &mut RootNode<Q>, _: &AddressOf<Q>) -> bool {
         false
     }
-    fn add<KK: 'static>(
+    fn add(
         _: &mut RootNode<Q>,
         _: &AddressOf<Q>,
-        _: KK,
-        _: Box<dyn core::any::Any>,
+        _: (),
+        _: StartOf<RootOf<Q>>,
         _: &ArgsOf<P_<Q>>,
         _: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>> {
         None
     }
-    fn find_child<KK: 'static>(_: &RootNode<Q>, _: &AddressOf<Q>, _: &KK) -> Option<AddressOf<Q>> {
+    fn find_child(_: &RootNode<Q>, _: &AddressOf<Q>, _: &()) -> Option<AddressOf<Q>> {
         None
     }
     fn move_under(
@@ -1475,7 +1513,6 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
     ) -> Result<AddressOf<Q>, MoveError> {
         Err(MoveError::NoSource)
     }
-    fn end_with<RR: 'static>(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &RR, _: &OutboxOf<Q>) {}
 }
 
 /// The positions of every place of the list `L` under `Q`.

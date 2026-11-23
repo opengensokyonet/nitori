@@ -158,7 +158,7 @@ pub enum ConnRequest {
     EndConnection,
 }
 impl Request<Conn> for ConnRequest {
-    fn apply<E: Editor>(self, mut edit: Edit<'_, E, Conn>) {
+    fn apply<E: Editor<Conn>>(self, mut edit: Edit<'_, E, Conn>) {
         let done = match self {
             Self::AddLogicalPath(k) => edit.add::<LogicalPath, _>(k, ()),
             Self::EndLogicalPath(k) => edit.end::<LogicalPath, _>(&k, ()),
@@ -186,7 +186,7 @@ pub enum PathRequest {
     MoveRecovery { from: LinkId, to: LinkId },
 }
 impl Request<LogicalPath> for PathRequest {
-    fn apply<E: Editor>(self, mut edit: Edit<'_, E, LogicalPath>) {
+    fn apply<E: Editor<LogicalPath>>(self, mut edit: Edit<'_, E, LogicalPath>) {
         let done = match self {
             Self::AddLinkPath(l) => edit.add::<LinkPath, _>(l, ()),
             Self::EndLinkPath(l) => edit.end::<LinkPath, _>(&l, ()),
@@ -206,7 +206,7 @@ pub enum LinkRequest {
     EndRecovery,
 }
 impl Request<LinkPath> for LinkRequest {
-    fn apply<E: Editor>(self, mut edit: Edit<'_, E, LinkPath>) {
+    fn apply<E: Editor<LinkPath>>(self, mut edit: Edit<'_, E, LinkPath>) {
         let done = match self {
             Self::AddRecovery => edit.add::<Recovery, _>((), ()),
             Self::EndRecovery => edit.end::<Recovery, _>(&(), ()),
@@ -827,7 +827,7 @@ mod http_like {
     /// Close the stream of this ID.
     pub struct CloseStream(pub StreamId);
     impl Request<H> for CloseStream {
-        fn apply<E: Editor>(self, mut edit: Edit<'_, E, H>) {
+        fn apply<E: Editor<H>>(self, mut edit: Edit<'_, E, H>) {
             edit.end::<Stream, _>(&self.0, ());
         }
     }
@@ -910,9 +910,9 @@ mod http_like {
         let mut d = Driver::<QH>::new(clock.clone(), frunk_core::hlist![()], ()).unwrap();
         clock.set(Duration::from_secs(2));
         let stream = d
-            .add::<Stream, _, _>(nitori_driver::structure::End, StreamId(4), ())
+            .add::<Stream, _, _, _>(nitori_driver::structure::End, StreamId(4), ())
             .unwrap();
-        d.add::<Body, _, _>(stream, (), ()).unwrap();
+        d.add::<Body, _, _, _>(stream, (), ()).unwrap();
         // the hooks read the instant the driver read when it was entered
         assert_eq!(
             log(),

@@ -408,10 +408,10 @@ fn hooks_of_every_share_part_by_part() {
 fn streams_built_from_the_parent_events_from_beside_and_above() {
     log();
     let mut d = Driver::<H>::new(TestClock::default(), args(), ()).unwrap();
-    let control = d.add::<Control, _, _>(End, (), ()).unwrap();
-    let s1 = d.add::<Stream, _, _>(End, StreamId(1), ()).unwrap();
-    let s2 = d.add::<Stream, _, _>(End, StreamId(2), ()).unwrap();
-    let b1 = d.add::<Body, _, _>(s1, (), ()).unwrap();
+    let control = d.add::<Control, _, _, _>(End, (), ()).unwrap();
+    let s1 = d.add::<Stream, _, _, _>(End, StreamId(1), ()).unwrap();
+    let s2 = d.add::<Stream, _, _, _>(End, StreamId(2), ()).unwrap();
+    let b1 = d.add::<Body, _, _, _>(s1, (), ()).unwrap();
     let root = d.root().unwrap();
     assert_eq!(
         s1.node(root).unwrap().data.head.head,
@@ -433,7 +433,7 @@ fn streams_built_from_the_parent_events_from_beside_and_above() {
     // second stream's data does not reach it
     assert_eq!(b1.node(root).unwrap().data.head.head, BodyReceived(1));
     // a body added later hears what arrives from then on only
-    let b2 = d.add::<Body, _, _>(s2, (), ()).unwrap();
+    let b2 = d.add::<Body, _, _, _>(s2, (), ()).unwrap();
     assert_eq!(
         b2.node(d.root().unwrap()).unwrap().data.head.head,
         BodyReceived(0)

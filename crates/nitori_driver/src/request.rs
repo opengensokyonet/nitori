@@ -20,7 +20,9 @@
 //!
 //! The driver handles a request at once, before it polls any call: it
 //! finds the node by the address, and drops the request when no node of
-//! the kind is there.
+//! the request's place is there. The sum is by place, so the driver knows
+//! the place of the alternative it delivers, and the edit handle's
+//! operations are those of that place and its children, chosen by type.
 //!
 //! A component of the root asks the root for its layer:
 //!
@@ -66,7 +68,7 @@
 //! /// The root builds its layer.
 //! struct AddLayer;
 //! impl Request<Root> for AddLayer {
-//!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
+//!     fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
 //!         edit.add::<Layer, _>((), ());
 //!     }
 //! }
@@ -153,7 +155,7 @@
 //! /// The root builds its layer.
 //! struct AddLayer;
 //! impl Request<Root> for AddLayer {
-//!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
+//!     fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
 //!         edit.add::<Layer, _>((), ());
 //!     }
 //! }
@@ -214,12 +216,12 @@
 //! /// The left node asks to build its sibling: not in its subtree.
 //! struct AddRight;
 //! impl Request<Left> for AddRight {
-//!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Left>) {
+//!     fn apply<E: Editor<Left>>(self, mut edit: Edit<'_, E, Left>) {
 //!         edit.add::<Right, _>((), ());
 //!     }
 //! }
 //! ```
-use core::{any::TypeId, convert::Infallible, fmt, marker::PhantomData};
+use core::{convert::Infallible, fmt, marker::PhantomData};
 
 use frunk_core::{
     coproduct::{CNil, CoprodInjector, Coproduct, CoproductEmbedder},
@@ -227,83 +229,140 @@ use frunk_core::{
 };
 
 use crate::{
-    driver::{Place, walk::Number},
-    structure::{ChildOfKind, KeyAddress, KeyAt, MoveError, NodeKind, PathFrom},
+    driver::Place,
+    structure::{ChildOfKind, KeyAddress, KeyAt, MoveError, NodeKind, PathFrom, StorageAt},
 };
 
 /// A request a node of the kind `K` handles on its own subtree.
 pub trait Request<K: NodeKind>: 'static {
     /// Do what is asked, through `edit`. The driver polls no call before it
     /// returns.
-    fn apply<E: Editor>(self, edit: Edit<'_, E, K>);
+    fn apply<E: Editor<K>>(self, edit: Edit<'_, E, K>);
 }
 impl<K: NodeKind> Request<K> for Infallible {
-    fn apply<E: Editor>(self, _: Edit<'_, E, K>) {
+    fn apply<E: Editor<K>>(self, _: Edit<'_, E, K>) {
         match self {}
     }
 }
 
 pub(crate) mod sealed {
-    use core::any::TypeId;
+    use frunk_core::indices::{Here, There};
 
-    use crate::structure::{KeyAddress, MoveError, NodeKind};
+    use crate::{
+        driver::DriverOps,
+        structure::{ChildList, ChildStorage, MoveError, NodeKind},
+    };
 
-    /// What the driver does for an edit handle, by node number.
-    pub trait EditOps {
-        /// Add the child at the position `child` of the node `node`, under
-        /// `key`, from `start`; `false` when the key is taken.
-        fn add_child<KK: Clone + 'static>(
-            &mut self,
-            node: usize,
-            child: usize,
-            key: KK,
-            start: alloc::boxed::Box<dyn core::any::Any>,
+    /// What the driver does for an edit handle of a node of the kind `K`,
+    /// at its place: the operations on each child are the items of
+    /// [`Children`](EditOps::Children), by the child's position.
+    pub trait EditOps<K: NodeKind>: DriverOps {
+        /// The operations on each child, in the order of `K`'s children.
+        type Children: ChildEdits<Self::Q, K::Children>;
+        /// End the node, for `reason`; nothing when others link to it.
+        fn end_node(&mut self, reason: K::EndReason);
+    }
+    /// The operations on each child of a list `L`, in a composition `Q`:
+    /// the first's, then the others'.
+    pub trait ChildEdits<Q, L: ChildList> {
+        /// The first child's.
+        type Head: ChildEdit<Q, L::HeadKind, L::HeadStorage>;
+        /// The others'.
+        type Tail: ChildEdits<Q, L::Tail>;
+    }
+    /// The operations on the children of the kind `CK` kept by `S`, of the
+    /// node an editor `E` is at.
+    pub trait ChildEdit<Q, CK: NodeKind, S: ChildStorage> {
+        /// The moves of each grandchild under these children.
+        type Grandchildren: GrandchildEdits<Q, S, CK::Children>;
+        /// Add one under `key`, from `start`; `false` when the key is
+        /// taken.
+        fn add<E: DriverOps<Q = Q>>(e: &mut E, key: S::Key, start: CK::Start) -> bool;
+        /// End the one under `key`, for `reason`; `false` when none is
+        /// there or others link to it.
+        fn end<E: DriverOps<Q = Q>>(e: &mut E, key: &S::Key, reason: CK::EndReason) -> bool;
+        /// End the one under `key` for `reason` and build a new one from
+        /// `start`; `false` when none is there.
+        fn replace<E: DriverOps<Q = Q>>(
+            e: &mut E,
+            key: S::Key,
+            start: CK::Start,
+            reason: CK::EndReason,
         ) -> bool;
-        /// End the child at `child` kept under `key`, for `reason`;
-        /// `false` when none is there or others link to it.
-        fn end_child<KK: 'static, RR: 'static>(
-            &mut self,
-            node: usize,
-            child: usize,
-            key: &KK,
-            reason: RR,
-        ) -> bool;
-        /// End the child at `child` kept under `key`, for `reason`, and
-        /// build a new one in its place; `false` when none is there.
-        fn replace_child<KK: Clone + 'static, RR: 'static>(
-            &mut self,
-            node: usize,
-            child: usize,
-            key: KK,
-            start: alloc::boxed::Box<dyn core::any::Any>,
-            reason: RR,
-        ) -> bool;
-        /// Move the grandchild at `grandchild` kept under `key` from the
-        /// child at `child` under `from` to the one under `to`.
-        #[allow(clippy::too_many_arguments)]
-        fn move_grandchild<KF: 'static, KG: 'static>(
-            &mut self,
-            node: usize,
-            child: usize,
-            from: &KF,
-            grandchild: usize,
-            key: &KG,
-            to: &KF,
+    }
+    /// The moves of each grandchild of a list `L` under children kept by
+    /// `S`.
+    pub trait GrandchildEdits<Q, S: ChildStorage, L: ChildList> {
+        /// The first grandchild's.
+        type Head: GrandchildEdit<Q, S, L::HeadStorage>;
+        /// The others'.
+        type Tail: GrandchildEdits<Q, S, L::Tail>;
+    }
+    /// Moving a grandchild kept by `G` under a child kept by `S`.
+    pub trait GrandchildEdit<Q, S: ChildStorage, G: ChildStorage> {
+        /// Move the grandchild under `key` from the child under `from` to
+        /// the one under `to`.
+        fn move_to<E: DriverOps<Q = Q>>(
+            e: &mut E,
+            from: &S::Key,
+            key: &G::Key,
+            to: &S::Key,
         ) -> Result<(), MoveError>;
-        /// End the node `node`, for `reason`.
-        fn end_node<RR: 'static>(&mut self, node: usize, reason: RR);
     }
 
-    /// Finding a node of the tree whose root is of the kind `R`.
-    pub trait FindNode<R: NodeKind> {
-        /// The number and the kind of the node at `at`, when it is there.
-        fn find_node(&self, at: &KeyAddress<R>) -> Option<(usize, TypeId)>;
+    /// The item at the position `I` of a list of operations on children.
+    pub trait NthChildEdit<Q, L: ChildList, I> {
+        /// The item.
+        type Out;
+    }
+    impl<Q, L: ChildList, X: ChildEdits<Q, L>> NthChildEdit<Q, L, Here> for X {
+        type Out = X::Head;
+    }
+    impl<Q, L: ChildList, X: ChildEdits<Q, L>, I> NthChildEdit<Q, L, There<I>> for X
+    where
+        X::Tail: NthChildEdit<Q, L::Tail, I>,
+    {
+        type Out = <X::Tail as NthChildEdit<Q, L::Tail, I>>::Out;
+    }
+    /// The item at the position `I` of a list of moves of grandchildren.
+    pub trait NthGrandchildEdit<Q, S: ChildStorage, L: ChildList, I> {
+        /// The item.
+        type Out;
+    }
+    impl<Q, S: ChildStorage, L: ChildList, X: GrandchildEdits<Q, S, L>>
+        NthGrandchildEdit<Q, S, L, Here> for X
+    {
+        type Out = X::Head;
+    }
+    impl<Q, S: ChildStorage, L: ChildList, X: GrandchildEdits<Q, S, L>, I>
+        NthGrandchildEdit<Q, S, L, There<I>> for X
+    where
+        X::Tail: NthGrandchildEdit<Q, S, L::Tail, I>,
+    {
+        type Out = <X::Tail as NthGrandchildEdit<Q, S, L::Tail, I>>::Out;
     }
 }
+use sealed::{ChildEdit, EditOps, GrandchildEdit, NthChildEdit, NthGrandchildEdit};
 
-/// What carries out an edit handle's operations: the driver.
-pub trait Editor: sealed::EditOps {}
-impl<E: sealed::EditOps> Editor for E {}
+/// What carries out an edit handle's operations on a node of the kind
+/// `K`: the driver, at the node's place. Every operation is chosen by the
+/// types of the child it is on; nothing is matched at run time.
+pub trait Editor<K: NodeKind>: EditOps<K> {}
+impl<K: NodeKind, E: EditOps<K>> Editor<K> for E {}
+
+type Qe<E> = <E as crate::driver::DriverOps>::Q;
+type ChildOps<E, K> = <E as EditOps<K>>::Children;
+type ChildOp<E, K, I> = <ChildOps<E, K> as NthChildEdit<Qe<E>, <K as NodeKind>::Children, I>>::Out;
+type GrandchildOp<E, K, I, CK, J> = <<ChildOp<E, K, I> as ChildEdit<
+    Qe<E>,
+    CK,
+    StorageAt<<K as NodeKind>::Children, I>,
+>>::Grandchildren as NthGrandchildEdit<
+    Qe<E>,
+    StorageAt<<K as NodeKind>::Children, I>,
+    <CK as NodeKind>::Children,
+    J,
+>>::Out;
 
 /// The edit handle a request of a node of the kind `K` is handled with: it
 /// reaches the node's own subtree only.
@@ -316,49 +375,46 @@ impl<E: sealed::EditOps> Editor for E {}
 /// handle is taken by value and ending the node itself consumes it.
 pub struct Edit<'e, E, K> {
     editor: &'e mut E,
-    node: usize,
     _kind: PhantomData<fn() -> K>,
 }
-impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
-    pub(crate) fn new(editor: &'e mut E, node: usize) -> Self {
+impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
+    pub(crate) fn new(editor: &'e mut E) -> Self {
         Self {
             editor,
-            node,
             _kind: PhantomData,
         }
     }
     /// Build a child of the kind `CK` under `key`, starting from `start`;
     /// its position `I` is inferred from its kind. `false` when a child of
     /// the kind is kept under the key: nothing is built.
-    pub fn add<CK: NodeKind, I: Number>(
-        &mut self,
-        key: KeyAt<K::Children, I>,
-        start: CK::Start,
-    ) -> bool
+    pub fn add<CK: NodeKind, I>(&mut self, key: KeyAt<K::Children, I>, start: CK::Start) -> bool
     where
         K::Children: ChildOfKind<CK, I>,
+        ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
+        ChildOp<E, K, I>: ChildEdit<Qe<E>, CK, StorageAt<K::Children, I>>,
     {
-        self.editor
-            .add_child(self.node, I::VALUE, key, alloc::boxed::Box::new(start))
+        <ChildOp<E, K, I> as ChildEdit<Qe<E>, CK, _>>::add(self.editor, key, start)
     }
     /// End the child of the kind `CK` kept under `key`, with the nodes
     /// below it, for `reason`. `false` when none is there, or when nodes
     /// link to it: the structure ends it after the last of them.
-    pub fn end<CK: NodeKind, I: Number>(
+    pub fn end<CK: NodeKind, I>(
         &mut self,
         key: &KeyAt<K::Children, I>,
         reason: CK::EndReason,
     ) -> bool
     where
         K::Children: ChildOfKind<CK, I>,
+        ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
+        ChildOp<E, K, I>: ChildEdit<Qe<E>, CK, StorageAt<K::Children, I>>,
     {
-        self.editor.end_child(self.node, I::VALUE, key, reason)
+        <ChildOp<E, K, I> as ChildEdit<Qe<E>, CK, _>>::end(self.editor, key, reason)
     }
     /// End the child of the kind `CK` kept under `key` for `reason` and
     /// build a new one in its place from `start`, with nothing in between:
     /// no call is polled and no event is handled before the new one is
     /// built. `false` when none is there: none is built.
-    pub fn replace<CK: NodeKind, I: Number>(
+    pub fn replace<CK: NodeKind, I>(
         &mut self,
         key: KeyAt<K::Children, I>,
         start: CK::Start,
@@ -366,14 +422,10 @@ impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
     ) -> bool
     where
         K::Children: ChildOfKind<CK, I>,
+        ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
+        ChildOp<E, K, I>: ChildEdit<Qe<E>, CK, StorageAt<K::Children, I>>,
     {
-        self.editor.replace_child(
-            self.node,
-            I::VALUE,
-            key,
-            alloc::boxed::Box::new(start),
-            reason,
-        )
+        <ChildOp<E, K, I> as ChildEdit<Qe<E>, CK, _>>::replace(self.editor, key, start, reason)
     }
     /// Move the grandchild of the kind `GK` kept under `key`, with the
     /// nodes below it, from the child of the kind `CK` kept under `from`
@@ -381,7 +433,7 @@ impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
     /// for the nodes above ([`NodeEnding`](crate::event::NodeEnding)) and
     /// starts where it goes ([`NodeStarted`](crate::event::NodeStarted));
     /// its calls go on.
-    pub fn move_grandchild<CK: NodeKind, I: Number, GK: NodeKind, J: Number>(
+    pub fn move_grandchild<CK: NodeKind, I, GK: NodeKind, J>(
         &mut self,
         from: &KeyAt<K::Children, I>,
         key: &KeyAt<CK::Children, J>,
@@ -390,18 +442,28 @@ impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
     where
         K::Children: ChildOfKind<CK, I>,
         CK::Children: ChildOfKind<GK, J>,
+        ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
+        ChildOp<E, K, I>: ChildEdit<Qe<E>, CK, StorageAt<K::Children, I>>,
+        <ChildOp<E, K, I> as ChildEdit<Qe<E>, CK, StorageAt<K::Children, I>>>::Grandchildren:
+            NthGrandchildEdit<Qe<E>, StorageAt<K::Children, I>, CK::Children, J>,
+        GrandchildOp<E, K, I, CK, J>:
+            GrandchildEdit<Qe<E>, StorageAt<K::Children, I>, StorageAt<CK::Children, J>>,
     {
-        self.editor
-            .move_grandchild(self.node, I::VALUE, from, J::VALUE, key, to)
+        <GrandchildOp<E, K, I, CK, J> as GrandchildEdit<Qe<E>, _, _>>::move_to(
+            self.editor,
+            from,
+            key,
+            to,
+        )
     }
     /// End the node itself, with every node below it, for `reason`.
     pub fn end_self(self, reason: K::EndReason) {
-        self.editor.end_node(self.node, reason);
+        self.editor.end_node(reason);
     }
 }
 impl<E, K> fmt::Debug for Edit<'_, E, K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Edit<{}>({})", core::any::type_name::<K>(), self.node)
+        write!(f, "Edit<{}>", core::any::type_name::<K>())
     }
 }
 
@@ -425,39 +487,11 @@ impl<R: NodeKind, K: NodeKind> fmt::Debug for NodeRequest<R, K> {
     }
 }
 
-/// A sum of requests for the nodes of a tree whose root is of the kind
-/// `R`, handed to the node each is for.
-pub trait RequestSum<R: NodeKind>: 'static {
-    /// Find the node and have it handle the request; dropped when no node
-    /// of its kind is at its address.
-    #[doc(hidden)]
-    fn deliver<E: Editor + sealed::FindNode<R>>(self, editor: &mut E);
-}
-impl<R: NodeKind> RequestSum<R> for CNil {
-    fn deliver<E: Editor + sealed::FindNode<R>>(self, _: &mut E) {
-        match self {}
-    }
-}
-impl<R: NodeKind, K: NodeKind, T: RequestSum<R>> RequestSum<R> for Coproduct<NodeRequest<R, K>, T> {
-    fn deliver<E: Editor + sealed::FindNode<R>>(self, editor: &mut E) {
-        match self {
-            Coproduct::Inl(r) => {
-                if let Some((node, kind)) = editor.find_node(&r.at)
-                    && kind == TypeId::of::<K>()
-                {
-                    r.request.apply(Edit::new(editor, node));
-                }
-            }
-            Coproduct::Inr(rest) => rest.deliver(editor),
-        }
-    }
-}
-
 /// The sum of the requests of the nodes of a list of places of a tree
 /// whose root is of the kind `R`: one for each place, in order.
 pub trait PlaceRequests<R: NodeKind> {
     /// The sum.
-    type Sum: RequestSum<R>;
+    type Sum: 'static;
 }
 impl<R: NodeKind> PlaceRequests<R> for HNil {
     type Sum = CNil;

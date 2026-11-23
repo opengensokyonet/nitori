@@ -43,6 +43,11 @@
 //! it, its calls dropped, its components' end hooks run while it is still
 //! in the tree.
 //!
+//! An edit's operations are chosen by type: a request is delivered by its
+//! place, and the operations on each child of a place are those of the
+//! child's place, found where the composition is proved; a key, a start or
+//! a reason is never matched to a place at run time.
+//!
 //! The links of the structure ([`NodeKind::Linked`]) start and end with the
 //! nodes that link: the first node linking to a node it finds absent has
 //! it built first, under its own key; the last one to end has it ended
@@ -167,7 +172,7 @@
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
 //!
 //! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()], ()).unwrap();
-//! let layer = driver.add::<Layer, _, _>(End, (), ()).unwrap();
+//! let layer = driver.add::<Layer, _, _, _>(End, (), ()).unwrap();
 //! assert!(Pin::new(&mut driver).poll(&mut Context::from_waker(Waker::noop())).is_pending());
 //! use nitori_driver::structure::NodePath;
 //! assert_eq!(layer.node(driver.root().unwrap()).unwrap().data.head.head.started, Some(Duration::ZERO));
@@ -504,6 +509,61 @@
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
 //! ```
 //!
+//! A link whose target is kept under another type of key than the node
+//! linking to it:
+//!
+//! ```compile_fail
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use core::time::Duration;
+//! # use frunk_core::{HList, hlist::HNil};
+//! # use nitori_driver::{
+//! #     call::ShareCalls,
+//! #     composition,
+//! #     driver::Driver,
+//! #     hooks::Part,
+//! #     structure::{ByOwnKey, Child, LinkedStart, NodeKind, Share, SlotVec},
+//! # };
+//! # #[derive(Clone, Default)]
+//! # struct Clock;
+//! # impl nitori_clock::MonotonicClock for Clock {
+//! #     type Instant = Duration;
+//! #     type Sleep = core::future::Pending<()>;
+//! #     fn now(&self) -> Duration { Duration::ZERO }
+//! #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+//! #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+//! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+//! # }
+//! struct Root;
+//! struct Route;
+//! struct Peer;
+//! impl NodeKind for Root {
+//!     type Children = HList![Child<Route, SlotVec<u32>>, Child<Peer, SlotVec<u64>>];
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for Route {
+//!     type Children = HNil;
+//!     type Linked = HList![ByOwnKey<Peer>];
+//! }
+//! impl LinkedStart<Peer> for Route {
+//!     fn linked_start(_: &mut ()) {}
+//! }
+//! impl NodeKind for Peer {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! # struct Base;
+//! # impl<L> Part<L> for Base { type Args = (); }
+//! # impl ShareCalls<Root> for Base { type Calls = HNil; }
+//! # impl ShareCalls<Route> for Base { type Calls = HNil; }
+//! # impl ShareCalls<Peer> for Base { type Calls = HNil; }
+//! # impl Share<Root> for Base { type Data = HNil; }
+//! # impl Share<Route> for Base { type Data = HNil; }
+//! # impl Share<Peer> for Base { type Data = HNil; }
+//! struct Q;
+//! composition!(impl driver for Q: Root, HList![Base], Clock);
+//! let _ = Driver::<Q>::new(Clock, frunk_core::hlist![()], ());
+//! ```
+//!
 //! A subscription whose anchor is not on the way up:
 //!
 //! ```compile_fail
@@ -587,6 +647,7 @@
 //!
 //! [`NodeStarted`]: crate::event::NodeStarted
 //! [`NodeEnding`]: crate::event::NodeEnding
+mod edit;
 mod place;
 mod wake;
 pub mod walk;
@@ -610,13 +671,18 @@ use core::{
 use frunk_core::indices::Here as I0;
 use nitori_clock::MonotonicClock;
 
+pub use edit::{
+    Deliver, DriverOps, GrandchildPlace, GrandchildPlaces, LinkAdd, NoChildPlace,
+    NoGrandchildPlace, NoPlaceEdits, PlaceEdit,
+};
 pub use place::{
-    AddressOf, BuildAt, ChildPath, ChildPlaces, ClockInstantOf, ClockOf, CompInfo, CompLend,
-    CompPositions, Detach, DriverComposition, FindPlace, InstantOf, NoPlace, NoPlacePos, NthPlace,
-    ParentOf, ParentPlace, PartsOps, Place, PlaceAt, PlaceDesc, PlaceInfo, PlaceNth, PlaceOps,
-    PlacePack, PlacePositions, PlacePositionsAt, PlaceShape, PlacesOf, PlacesUnder, ProveComp,
-    ProveParts, ProvePlace, ProvePlaces, RequestsOf, RootNode, SelfParts, ShareOps, TargetOf,
-    prove_places,
+    AddressOf, BuildAt, ChildPath, ChildPlace, ChildPlaces, ClockInstantOf, ClockOf, CompInfo,
+    CompLend, CompPositions, Detach, DriverComposition, FindPlace, InstantOf, LinkPlace,
+    NoLinkPlace, NoPlace, NoPlacePos, NthPlace, ParentOf, ParentPlace, PartsOps, Place, PlaceAt,
+    PlaceDesc, PlaceInfo, PlaceKey, PlaceKeyOf, PlaceNth, PlaceOps, PlacePack, PlacePositions,
+    PlacePositionsAt, PlaceShape, PlacesOf, PlacesUnder, ProveChildPlaces, ProveComp,
+    ProveLinkPlace, ProveParts, ProvePlace, ProvePlaces, RequestsOf, RootNode, SelfParts, ShareOps,
+    TargetOf, prove_places,
 };
 use wake::{NodeHead, PositionWaker, Shared};
 use walk::{CallWalk, Cursor, Number, PlaceVisit, PlaceWalk, SlotInfo, SlotStore, SlotVisit};
@@ -625,14 +691,10 @@ use crate::{
     call::{CallStep, LendOne, OutboxOf, PartsOf, RootOf, SlotCall, SlotDesc, SlotYield},
     event::{Outbox, Scope, Triggered},
     hooks::{AbortCause, ArgsOf, EndReasonOf, StartOf},
-    request::{
-        RequestSum,
-        sealed::{EditOps, FindNode},
-    },
     structure::{
         Address, Append, ChildAddresses, ChildAt, ChildList, ChildOfKind, End, FromAddress,
         HandleAt, KeyAddress, KeyAt, KindFor, LinkList, MoveError, NodeKind, NodePath,
-        ParentChildren, PathFrom, RemainsOf, resolve_node,
+        ParentChildren, ParentPath, PathFrom, RemainsOf, resolve_node,
     },
 };
 
@@ -783,8 +845,9 @@ impl<A> NodeSlot<A> {
 }
 
 /// What one round of events handles at one position.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
-struct Hit {
+pub struct Hit {
     node: usize,
     serial: u64,
     target: Target,
@@ -937,47 +1000,6 @@ impl<Q: DriverComposition> PlaceVisit<Q> for DetachAt<'_, Q> {
     }
 }
 
-struct AddAt<'r, Q: DriverComposition, KK> {
-    root: &'r mut RootNode<Q>,
-    parent: &'r AddressOf<Q>,
-    key: KK,
-    start: Box<dyn core::any::Any>,
-    args: &'r ArgsOf<PartsOf<Q>>,
-    outbox: &'r OutboxOf<Q>,
-}
-impl<Q: DriverComposition, KK: 'static> PlaceVisit<Q> for AddAt<'_, Q, KK> {
-    type Out = Option<AddressOf<Q>>;
-    fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) -> Self::Out {
-        Pos::add(
-            self.root,
-            self.parent,
-            self.key,
-            self.start,
-            self.args,
-            self.outbox,
-        )
-    }
-}
-struct LinkedStartAt<'r> {
-    start: &'r mut Box<dyn core::any::Any>,
-}
-impl<Q: DriverComposition> PlaceVisit<Q> for LinkedStartAt<'_> {
-    type Out = Option<Box<dyn core::any::Any>>;
-    fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) -> Self::Out {
-        Pos::linked_start(self.start)
-    }
-}
-struct FindChild<'r, Q: DriverComposition, KK> {
-    root: &'r RootNode<Q>,
-    parent: &'r AddressOf<Q>,
-    key: &'r KK,
-}
-impl<Q: DriverComposition, KK: 'static> PlaceVisit<Q> for FindChild<'_, Q, KK> {
-    type Out = Option<AddressOf<Q>>;
-    fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) -> Self::Out {
-        Pos::find_child(self.root, self.parent, self.key)
-    }
-}
 struct MoveUnder<'r, Q: DriverComposition> {
     root: &'r mut RootNode<Q>,
     at: &'r AddressOf<Q>,
@@ -989,19 +1011,6 @@ impl<Q: DriverComposition> PlaceVisit<Q> for MoveUnder<'_, Q> {
         Pos::move_under(self.root, self.at, self.to)
     }
 }
-struct EndWith<'r, Q: DriverComposition, RR> {
-    root: &'r mut RootNode<Q>,
-    at: &'r AddressOf<Q>,
-    reason: &'r RR,
-    outbox: &'r OutboxOf<Q>,
-}
-impl<Q: DriverComposition, RR: 'static> PlaceVisit<Q> for EndWith<'_, Q, RR> {
-    type Out = ();
-    fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) {
-        Pos::end_with(self.root, self.at, self.reason, self.outbox)
-    }
-}
-
 struct Start<'r, Q: DriverComposition> {
     node: usize,
     at: &'r AddressOf<Q>,
@@ -1090,6 +1099,7 @@ where
     Q: DriverComposition<Remains = RemainsOf<PartsOf<Q>, RootOf<Q>>>,
     PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
     <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
+    RequestsOf<Q>: edit::Deliver<Q, I0>,
 {
     /// A driver whose root is built from `args` and `start`; it reads and
     /// sleeps on `clock`. The root's calls start woken.
@@ -1242,28 +1252,15 @@ where
         Ok(driver)
     }
 
-    /// The root, while it has not ended; for reading what the calls and
-    /// hooks keep.
-    pub fn root(&self) -> Option<&RootNode<Q>> {
-        self.root.as_ref()
-    }
-    /// Whether the root ended.
-    pub fn ended(&self) -> bool {
-        self.ended
-    }
-    /// What the parts keep of the root's shares after it ended, once it
-    /// did.
-    pub fn remains(&self) -> Option<&Q::Remains> {
-        self.remains.as_ref()
-    }
-
     /// Add a node of the kind `CK` under the node at `parent`, under
     /// `key`, starting from `start`, as a request's edit handle does: it is
     /// built from the view of its parent, its calls start woken, its
     /// deadlines are read and [`NodeStarted`](crate::event::NodeStarted) is
-    /// published at it. Returns its path.
+    /// published at it. Returns its path. The position `I` among the
+    /// parent's children and the number `N` of the new node's place are
+    /// inferred.
     #[allow(clippy::type_complexity)]
-    pub fn add<CK, X, I>(
+    pub fn add<CK, X, I, N>(
         &mut self,
         parent: X,
         key: KeyAt<ParentChildren<RootOf<Q>, X>, I>,
@@ -1273,8 +1270,19 @@ where
         CK: KindFor<PartsOf<Q>>,
         X: NodePath<RootOf<Q>, PartsOf<Q>> + Append<I, HandleAt<ParentChildren<RootOf<Q>, X>, I>>,
         ParentChildren<RootOf<Q>, X>: ChildAt<I, PartsOf<Q>> + ChildOfKind<CK, I>,
-        <X as Append<I, HandleAt<ParentChildren<RootOf<Q>, X>, I>>>::Out: FromAddress<RootOf<Q>>,
-        I: Number,
+        <X as Append<I, HandleAt<ParentChildren<RootOf<Q>, X>, I>>>::Out: FromAddress<RootOf<Q>>
+            + PlaceKey<RootOf<Q>, Key = KeyAt<ParentChildren<RootOf<Q>, X>, I>>
+            + PathFrom<RootOf<Q>, Target = CK>
+            + ParentPath
+            + 'static,
+        PlacesOf<Q>: FindPlace<<X as Append<I, HandleAt<ParentChildren<RootOf<Q>, X>, I>>>::Out, N>
+            + NthPlace<
+                RootOf<Q>,
+                N,
+                Item = Place<<X as Append<I, HandleAt<ParentChildren<RootOf<Q>, X>, I>>>::Out>,
+            >,
+        Q::Places: PlaceNth<Q, PlacesOf<Q>, N>,
+        N: Number,
     {
         if self.ended {
             return Err(AddError::Ended);
@@ -1284,7 +1292,13 @@ where
         };
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
-        let added = self.add_node(parent_id, I::VALUE, key, Box::new(start), &mut todo);
+        let added = self.add_typed::<PlaceAt<Q, N>, PlacePositionsAt<Q, N>>(
+            N::VALUE,
+            parent_id,
+            key,
+            start,
+            &mut todo,
+        );
         self.settle(todo);
         let id = added.ok_or(AddError::Occupied)?;
         let addr = self.live(id).map(|n| n.addr).ok_or(AddError::Ended)?;
@@ -1298,9 +1312,11 @@ where
     /// does. The root is ended with [`end`](Driver::end). Returns whether
     /// a node was there and was removed: a node others link to is removed
     /// after the last of them, not on its own.
-    pub fn remove<X>(&mut self, at: X, reason: EndReasonOf<TargetOf<Q, X>>) -> bool
+    pub fn remove<X, N>(&mut self, at: X, reason: EndReasonOf<TargetOf<Q, X>>) -> bool
     where
-        X: PathFrom<RootOf<Q>>,
+        X: PathFrom<RootOf<Q>> + PlaceKey<RootOf<Q>> + ParentPath + 'static,
+        PlacesOf<Q>: FindPlace<X, N> + NthPlace<RootOf<Q>, N, Item = Place<X>>,
+        Q::Places: PlaceNth<Q, PlacesOf<Q>, N>,
     {
         let Some(id) = self.find(&at.address()) else {
             return false;
@@ -1310,508 +1326,10 @@ where
         }
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
-        self.end_with(id, &reason, &mut todo);
+        self.end_typed::<Place<X>, PlacePositionsAt<Q, N>>(id, reason, &mut todo);
         self.settle(todo);
         true
     }
-
-    /// End the root, for `reason`, with every node below it: the nodes
-    /// below end first; the root's components write what their parts keep
-    /// ([`remains`](Driver::remains)) and end. The driver's future is
-    /// ready afterwards.
-    pub fn end(&mut self, reason: EndReasonOf<RootOf<Q>>) {
-        if self.ended {
-            return;
-        }
-        self.outbox.set_now(self.clock.now());
-        let id = self.root_id();
-        let mut todo = Vec::new();
-        self.end_with(id, &reason, &mut todo);
-    }
-
-    // ---- nodes ----
-
-    fn root_id(&self) -> usize {
-        // Invariant: the root is registered first and keeps its number
-        // until it ends.
-        0
-    }
-    fn live(&self, id: usize) -> Option<&NodeEntry<AddressOf<Q>>> {
-        self.nodes.get(id).and_then(NodeSlot::live)
-    }
-    fn find(&self, addr: &AddressOf<Q>) -> Option<usize> {
-        self.nodes
-            .iter()
-            .position(|n| n.live().is_some_and(|n| n.addr == *addr))
-    }
-    fn live_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..self.nodes.len()).filter(|&id| self.live(id).is_some())
-    }
-    fn depth(&self, id: usize) -> usize {
-        self.live(id).map_or(0, |n| self.places[n.place].info.depth)
-    }
-    /// The node at `depth` on the way up from `id`, `id` included.
-    fn ancestor_at(&self, id: usize, depth: usize) -> Option<usize> {
-        let mut at = id;
-        loop {
-            let n = self.live(at)?;
-            let d = self.places[n.place].info.depth;
-            if d == depth {
-                return Some(at);
-            }
-            if d < depth {
-                return None;
-            }
-            at = n.parent?;
-        }
-    }
-    /// Whether `above` is strictly above `id`.
-    fn is_above(&self, above: usize, id: usize) -> bool {
-        let mut at = self.live(id).and_then(|n| n.parent);
-        while let Some(a) = at {
-            if a == above {
-                return true;
-            }
-            at = self.live(a).and_then(|n| n.parent);
-        }
-        false
-    }
-    /// Whether nodes link to the node `id`.
-    fn linked_to(&self, id: usize) -> bool {
-        self.nodes
-            .iter()
-            .any(|n| n.live().is_some_and(|n| n.link == Some(id)))
-    }
-    fn register(&mut self, addr: AddressOf<Q>, place: usize, parent: Option<usize>) -> usize {
-        let id = self
-            .nodes
-            .iter()
-            .position(|n| match n {
-                NodeSlot::Free => true,
-                NodeSlot::Live(_) => false,
-                NodeSlot::Retired(h) => NodeHead::reusable(h),
-            })
-            .unwrap_or_else(|| {
-                self.nodes.push(NodeSlot::Free);
-                self.nodes.len() - 1
-            });
-        let positions = self.places[place].positions();
-        self.serial += 1;
-        self.nodes[id] = NodeSlot::Live(NodeEntry {
-            head: Arc::new(NodeHead::new(id)),
-            serial: self.serial,
-            place,
-            addr,
-            parent,
-            children: Vec::new(),
-            link: None,
-            wakers: vec![None; positions],
-        });
-        if let Some(parent) = parent
-            && let NodeSlot::Live(p) = &mut self.nodes[parent]
-        {
-            p.children.push(id);
-        }
-        id
-    }
-    /// The waker of the position `bit` of the node `id`, made with the
-    /// current outer waker.
-    fn waker(&mut self, id: usize, bit: usize) -> Waker {
-        let epoch = self.epoch;
-        let outer = self.outer.clone().unwrap_or_else(|| Waker::noop().clone());
-        let shared = self.shared.clone();
-        let NodeSlot::Live(n) = &mut self.nodes[id] else {
-            return Waker::noop().clone();
-        };
-        match &n.wakers[bit] {
-            Some((e, w)) if *e == epoch => w.clone(),
-            _ => {
-                let w = Waker::from(Arc::new(PositionWaker {
-                    shared,
-                    head: n.head.clone(),
-                    bit: 1 << bit,
-                    outer,
-                }));
-                n.wakers[bit] = Some((epoch, w.clone()));
-                w
-            }
-        }
-    }
-    fn mark(&self, id: usize, bits: u64) {
-        if let Some(n) = self.live(id) {
-            self.shared.mark(&n.head, bits, self.outer.as_ref());
-        }
-    }
-    /// Take the nodes marked, with their marks, in the order of their
-    /// first mark.
-    fn take_ready(&mut self) -> Vec<(usize, u64)> {
-        let ids = self
-            .shared
-            .take(|id| self.nodes.get(id).and_then(NodeSlot::head));
-        let mut out = Vec::new();
-        for id in ids {
-            let Some(head) = self.nodes.get(id).and_then(NodeSlot::head) else {
-                continue;
-            };
-            let bits = head.marks.swap(0, SeqCst);
-            if self.live(id).is_some() && bits != 0 {
-                out.push((id, bits));
-            }
-        }
-        out
-    }
-
-    /// A new node: its calls start, its calls and its actions before the
-    /// calls are woken, its deadlines are read, and that it started is
-    /// published.
-    fn started(&mut self, id: usize, todo: &mut Vec<Hit>) {
-        let p = self.nodes[id].live().map(|n| n.place).unwrap_or(0);
-        let addr = self.nodes[id]
-            .live()
-            .map(|n| n.addr)
-            .unwrap_or_else(Address::here);
-        for k in 0..self.places[p].calls.len() {
-            let s = self.places[p].calls[k];
-            let _ = <Cursor<I0> as CallWalk<Q>>::visit(
-                s,
-                &mut self.calls,
-                Start::<Q> {
-                    node: id,
-                    at: &addr,
-                },
-            );
-        }
-        self.woken(id, todo);
-    }
-    /// A node started or moved: its calls and its actions before the calls
-    /// are woken, its deadlines are read, and that it started is
-    /// published.
-    fn woken(&mut self, id: usize, todo: &mut Vec<Hit>) {
-        let p = self.nodes[id].live().map(|n| n.place).unwrap_or(0);
-        let woken = self.places[p].calls_mask() | self.places[p].before_mask();
-        self.mark(id, woken);
-        for c in 0..self.places[p].info.comps.len() {
-            if self.places[p].info.comps[c].timed {
-                self.read_deadline(id, c);
-            }
-        }
-        let started = self.places[p].info.started;
-        self.deliver(id, started, None, false, todo);
-    }
-
-    /// Build a node at the position `child` among the children of the
-    /// node `parent`, under `key`; `None` when the key is taken. A node
-    /// whose kind links to another has it built first, under its own key,
-    /// when it is not there.
-    fn add_node<KK: Clone + 'static>(
-        &mut self,
-        parent: usize,
-        child: usize,
-        key: KK,
-        mut start: Box<dyn core::any::Any>,
-        todo: &mut Vec<Hit>,
-    ) -> Option<usize> {
-        let n = self.live(parent)?;
-        let (pp, parent_addr) = (n.place, n.addr);
-        let p = self.places[pp].children.get(child).copied().flatten()?;
-        if self.find_child(parent, child, &key).is_some() {
-            return None;
-        }
-        let link = match self.places[p].link {
-            None => None,
-            Some(t) => {
-                let root = self.root_id();
-                let i = self.places[t].info.index?;
-                match self.find_child(root, i, &key) {
-                    Some(target) => Some(target),
-                    None => {
-                        let linked = <Cursor<I0> as PlaceWalk<Q>>::visit(
-                            p,
-                            LinkedStartAt { start: &mut start },
-                        )
-                        .flatten()?;
-                        Some(self.add_node(root, i, key.clone(), linked, todo)?)
-                    }
-                }
-            }
-        };
-        let root = self.root.as_mut()?;
-        let addr = <Cursor<I0> as PlaceWalk<Q>>::visit(
-            p,
-            AddAt::<Q, KK> {
-                root,
-                parent: &parent_addr,
-                key,
-                start,
-                args: &self.args,
-                outbox: &self.outbox,
-            },
-        )
-        .flatten()?;
-        // what the builds published, at the parent and above
-        self.effects(parent, &[], None, todo);
-        let id = self.register(addr, p, Some(parent));
-        if let NodeSlot::Live(n) = &mut self.nodes[id] {
-            n.link = link;
-        }
-        self.started(id, todo);
-        Some(id)
-    }
-    /// The node at the position `child` among the children of the node
-    /// `parent`, kept under `key`.
-    fn find_child<KK: 'static>(&self, parent: usize, child: usize, key: &KK) -> Option<usize> {
-        let n = self.live(parent)?;
-        let p = self.places[n.place]
-            .children
-            .get(child)
-            .copied()
-            .flatten()?;
-        let addr = <Cursor<I0> as PlaceWalk<Q>>::visit(
-            p,
-            FindChild::<Q, KK> {
-                root: self.root.as_ref()?,
-                parent: &n.addr,
-                key,
-            },
-        )
-        .flatten()?;
-        self.find(&addr)
-    }
-    /// End the node `id`, with the nodes below it, for `reason`, of the
-    /// type of its kind's reason; the root ends the driver.
-    fn end_with<RR: 'static>(&mut self, id: usize, reason: &RR, todo: &mut Vec<Hit>) {
-        let Some(p) = self.live(id).map(|n| n.place) else {
-            return;
-        };
-        self.remove_subtree(
-            id,
-            |root, at, outbox| {
-                let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
-                    p,
-                    EndWith::<Q, RR> {
-                        root,
-                        at,
-                        reason,
-                        outbox,
-                    },
-                );
-            },
-            todo,
-        );
-    }
-    /// Every node in the subtree of `id`, `id` first, each node before the
-    /// nodes below it.
-    fn subtree(&self, id: usize, out: &mut Vec<usize>) {
-        if let Some(n) = self.live(id) {
-            out.push(id);
-            for &c in &n.children {
-                self.subtree(c, out);
-            }
-        }
-    }
-
-    /// Every node below and at `id`, in the order they end: a node after
-    /// the nodes below it, a child of a kind others link to after its
-    /// siblings' subtrees.
-    fn removal_order(&self, id: usize, out: &mut Vec<usize>) {
-        if let Some(n) = self.live(id) {
-            let (targets, others): (Vec<usize>, Vec<usize>) = n.children.iter().partition(|&&c| {
-                self.live(c)
-                    .is_some_and(|c| self.places[c.place].link_target)
-            });
-            for c in others.into_iter().chain(targets) {
-                self.removal_order(c, out);
-            }
-            out.push(id);
-        }
-    }
-
-    /// End the node `id` with the nodes below it; `own_end` runs the end
-    /// hooks of `id` itself. What it reaches goes into `todo`; ending the
-    /// root ends the driver. A node that no node links to any more once
-    /// they ended ends after them, for its kind's default reason.
-    fn remove_subtree(
-        &mut self,
-        id: usize,
-        own_end: impl FnOnce(&mut RootNode<Q>, &AddressOf<Q>, &OutboxOf<Q>),
-        todo: &mut Vec<Hit>,
-    ) {
-        let mut order = Vec::new();
-        self.removal_order(id, &mut order);
-        let is_root = id == self.root_id();
-        let mut own_end = Some(own_end);
-        let mut unlinked = Vec::new();
-        for n in order {
-            let Some(entry) = self.live(n) else { continue };
-            let (p, addr) = (entry.place, entry.addr);
-            unlinked.extend(entry.link);
-            let ending = self.places[p].info.ending;
-            self.deliver(n, ending, None, true, todo);
-            for c in 0..self.places[p].info.comps.len() {
-                self.set_deadline(n, c, None);
-            }
-            for k in 0..self.places[p].calls.len() {
-                let s = self.places[p].calls[k];
-                let _ = <Cursor<I0> as CallWalk<Q>>::visit(s, &mut self.calls, Stop { node: n });
-            }
-            let Some(root) = self.root.as_mut() else {
-                return;
-            };
-            if n == id {
-                if is_root {
-                    let mut remains = Default::default();
-                    <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::remains(
-                        root,
-                        &addr,
-                        &mut remains,
-                        &self.outbox,
-                    );
-                    self.remains = Some(remains);
-                }
-                if let Some(end) = own_end.take() {
-                    end(root, &addr, &self.outbox);
-                }
-            } else {
-                let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
-                    p,
-                    EndDefault::<Q> {
-                        root,
-                        at: &addr,
-                        outbox: &self.outbox,
-                    },
-                );
-            }
-            let writes = self.comp_writes(p);
-            self.effects(n, &writes, None, todo);
-            if !is_root || n != id {
-                let root = self.root.as_mut().expect("the root is there while it ends");
-                let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(p, DetachAt::<Q> { root, at: &addr });
-            }
-            self.retire(n);
-        }
-        if is_root {
-            self.finish();
-            return;
-        }
-        self.end_unlinked(unlinked, todo);
-    }
-    /// End each of `targets` that is there and no node links to any more,
-    /// for its kind's default reason.
-    fn end_unlinked(&mut self, targets: Vec<usize>, todo: &mut Vec<Hit>) {
-        for target in targets {
-            let Some(p) = self.live(target).map(|n| n.place) else {
-                continue;
-            };
-            if self.linked_to(target) {
-                continue;
-            }
-            self.remove_subtree(
-                target,
-                |root, at, outbox| {
-                    let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
-                        p,
-                        EndDefault::<Q> { root, at, outbox },
-                    );
-                },
-                todo,
-            );
-        }
-    }
-    fn retire(&mut self, id: usize) {
-        let slot = core::mem::replace(&mut self.nodes[id], NodeSlot::Free);
-        if let NodeSlot::Live(n) = slot {
-            n.head.dead.store(true, SeqCst);
-            if let Some(parent) = n.parent
-                && let NodeSlot::Live(p) = &mut self.nodes[parent]
-            {
-                p.children.retain(|&c| c != id);
-            }
-            self.nodes[id] = NodeSlot::Retired(n.head);
-        }
-    }
-    /// The root ended: the driver does nothing more.
-    fn finish(&mut self) {
-        self.ended = true;
-        self.root = None;
-        self.shared.closed.store(true, SeqCst);
-        let _ = self.outbox.take();
-        self.timers.clear();
-        self.deadlines.clear();
-        self.sleep = None;
-        self.pending.clear();
-        if let Some(outer) = &self.outer {
-            outer.wake_by_ref();
-        }
-    }
-    fn comp_writes(&self, p: usize) -> Vec<TypeId> {
-        let mut out = Vec::new();
-        for c in &self.places[p].info.comps {
-            out.extend_from_slice(&c.writes);
-        }
-        out
-    }
-
-    /// Move the node `id` under the node `to`, of the place of its parent:
-    /// it ends where it was for the nodes above, its subtree's addresses
-    /// follow it, and it starts where it goes; its calls go on.
-    fn move_node(&mut self, id: usize, to: usize, todo: &mut Vec<Hit>) -> Result<(), MoveError> {
-        let n = self.live(id).ok_or(MoveError::NoSource)?;
-        let (p, at, from) = (n.place, n.addr, n.parent);
-        let dest = self.live(to).ok_or(MoveError::NoDestination)?;
-        let to_addr = dest.addr;
-        if from == Some(to) {
-            return Ok(());
-        }
-        let root = self.root.as_mut().ok_or(MoveError::NoSource)?;
-        let new = <Cursor<I0> as PlaceWalk<Q>>::visit(
-            p,
-            MoveUnder::<Q> {
-                root,
-                at: &at,
-                to: &to_addr,
-            },
-        )
-        .unwrap_or(Err(MoveError::NoSource))?;
-        // it ends where it was: the nodes above it there hear it
-        let ending = self.places[p].info.ending;
-        self.deliver(id, ending, None, true, todo);
-        let levels = self.places[p].info.depth;
-        let mut moved = Vec::new();
-        self.subtree(id, &mut moved);
-        for &m in &moved {
-            if let NodeSlot::Live(e) = &mut self.nodes[m] {
-                // Invariant: every node of the subtree has the moved node's
-                // address as its first levels.
-                e.addr = e
-                    .addr
-                    .splice(&new, levels)
-                    .expect("a node below has the address of the node above it first");
-            }
-        }
-        if let Some(from) = from
-            && let NodeSlot::Live(f) = &mut self.nodes[from]
-        {
-            f.children.retain(|&c| c != id);
-        }
-        if let NodeSlot::Live(t) = &mut self.nodes[to] {
-            t.children.push(id);
-        }
-        if let NodeSlot::Live(e) = &mut self.nodes[id] {
-            e.parent = Some(to);
-        }
-        for &m in &moved[1..] {
-            let q = self.live(m).map_or(0, |n| n.place);
-            for c in 0..self.places[q].info.comps.len() {
-                if self.places[q].info.comps[c].timed {
-                    self.read_deadline(m, c);
-                }
-            }
-        }
-        self.woken(id, todo);
-        Ok(())
-    }
-
-    // ---- requests ----
 
     /// Have the node a request is for handle it; what its edits reach goes
     /// into `todo`.
@@ -1819,134 +1337,8 @@ where
         if self.ended {
             return;
         }
-        request.deliver(self);
+        <RequestsOf<Q> as edit::Deliver<Q, I0>>::deliver(request, self);
         todo.append(&mut self.pending);
-    }
-    /// Run `f` with the hits of the request being handled as its `todo`.
-    fn editing<T>(&mut self, f: impl FnOnce(&mut Self, &mut Vec<Hit>) -> T) -> T {
-        let mut todo = core::mem::take(&mut self.pending);
-        let out = f(self, &mut todo);
-        self.pending.append(&mut todo);
-        out
-    }
-
-    // ---- deadlines ----
-
-    fn set_deadline(&mut self, id: usize, c: usize, at: Option<InstantOf<Q>>) {
-        if let Some(old) = self.deadlines.remove(&(id, c)) {
-            self.timers.remove(&(old, id, c));
-        }
-        if let Some(at) = at {
-            self.deadlines.insert((id, c), at);
-            self.timers.insert((at, id, c));
-        }
-    }
-    fn deadline(&mut self, id: usize, c: usize) -> Option<InstantOf<Q>> {
-        let n = self.live(id)?;
-        let (p, addr) = (n.place, n.addr);
-        let root = self.root.as_mut()?;
-        let at = <Cursor<I0> as PlaceWalk<Q>>::visit(
-            p,
-            Deadline::<Q> {
-                root,
-                at: &addr,
-                c,
-                outbox: &self.outbox,
-            },
-        )
-        .flatten();
-        // reading a deadline publishes nothing
-        let _ = self.outbox.take();
-        at
-    }
-    fn read_deadline(&mut self, id: usize, c: usize) {
-        let at = self.deadline(id, c);
-        self.set_deadline(id, c, at);
-    }
-
-    // ---- events ----
-
-    fn hit(&self, node: usize, target: Target, events: u64) -> Hit {
-        Hit {
-            node,
-            serial: self.live(node).map_or(0, |n| n.serial),
-            target,
-            events,
-        }
-    }
-    /// After a lend at `id` that took the components `writes` exclusive:
-    /// the deadlines of those types to read again, and the events it
-    /// published, as hits. `skip` is a call's own position.
-    fn effects(
-        &mut self,
-        id: usize,
-        writes: &[TypeId],
-        skip: Option<(usize, Target)>,
-        out: &mut Vec<Hit>,
-    ) {
-        for (depth, event) in self.outbox.take() {
-            if let Some(at) = self.ancestor_at(id, depth) {
-                self.deliver(at, event, skip, false, out);
-            }
-        }
-        if writes.is_empty() {
-            return;
-        }
-        for m in self.live_ids().collect::<Vec<_>>() {
-            let p = self.nodes[m].live().map_or(0, |n| n.place);
-            for (c, comp) in self.places[p].info.comps.iter().enumerate() {
-                if comp.timed && writes.contains(&comp.type_id) {
-                    out.push(self.hit(m, Target::Comp(c), 0));
-                }
-            }
-        }
-    }
-    /// The hits of the event `event` published at `at`: every subscriber
-    /// whose scope has it, `skip` aside; `above` for an event that reaches
-    /// only the nodes above.
-    fn deliver(
-        &self,
-        at: usize,
-        event: TypeId,
-        skip: Option<(usize, Target)>,
-        above: bool,
-        out: &mut Vec<Hit>,
-    ) {
-        let start = self.subscribers.partition_point(|&(e, _)| e < event);
-        let Some(at_place) = self.live(at).map(|n| n.place) else {
-            return;
-        };
-        for &(e, sub) in &self.subscribers[start..] {
-            if e != event {
-                break;
-            }
-            for m in self.live_ids() {
-                if self.live(m).map(|n| n.place) != Some(sub.place) {
-                    continue;
-                }
-                if skip == Some((m, sub.target)) {
-                    continue;
-                }
-                let heard = match sub.scope {
-                    Scope::Around => {
-                        if above {
-                            self.is_above(m, at)
-                        } else {
-                            m == at || self.is_above(m, at) || self.is_above(at, m)
-                        }
-                    }
-                    Scope::At { depth, place } => {
-                        self.places[at_place].info.pre == place
-                            && self.ancestor_at(at, depth).is_some()
-                            && self.ancestor_at(at, depth) == self.ancestor_at(m, depth)
-                            && (!above || self.is_above(m, at))
-                    }
-                };
-                if heard {
-                    out.push(self.hit(m, sub.target, sub.bit.map_or(0, |b| 1 << b)));
-                }
-            }
-        }
     }
     /// Handle the hits, round after round, until a round publishes nothing
     /// heard: a call is woken; a component's handler runs with the events
@@ -2237,7 +1629,622 @@ where
         }
         Poll::Pending
     }
+}
 
+impl<Q: DriverComposition> Driver<Q>
+where
+    Cursor<I0>: CallWalk<Q> + PlaceWalk<Q>,
+    PlacesOf<Q>: NthPlace<RootOf<Q>, I0, Item = Place<End>>,
+    Q::Places: PlaceNth<Q, PlacesOf<Q>, I0>,
+    Q: DriverComposition<Remains = RemainsOf<PartsOf<Q>, RootOf<Q>>>,
+    PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
+    <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
+{
+    /// The root, while it has not ended; for reading what the calls and
+    /// hooks keep.
+    pub fn root(&self) -> Option<&RootNode<Q>> {
+        self.root.as_ref()
+    }
+    /// Whether the root ended.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+    /// What the parts keep of the root's shares after it ended, once it
+    /// did.
+    pub fn remains(&self) -> Option<&Q::Remains> {
+        self.remains.as_ref()
+    }
+
+    /// End the root, for `reason`, with every node below it: the nodes
+    /// below end first; the root's components write what their parts keep
+    /// ([`remains`](Driver::remains)) and end. The driver's future is
+    /// ready afterwards.
+    pub fn end(&mut self, reason: EndReasonOf<RootOf<Q>>) {
+        if self.ended {
+            return;
+        }
+        self.outbox.set_now(self.clock.now());
+        let id = self.root_id();
+        let mut todo = Vec::new();
+        self.end_typed::<Place<End>, PlacePositionsAt<Q, I0>>(id, reason, &mut todo);
+    }
+
+    // ---- nodes ----
+
+    fn root_id(&self) -> usize {
+        // Invariant: the root is registered first and keeps its number
+        // until it ends.
+        0
+    }
+    fn live(&self, id: usize) -> Option<&NodeEntry<AddressOf<Q>>> {
+        self.nodes.get(id).and_then(NodeSlot::live)
+    }
+    fn find(&self, addr: &AddressOf<Q>) -> Option<usize> {
+        self.nodes
+            .iter()
+            .position(|n| n.live().is_some_and(|n| n.addr == *addr))
+    }
+    fn live_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.nodes.len()).filter(|&id| self.live(id).is_some())
+    }
+    fn depth(&self, id: usize) -> usize {
+        self.live(id).map_or(0, |n| self.places[n.place].info.depth)
+    }
+    /// The node at `depth` on the way up from `id`, `id` included.
+    fn ancestor_at(&self, id: usize, depth: usize) -> Option<usize> {
+        let mut at = id;
+        loop {
+            let n = self.live(at)?;
+            let d = self.places[n.place].info.depth;
+            if d == depth {
+                return Some(at);
+            }
+            if d < depth {
+                return None;
+            }
+            at = n.parent?;
+        }
+    }
+    /// Whether `above` is strictly above `id`.
+    fn is_above(&self, above: usize, id: usize) -> bool {
+        let mut at = self.live(id).and_then(|n| n.parent);
+        while let Some(a) = at {
+            if a == above {
+                return true;
+            }
+            at = self.live(a).and_then(|n| n.parent);
+        }
+        false
+    }
+    /// Whether nodes link to the node `id`.
+    fn linked_to(&self, id: usize) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| n.live().is_some_and(|n| n.link == Some(id)))
+    }
+    fn register(&mut self, addr: AddressOf<Q>, place: usize, parent: Option<usize>) -> usize {
+        let id = self
+            .nodes
+            .iter()
+            .position(|n| match n {
+                NodeSlot::Free => true,
+                NodeSlot::Live(_) => false,
+                NodeSlot::Retired(h) => NodeHead::reusable(h),
+            })
+            .unwrap_or_else(|| {
+                self.nodes.push(NodeSlot::Free);
+                self.nodes.len() - 1
+            });
+        let positions = self.places[place].positions();
+        self.serial += 1;
+        self.nodes[id] = NodeSlot::Live(NodeEntry {
+            head: Arc::new(NodeHead::new(id)),
+            serial: self.serial,
+            place,
+            addr,
+            parent,
+            children: Vec::new(),
+            link: None,
+            wakers: vec![None; positions],
+        });
+        if let Some(parent) = parent
+            && let NodeSlot::Live(p) = &mut self.nodes[parent]
+        {
+            p.children.push(id);
+        }
+        id
+    }
+    /// The waker of the position `bit` of the node `id`, made with the
+    /// current outer waker.
+    fn waker(&mut self, id: usize, bit: usize) -> Waker {
+        let epoch = self.epoch;
+        let outer = self.outer.clone().unwrap_or_else(|| Waker::noop().clone());
+        let shared = self.shared.clone();
+        let NodeSlot::Live(n) = &mut self.nodes[id] else {
+            return Waker::noop().clone();
+        };
+        match &n.wakers[bit] {
+            Some((e, w)) if *e == epoch => w.clone(),
+            _ => {
+                let w = Waker::from(Arc::new(PositionWaker {
+                    shared,
+                    head: n.head.clone(),
+                    bit: 1 << bit,
+                    outer,
+                }));
+                n.wakers[bit] = Some((epoch, w.clone()));
+                w
+            }
+        }
+    }
+    fn mark(&self, id: usize, bits: u64) {
+        if let Some(n) = self.live(id) {
+            self.shared.mark(&n.head, bits, self.outer.as_ref());
+        }
+    }
+    /// Take the nodes marked, with their marks, in the order of their
+    /// first mark.
+    fn take_ready(&mut self) -> Vec<(usize, u64)> {
+        let ids = self
+            .shared
+            .take(|id| self.nodes.get(id).and_then(NodeSlot::head));
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(head) = self.nodes.get(id).and_then(NodeSlot::head) else {
+                continue;
+            };
+            let bits = head.marks.swap(0, SeqCst);
+            if self.live(id).is_some() && bits != 0 {
+                out.push((id, bits));
+            }
+        }
+        out
+    }
+
+    /// A new node: its calls start, its calls and its actions before the
+    /// calls are woken, its deadlines are read, and that it started is
+    /// published.
+    fn started(&mut self, id: usize, todo: &mut Vec<Hit>) {
+        let p = self.nodes[id].live().map(|n| n.place).unwrap_or(0);
+        let addr = self.nodes[id]
+            .live()
+            .map(|n| n.addr)
+            .unwrap_or_else(Address::here);
+        for k in 0..self.places[p].calls.len() {
+            let s = self.places[p].calls[k];
+            let _ = <Cursor<I0> as CallWalk<Q>>::visit(
+                s,
+                &mut self.calls,
+                Start::<Q> {
+                    node: id,
+                    at: &addr,
+                },
+            );
+        }
+        self.woken(id, todo);
+    }
+    /// A node started or moved: its calls and its actions before the calls
+    /// are woken, its deadlines are read, and that it started is
+    /// published.
+    fn woken(&mut self, id: usize, todo: &mut Vec<Hit>) {
+        let p = self.nodes[id].live().map(|n| n.place).unwrap_or(0);
+        let woken = self.places[p].calls_mask() | self.places[p].before_mask();
+        self.mark(id, woken);
+        for c in 0..self.places[p].info.comps.len() {
+            if self.places[p].info.comps[c].timed {
+                self.read_deadline(id, c);
+            }
+        }
+        let started = self.places[p].info.started;
+        self.deliver(id, started, None, false, todo);
+    }
+
+    /// Build a node of the place `Pl` (whose number is `p` and positions
+    /// `Pos`) under the node `parent`, under `key`, from `start`; `None`
+    /// when the key is taken. A node whose kind links to another has it
+    /// built first, under its own key, when it is not there.
+    fn add_typed<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(
+        &mut self,
+        p: usize,
+        parent: usize,
+        key: PlaceKeyOf<Q, Pl::At>,
+        mut start: StartOf<TargetOf<Q, Pl::At>>,
+        todo: &mut Vec<Hit>,
+    ) -> Option<usize> {
+        let parent_addr = self.live(parent)?.addr;
+        debug_assert_eq!(
+            self.places[p].info.parent,
+            self.live(parent).map(|n| self.places[n.place].info.path),
+            "a place's nodes are added under nodes of its parent place",
+        );
+        if Pos::find_child(self.root.as_ref()?, &parent_addr, &key).is_some() {
+            return None;
+        }
+        let link = <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start)?;
+        let root = self.root.as_mut()?;
+        let addr = Pos::add(root, &parent_addr, key, start, &self.args, &self.outbox)?;
+        // what the builds published, at the parent and above
+        self.effects(parent, &[], None, todo);
+        let id = self.register(addr, p, Some(parent));
+        if let NodeSlot::Live(n) = &mut self.nodes[id] {
+            n.link = link;
+        }
+        self.started(id, todo);
+        Some(id)
+    }
+    /// The node of the place `Pl` under the node `parent`, kept under
+    /// `key`.
+    fn find_typed<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(
+        &self,
+        parent: usize,
+        key: &PlaceKeyOf<Q, Pl::At>,
+    ) -> Option<usize> {
+        let parent_addr = self.live(parent)?.addr;
+        let addr = Pos::find_child(self.root.as_ref()?, &parent_addr, key)?;
+        self.find(&addr)
+    }
+    /// The node at the key address `at`.
+    fn find_key(&self, at: &KeyAddress<RootOf<Q>>) -> Option<usize> {
+        let addr = resolve_node(self.root.as_ref()?, at)?;
+        self.find(&addr)
+    }
+    /// End the node `id` of the place `Pl`, with the nodes below it, for
+    /// `reason`; the root ends the driver.
+    fn end_typed<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(
+        &mut self,
+        id: usize,
+        reason: EndReasonOf<TargetOf<Q, Pl::At>>,
+        todo: &mut Vec<Hit>,
+    ) {
+        if self.live(id).is_none() {
+            return;
+        }
+        self.remove_subtree(
+            id,
+            |root, at, outbox| Pos::end(root, at, &reason, outbox),
+            todo,
+        );
+    }
+    /// Every node in the subtree of `id`, `id` first, each node before the
+    /// nodes below it.
+    fn subtree(&self, id: usize, out: &mut Vec<usize>) {
+        if let Some(n) = self.live(id) {
+            out.push(id);
+            for &c in &n.children {
+                self.subtree(c, out);
+            }
+        }
+    }
+
+    /// Every node below and at `id`, in the order they end: a node after
+    /// the nodes below it, a child of a kind others link to after its
+    /// siblings' subtrees.
+    fn removal_order(&self, id: usize, out: &mut Vec<usize>) {
+        if let Some(n) = self.live(id) {
+            let (targets, others): (Vec<usize>, Vec<usize>) = n.children.iter().partition(|&&c| {
+                self.live(c)
+                    .is_some_and(|c| self.places[c.place].link_target)
+            });
+            for c in others.into_iter().chain(targets) {
+                self.removal_order(c, out);
+            }
+            out.push(id);
+        }
+    }
+
+    /// End the node `id` with the nodes below it; `own_end` runs the end
+    /// hooks of `id` itself. What it reaches goes into `todo`; ending the
+    /// root ends the driver. A node that no node links to any more once
+    /// they ended ends after them, for its kind's default reason.
+    fn remove_subtree(
+        &mut self,
+        id: usize,
+        own_end: impl FnOnce(&mut RootNode<Q>, &AddressOf<Q>, &OutboxOf<Q>),
+        todo: &mut Vec<Hit>,
+    ) {
+        let mut order = Vec::new();
+        self.removal_order(id, &mut order);
+        let is_root = id == self.root_id();
+        let mut own_end = Some(own_end);
+        let mut unlinked = Vec::new();
+        for n in order {
+            let Some(entry) = self.live(n) else { continue };
+            let (p, addr) = (entry.place, entry.addr);
+            unlinked.extend(entry.link);
+            let ending = self.places[p].info.ending;
+            self.deliver(n, ending, None, true, todo);
+            for c in 0..self.places[p].info.comps.len() {
+                self.set_deadline(n, c, None);
+            }
+            for k in 0..self.places[p].calls.len() {
+                let s = self.places[p].calls[k];
+                let _ = <Cursor<I0> as CallWalk<Q>>::visit(s, &mut self.calls, Stop { node: n });
+            }
+            let Some(root) = self.root.as_mut() else {
+                return;
+            };
+            if n == id {
+                if is_root {
+                    let mut remains = Default::default();
+                    <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::remains(
+                        root,
+                        &addr,
+                        &mut remains,
+                        &self.outbox,
+                    );
+                    self.remains = Some(remains);
+                }
+                if let Some(end) = own_end.take() {
+                    end(root, &addr, &self.outbox);
+                }
+            } else {
+                let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
+                    p,
+                    EndDefault::<Q> {
+                        root,
+                        at: &addr,
+                        outbox: &self.outbox,
+                    },
+                );
+            }
+            let writes = self.comp_writes(p);
+            self.effects(n, &writes, None, todo);
+            if !is_root || n != id {
+                let root = self.root.as_mut().expect("the root is there while it ends");
+                let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(p, DetachAt::<Q> { root, at: &addr });
+            }
+            self.retire(n);
+        }
+        if is_root {
+            self.finish();
+            return;
+        }
+        self.end_unlinked(unlinked, todo);
+    }
+    /// End each of `targets` that is there and no node links to any more,
+    /// for its kind's default reason.
+    fn end_unlinked(&mut self, targets: Vec<usize>, todo: &mut Vec<Hit>) {
+        for target in targets {
+            let Some(p) = self.live(target).map(|n| n.place) else {
+                continue;
+            };
+            if self.linked_to(target) {
+                continue;
+            }
+            self.remove_subtree(
+                target,
+                |root, at, outbox| {
+                    let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
+                        p,
+                        EndDefault::<Q> { root, at, outbox },
+                    );
+                },
+                todo,
+            );
+        }
+    }
+    fn retire(&mut self, id: usize) {
+        let slot = core::mem::replace(&mut self.nodes[id], NodeSlot::Free);
+        if let NodeSlot::Live(n) = slot {
+            n.head.dead.store(true, SeqCst);
+            if let Some(parent) = n.parent
+                && let NodeSlot::Live(p) = &mut self.nodes[parent]
+            {
+                p.children.retain(|&c| c != id);
+            }
+            self.nodes[id] = NodeSlot::Retired(n.head);
+        }
+    }
+    /// The root ended: the driver does nothing more.
+    fn finish(&mut self) {
+        self.ended = true;
+        self.root = None;
+        self.shared.closed.store(true, SeqCst);
+        let _ = self.outbox.take();
+        self.timers.clear();
+        self.deadlines.clear();
+        self.sleep = None;
+        self.pending.clear();
+        if let Some(outer) = &self.outer {
+            outer.wake_by_ref();
+        }
+    }
+    fn comp_writes(&self, p: usize) -> Vec<TypeId> {
+        let mut out = Vec::new();
+        for c in &self.places[p].info.comps {
+            out.extend_from_slice(&c.writes);
+        }
+        out
+    }
+
+    /// Move the node `id` under the node `to`, of the place of its parent:
+    /// it ends where it was for the nodes above, its subtree's addresses
+    /// follow it, and it starts where it goes; its calls go on.
+    fn move_node(&mut self, id: usize, to: usize, todo: &mut Vec<Hit>) -> Result<(), MoveError> {
+        let n = self.live(id).ok_or(MoveError::NoSource)?;
+        let (p, at, from) = (n.place, n.addr, n.parent);
+        let dest = self.live(to).ok_or(MoveError::NoDestination)?;
+        let to_addr = dest.addr;
+        if from == Some(to) {
+            return Ok(());
+        }
+        let root = self.root.as_mut().ok_or(MoveError::NoSource)?;
+        let new = <Cursor<I0> as PlaceWalk<Q>>::visit(
+            p,
+            MoveUnder::<Q> {
+                root,
+                at: &at,
+                to: &to_addr,
+            },
+        )
+        .unwrap_or(Err(MoveError::NoSource))?;
+        // it ends where it was: the nodes above it there hear it
+        let ending = self.places[p].info.ending;
+        self.deliver(id, ending, None, true, todo);
+        let levels = self.places[p].info.depth;
+        let mut moved = Vec::new();
+        self.subtree(id, &mut moved);
+        for &m in &moved {
+            if let NodeSlot::Live(e) = &mut self.nodes[m] {
+                // Invariant: every node of the subtree has the moved node's
+                // address as its first levels.
+                e.addr = e
+                    .addr
+                    .splice(&new, levels)
+                    .expect("a node below has the address of the node above it first");
+            }
+        }
+        if let Some(from) = from
+            && let NodeSlot::Live(f) = &mut self.nodes[from]
+        {
+            f.children.retain(|&c| c != id);
+        }
+        if let NodeSlot::Live(t) = &mut self.nodes[to] {
+            t.children.push(id);
+        }
+        if let NodeSlot::Live(e) = &mut self.nodes[id] {
+            e.parent = Some(to);
+        }
+        for &m in &moved[1..] {
+            let q = self.live(m).map_or(0, |n| n.place);
+            for c in 0..self.places[q].info.comps.len() {
+                if self.places[q].info.comps[c].timed {
+                    self.read_deadline(m, c);
+                }
+            }
+        }
+        self.woken(id, todo);
+        Ok(())
+    }
+
+    // ---- requests ----
+
+    /// Run `f` with the hits of the request being handled as its `todo`.
+    fn editing<T>(&mut self, f: impl FnOnce(&mut Self, &mut Vec<Hit>) -> T) -> T {
+        let mut todo = core::mem::take(&mut self.pending);
+        let out = f(self, &mut todo);
+        self.pending.append(&mut todo);
+        out
+    }
+
+    // ---- deadlines ----
+
+    fn set_deadline(&mut self, id: usize, c: usize, at: Option<InstantOf<Q>>) {
+        if let Some(old) = self.deadlines.remove(&(id, c)) {
+            self.timers.remove(&(old, id, c));
+        }
+        if let Some(at) = at {
+            self.deadlines.insert((id, c), at);
+            self.timers.insert((at, id, c));
+        }
+    }
+    fn deadline(&mut self, id: usize, c: usize) -> Option<InstantOf<Q>> {
+        let n = self.live(id)?;
+        let (p, addr) = (n.place, n.addr);
+        let root = self.root.as_mut()?;
+        let at = <Cursor<I0> as PlaceWalk<Q>>::visit(
+            p,
+            Deadline::<Q> {
+                root,
+                at: &addr,
+                c,
+                outbox: &self.outbox,
+            },
+        )
+        .flatten();
+        // reading a deadline publishes nothing
+        let _ = self.outbox.take();
+        at
+    }
+    fn read_deadline(&mut self, id: usize, c: usize) {
+        let at = self.deadline(id, c);
+        self.set_deadline(id, c, at);
+    }
+
+    // ---- events ----
+
+    fn hit(&self, node: usize, target: Target, events: u64) -> Hit {
+        Hit {
+            node,
+            serial: self.live(node).map_or(0, |n| n.serial),
+            target,
+            events,
+        }
+    }
+    /// After a lend at `id` that took the components `writes` exclusive:
+    /// the deadlines of those types to read again, and the events it
+    /// published, as hits. `skip` is a call's own position.
+    fn effects(
+        &mut self,
+        id: usize,
+        writes: &[TypeId],
+        skip: Option<(usize, Target)>,
+        out: &mut Vec<Hit>,
+    ) {
+        for (depth, event) in self.outbox.take() {
+            if let Some(at) = self.ancestor_at(id, depth) {
+                self.deliver(at, event, skip, false, out);
+            }
+        }
+        if writes.is_empty() {
+            return;
+        }
+        for m in self.live_ids().collect::<Vec<_>>() {
+            let p = self.nodes[m].live().map_or(0, |n| n.place);
+            for (c, comp) in self.places[p].info.comps.iter().enumerate() {
+                if comp.timed && writes.contains(&comp.type_id) {
+                    out.push(self.hit(m, Target::Comp(c), 0));
+                }
+            }
+        }
+    }
+    /// The hits of the event `event` published at `at`: every subscriber
+    /// whose scope has it, `skip` aside; `above` for an event that reaches
+    /// only the nodes above.
+    fn deliver(
+        &self,
+        at: usize,
+        event: TypeId,
+        skip: Option<(usize, Target)>,
+        above: bool,
+        out: &mut Vec<Hit>,
+    ) {
+        let start = self.subscribers.partition_point(|&(e, _)| e < event);
+        let Some(at_place) = self.live(at).map(|n| n.place) else {
+            return;
+        };
+        for &(e, sub) in &self.subscribers[start..] {
+            if e != event {
+                break;
+            }
+            for m in self.live_ids() {
+                if self.live(m).map(|n| n.place) != Some(sub.place) {
+                    continue;
+                }
+                if skip == Some((m, sub.target)) {
+                    continue;
+                }
+                let heard = match sub.scope {
+                    Scope::Around => {
+                        if above {
+                            self.is_above(m, at)
+                        } else {
+                            m == at || self.is_above(m, at) || self.is_above(at, m)
+                        }
+                    }
+                    Scope::At { depth, place } => {
+                        self.places[at_place].info.pre == place
+                            && self.ancestor_at(at, depth).is_some()
+                            && self.ancestor_at(at, depth) == self.ancestor_at(m, depth)
+                            && (!above || self.is_above(m, at))
+                    }
+                };
+                if heard {
+                    out.push(self.hit(m, sub.target, sub.bit.map_or(0, |b| 1 << b)));
+                }
+            }
+        }
+    }
     #[cfg(debug_assertions)]
     fn check_deadlines(&mut self) {
         for id in self.live_ids().collect::<Vec<_>>() {
@@ -2324,102 +2331,6 @@ where
     }
 }
 
-// ---------------------------------------------------------------- the edit handle's operations
-
-impl<Q: DriverComposition> EditOps for Driver<Q>
-where
-    Cursor<I0>: CallWalk<Q> + PlaceWalk<Q>,
-    PlacesOf<Q>: NthPlace<RootOf<Q>, I0, Item = Place<End>>,
-    Q::Places: PlaceNth<Q, PlacesOf<Q>, I0>,
-    Q: DriverComposition<Remains = RemainsOf<PartsOf<Q>, RootOf<Q>>>,
-    PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
-    <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
-{
-    fn add_child<KK: Clone + 'static>(
-        &mut self,
-        node: usize,
-        child: usize,
-        key: KK,
-        start: Box<dyn core::any::Any>,
-    ) -> bool {
-        self.editing(|d, todo| d.add_node(node, child, key, start, todo).is_some())
-    }
-    fn end_child<KK: 'static, RR: 'static>(
-        &mut self,
-        node: usize,
-        child: usize,
-        key: &KK,
-        reason: RR,
-    ) -> bool {
-        let Some(id) = self.find_child(node, child, key) else {
-            return false;
-        };
-        if self.linked_to(id) {
-            return false;
-        }
-        self.editing(|d, todo| d.end_with(id, &reason, todo));
-        true
-    }
-    fn replace_child<KK: Clone + 'static, RR: 'static>(
-        &mut self,
-        node: usize,
-        child: usize,
-        key: KK,
-        start: Box<dyn core::any::Any>,
-        reason: RR,
-    ) -> bool {
-        let Some(id) = self.find_child(node, child, &key) else {
-            return false;
-        };
-        self.editing(|d, todo| {
-            d.end_with(id, &reason, todo);
-            d.add_node(node, child, key, start, todo).is_some()
-        })
-    }
-    fn move_grandchild<KF: 'static, KG: 'static>(
-        &mut self,
-        node: usize,
-        child: usize,
-        from: &KF,
-        grandchild: usize,
-        key: &KG,
-        to: &KF,
-    ) -> Result<(), MoveError> {
-        let from = self
-            .find_child(node, child, from)
-            .ok_or(MoveError::NoSource)?;
-        let moved = self
-            .find_child(from, grandchild, key)
-            .ok_or(MoveError::NoSource)?;
-        let to = self
-            .find_child(node, child, to)
-            .ok_or(MoveError::NoDestination)?;
-        self.editing(|d, todo| d.move_node(moved, to, todo))
-    }
-    fn end_node<RR: 'static>(&mut self, node: usize, reason: RR) {
-        if self.linked_to(node) {
-            return;
-        }
-        self.editing(|d, todo| d.end_with(node, &reason, todo));
-    }
-}
-impl<Q: DriverComposition> FindNode<RootOf<Q>> for Driver<Q>
-where
-    Cursor<I0>: CallWalk<Q> + PlaceWalk<Q>,
-    PlacesOf<Q>: NthPlace<RootOf<Q>, I0, Item = Place<End>>,
-    Q::Places: PlaceNth<Q, PlacesOf<Q>, I0>,
-    Q: DriverComposition<Remains = RemainsOf<PartsOf<Q>, RootOf<Q>>>,
-    PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
-    <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
-{
-    fn find_node(&self, at: &KeyAddress<RootOf<Q>>) -> Option<(usize, TypeId)> {
-        let addr = resolve_node(self.root.as_ref()?, at)?;
-        let id = self.find(&addr)?;
-        let kind = self.places[self.live(id)?.place].info.kind;
-        Some((id, kind))
-    }
-}
-
 impl<Q: DriverComposition> Future for Driver<Q>
 where
     Cursor<I0>: CallWalk<Q> + PlaceWalk<Q>,
@@ -2428,6 +2339,7 @@ where
     Q: DriverComposition<Remains = RemainsOf<PartsOf<Q>, RootOf<Q>>>,
     PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
     <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
+    RequestsOf<Q>: edit::Deliver<Q, I0>,
 {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {

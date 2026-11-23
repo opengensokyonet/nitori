@@ -42,7 +42,7 @@ thread_local! {
 /// What the connection is asked: a number, noted and nothing changed.
 pub struct Noted(pub u64);
 impl Request<Connection> for Noted {
-    fn apply<E: Editor>(self, _: Edit<'_, E, Connection>) {
+    fn apply<E: Editor<Connection>>(self, _: Edit<'_, E, Connection>) {
         NOTED.with(|n| n.borrow_mut().push(self.0));
     }
 }

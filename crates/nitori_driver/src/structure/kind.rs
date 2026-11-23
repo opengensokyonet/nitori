@@ -1,5 +1,5 @@
 //! Node kinds, their children and their links.
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 use core::{any::TypeId, convert::Infallible, marker::PhantomData};
 
 use frunk_core::{
@@ -36,6 +36,46 @@ pub trait NodeKind: 'static + Sized {
     type Request: Request<Self> = Infallible;
 }
 
+/// The kind and the storage kind of the first child of an empty list of
+/// children: there is none, and neither has a value.
+pub enum NoChild {}
+impl NodeKind for NoChild {
+    type Children = HNil;
+    type Linked = HNil;
+    type Start = Infallible;
+}
+impl ChildStorage for NoChild {
+    type Key = Infallible;
+    type Handle = Infallible;
+    type Store<N> = NoStore;
+}
+/// The store of [`NoChild`]: it keeps nothing.
+#[derive(Default)]
+pub struct NoStore;
+impl<N> super::Store<N, Infallible, Infallible> for NoStore {
+    fn insert(&mut self, key: Infallible, _: N) -> Result<Infallible, super::Occupied<N>> {
+        match key {}
+    }
+    fn remove(&mut self, at: Infallible) -> Option<N> {
+        match at {}
+    }
+    fn get(&self, at: Infallible) -> Option<&N> {
+        match at {}
+    }
+    fn get_mut(&mut self, at: Infallible) -> Option<&mut N> {
+        match at {}
+    }
+    fn key(&self, at: Infallible) -> Option<&Infallible> {
+        match at {}
+    }
+    fn find(&self, key: &Infallible) -> Option<Infallible> {
+        match *key {}
+    }
+    fn handles(&self) -> impl Iterator<Item = Infallible> {
+        core::iter::empty()
+    }
+}
+
 /// A child in a [`NodeKind::Children`] list: the kind `K`, kept by the
 /// storage kind `S`.
 pub struct Child<K, S>(PhantomData<fn() -> (K, S)>);
@@ -54,8 +94,17 @@ pub trait ChildList: 'static {
     /// `addr` with its first `levels` levels (at least one) taken from
     /// `prefix`; `None` when the two go to different children there.
     fn splice(addr: &Self::Addr, prefix: &Self::Addr, levels: usize) -> Option<Self::Addr>;
+    /// The kind of the first child ([`NoChild`] for none).
+    type HeadKind: NodeKind;
+    /// The storage kind of the first child ([`NoChild`] for none).
+    type HeadStorage: ChildStorage;
+    /// The other children.
+    type Tail: ChildList;
 }
 impl ChildList for HNil {
+    type HeadKind = NoChild;
+    type HeadStorage = NoChild;
+    type Tail = HNil;
     type Addr = CNil;
     type KeyAddr = CNil;
     fn link_targets(_: &mut Vec<TypeId>) {}
@@ -64,6 +113,9 @@ impl ChildList for HNil {
     }
 }
 impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildList for HCons<Child<K, S>, T> {
+    type HeadKind = K;
+    type HeadStorage = S;
+    type Tail = T;
     type Addr = Coproduct<(S::Handle, Address<K>), T::Addr>;
     type KeyAddr = Coproduct<(S::Key, KeyAddress<K>), T::KeyAddr>;
     fn link_targets(out: &mut Vec<TypeId>) {
@@ -176,23 +228,14 @@ pub type HandleAt<L, I> = <StorageAt<L, I> as ChildStorage>::Handle;
 pub trait LinkList<K: NodeKind> {
     /// The kinds the links point to, pushed onto `out`.
     fn targets(out: &mut Vec<TypeId>);
-    /// The start of the node the first link points to, from the linking
-    /// node's; `None` for no link.
-    fn linked_start(start: &mut K::Start) -> Option<Box<dyn core::any::Any>>;
 }
 impl<K: NodeKind> LinkList<K> for HNil {
     fn targets(_: &mut Vec<TypeId>) {}
-    fn linked_start(_: &mut K::Start) -> Option<Box<dyn core::any::Any>> {
-        None
-    }
 }
 impl<K: NodeKind, L: Link<K>, T: LinkList<K>> LinkList<K> for HCons<L, T> {
     fn targets(out: &mut Vec<TypeId>) {
         out.push(TypeId::of::<L::Target>());
         T::targets(out);
-    }
-    fn linked_start(start: &mut K::Start) -> Option<Box<dyn core::any::Any>> {
-        Some(Box::new(L::linked_start(start)))
     }
 }
 
