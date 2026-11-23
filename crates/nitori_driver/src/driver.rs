@@ -984,6 +984,15 @@ struct Hit {
     events: u64,
 }
 
+/// A node marked since the last poll: its number, the serial it was
+/// registered with, and the bits marked.
+#[derive(Clone, Copy, Debug)]
+struct Ready {
+    node: usize,
+    serial: u64,
+    bits: u64,
+}
+
 /// The sleep until the earliest deadline, with that deadline.
 type Sleeping<Q> = (
     InstantOf<Q>,
@@ -1645,19 +1654,29 @@ where
         if self.ended {
             return Poll::Ready(());
         }
-        // the actions before the calls, the nodes above first
+        // the actions before the calls, the nodes above first; a node
+        // ended or replaced since it was marked is passed over, by its
+        // serial, as a hit is
         let mut ready = self.take_ready();
-        let mut before: Vec<(usize, u64)> = ready
+        let mut before: Vec<Ready> = ready
             .iter()
-            .map(|&(id, bits)| {
-                let p = self.nodes[id].live().map_or(0, |n| n.place);
-                (id, bits & self.places[p].before_mask())
+            .map(|r| {
+                let p = self.nodes[r.node].live().map_or(0, |n| n.place);
+                Ready {
+                    bits: r.bits & self.places[p].before_mask(),
+                    ..*r
+                }
             })
-            .filter(|&(_, b)| b != 0)
+            .filter(|r| r.bits != 0)
             .collect();
-        before.sort_by_key(|&(id, _)| self.depth(id));
-        for (id, bits) in before {
-            let Some(p) = self.live(id).map(|n| n.place) else {
+        before.sort_by_key(|r| self.depth(r.node));
+        for Ready {
+            node: id,
+            serial,
+            bits,
+        } in before
+        {
+            let Some(p) = self.live_as(id, serial).map(|n| n.place) else {
                 continue;
             };
             let ncalls = self.places[p].calls.len();
@@ -1665,7 +1684,7 @@ where
                 if bits & (1 << (ncalls + j)) == 0 || self.ended {
                     continue;
                 }
-                let Some(addr) = self.live(id).map(|n| n.addr) else {
+                let Some(addr) = self.live_as(id, serial).map(|n| n.addr) else {
                     break;
                 };
                 let c = self.places[p].before[j];
@@ -1693,29 +1712,38 @@ where
         }
         // what the actions before the calls woke is polled in this poll;
         // an action before the calls woken since runs in the next poll
-        for (id, bits) in self.take_ready() {
-            let p = self.nodes[id].live().map_or(0, |n| n.place);
-            let again = bits & self.places[p].before_mask();
-            self.mark(id, again);
-            let calls = bits & self.places[p].calls_mask();
-            match ready.iter_mut().find(|(r, _)| *r == id) {
-                Some((_, b)) => *b |= calls,
-                None => ready.push((id, calls)),
+        for r in self.take_ready() {
+            let p = self.nodes[r.node].live().map_or(0, |n| n.place);
+            let again = r.bits & self.places[p].before_mask();
+            self.mark(r.node, again);
+            let calls = r.bits & self.places[p].calls_mask();
+            match ready
+                .iter_mut()
+                .find(|q| (q.node, q.serial) == (r.node, r.serial))
+            {
+                Some(q) => q.bits |= calls,
+                None => ready.push(Ready { bits: calls, ..r }),
             }
         }
-        for (id, bits) in ready {
-            let Some(p) = self.live(id).map(|n| n.place) else {
+        for Ready {
+            node: id,
+            serial,
+            bits,
+        } in ready
+        {
+            let Some(p) = self.live_as(id, serial).map(|n| n.place) else {
                 continue;
             };
             let mut bits = bits & self.places[p].calls_mask();
             while bits != 0 {
                 let k = bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                // a request may have ended the node or moved it
-                let Some(addr) = self.live(id).map(|n| n.addr) else {
+                // a request may have ended the node, replaced it or moved
+                // it
+                let Some(addr) = self.live_as(id, serial).map(|n| n.addr) else {
                     break;
                 };
-                let Some(p) = self.live(id).map(|n| n.place) else {
+                let Some(p) = self.live_as(id, serial).map(|n| n.place) else {
                     break;
                 };
                 let s = self.places[p].calls[k];
@@ -1881,6 +1909,11 @@ where
     fn live(&self, id: usize) -> Option<&NodeEntry<AddressOf<Q>>> {
         self.nodes.get(id).and_then(NodeSlot::live)
     }
+    /// The node `id`, while it is the one registered as `serial`: its
+    /// number goes to another node once it ends.
+    fn live_as(&self, id: usize, serial: u64) -> Option<&NodeEntry<AddressOf<Q>>> {
+        self.live(id).filter(|n| n.serial == serial)
+    }
     fn find(&self, addr: &AddressOf<Q>) -> Option<usize> {
         self.nodes
             .iter()
@@ -1986,7 +2019,8 @@ where
     }
     /// Take the nodes marked, with their marks, in the order of their
     /// first mark.
-    fn take_ready(&mut self) -> Vec<(usize, u64)> {
+    /// The nodes marked, each with its serial and the bits marked.
+    fn take_ready(&mut self) -> Vec<Ready> {
         let ids = self
             .shared
             .take(|id| self.nodes.get(id).and_then(NodeSlot::head));
@@ -1996,8 +2030,14 @@ where
                 continue;
             };
             let bits = head.marks.swap(0, SeqCst);
-            if self.live(id).is_some() && bits != 0 {
-                out.push((id, bits));
+            if let Some(n) = self.live(id)
+                && bits != 0
+            {
+                out.push(Ready {
+                    node: id,
+                    serial: n.serial,
+                    bits,
+                });
             }
         }
         out

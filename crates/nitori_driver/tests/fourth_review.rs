@@ -279,3 +279,113 @@ fn a_linked_node_ending_itself_is_refused() {
     assert_eq!(ENDED.with(|e| *e.borrow()), Some(Ok(())));
     assert!(d.root().unwrap().children.head.find(&2).is_none());
 }
+
+// ---------------------------------------------------------------- a node replaced in the poll that runs its actions
+
+mod swapped {
+    use super::*;
+
+    thread_local! {
+        pub static SWAP: Cell<bool> = const { Cell::new(false) };
+        pub static RUNS: Cell<u32> = const { Cell::new(0) };
+    }
+    pub struct Root;
+    pub struct Leaf;
+    impl NodeKind for Root {
+        type Children = HList![Child<Leaf, SlotVec<u32>>];
+        type Linked = HNil;
+        type Request = ReplaceLeaf;
+    }
+    impl NodeKind for Leaf {
+        type Children = HNil;
+        type Linked = HNil;
+    }
+    /// The root replaces its leaf.
+    pub struct ReplaceLeaf;
+    impl Request<Root> for ReplaceLeaf {
+        fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
+            edit.replace::<Leaf, _>(1, (), ()).unwrap();
+        }
+    }
+    impl ShareCalls<Root> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Leaf> for Base {
+        type Calls = HNil;
+    }
+    impl Share<Root> for Base {
+        type Data = HList![Swapper];
+    }
+    impl Share<Leaf> for Base {
+        type Data = HList![Counter];
+    }
+    /// Asks, before the root's calls, for the leaf to be replaced when
+    /// the test says so; it acts in every poll.
+    pub struct Swapper;
+    impl<L: PartList<L> + 'static> Hooks<Base, L, Root> for Swapper {
+        const ACTS_BEFORE_CALLS: bool = true;
+        type Returns = NodeRequest<Root, Root>;
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Root>>>(
+            _: BuildView<'_, Self, Base, L, Root, KP>,
+            _: &ArgsOf<L>,
+            _: &mut (),
+        ) -> Self {
+            Swapper
+        }
+        fn before_calls<KP: HookKeys<Self, Base, L, Root>>(
+            _: HookView<'_, Self, Base, L, Root, KP>,
+            waker: &Waker,
+        ) -> Option<Self::Returns> {
+            waker.wake_by_ref();
+            SWAP.with(|s| s.replace(false))
+                .then(|| NodeRequest::new(KeyAddress::here(), ReplaceLeaf))
+        }
+    }
+    /// Counts the runs of the leaf's action before its calls; it acts in
+    /// every poll.
+    pub struct Counter;
+    impl<L: PartList<L> + 'static> Hooks<Base, L, Leaf> for Counter {
+        const ACTS_BEFORE_CALLS: bool = true;
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Leaf>>>(
+            _: BuildView<'_, Self, Base, L, Leaf, KP>,
+            _: &ArgsOf<L>,
+            _: &mut (),
+        ) -> Self {
+            Counter
+        }
+        fn before_calls<KP: HookKeys<Self, Base, L, Leaf>>(
+            _: HookView<'_, Self, Base, L, Leaf, KP>,
+            waker: &Waker,
+        ) -> Option<Self::Returns> {
+            waker.wake_by_ref();
+            RUNS.with(|r| r.set(r.get() + 1));
+            None
+        }
+    }
+    pub struct Q;
+    composition!(impl driver for Q: Root, HList![Base], TestClock);
+}
+
+/// A node replaced by an action that runs before its own in the same
+/// poll gives its number to the new node, which is not run by the old
+/// one's marks: its action runs first in the next poll.
+#[test]
+fn a_node_replaced_in_a_poll_is_not_run_by_the_old_ones_marks() {
+    use swapped::*;
+    let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
+    d.add::<Leaf, _, _, _>(End, 1, ()).unwrap();
+    let _ = poll(&mut d);
+    assert_eq!(RUNS.with(Cell::get), 1);
+    // the root acts first, the nodes above first, and replaces the leaf
+    // marked in this poll
+    RUNS.with(|r| r.set(0));
+    SWAP.with(|s| s.set(true));
+    let _ = poll(&mut d);
+    assert_eq!(
+        RUNS.with(Cell::get),
+        0,
+        "the new leaf is not run in this poll"
+    );
+    let _ = poll(&mut d);
+    assert_eq!(RUNS.with(Cell::get), 1, "it is run in the next one");
+}
