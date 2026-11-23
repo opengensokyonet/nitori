@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "std")]
 use std::{panic, sync::Mutex, thread};
 
 fn increment(state: &impl SharedState<State = u32>) {
@@ -30,6 +31,7 @@ fn borrowing_a_cell_again_while_an_operation_runs_panics() {
     cell.with(|_| cell.with(|_| ()));
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn every_wrapper_of_a_mutex_reaches_the_same_state() {
     let mut mutex = Mutex::new(0);
@@ -48,6 +50,7 @@ fn every_wrapper_of_a_mutex_reaches_the_same_state() {
     assert_eq!(read(&shared), 4);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn a_poisoned_mutex_is_taken_as_it_is() {
     let mut mutex = Mutex::new(1);
@@ -75,9 +78,11 @@ fn shared_count<Y: Synchronization>() -> u32 {
 #[test]
 fn a_clone_of_a_family_s_wrapper_is_the_same_state() {
     assert_eq!(shared_count::<RefCellSynchronization>(), 2);
+    #[cfg(feature = "std")]
     assert_eq!(shared_count::<MutexSynchronization>(), 2);
 }
 
+#[cfg(feature = "std")]
 #[test]
 fn the_mutex_family_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
