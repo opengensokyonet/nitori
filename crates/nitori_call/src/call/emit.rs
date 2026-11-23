@@ -99,7 +99,7 @@ impl<Y> Future for Emit<'_, '_, Y> {
 impl<Y> Drop for Emit<'_, '_, Y> {
     /// An emission dropped after its first poll still delivers its item. One
     /// that is waiting puts it in the cell, if no other item of this poll is
-    /// there.
+    /// there; if one still is, the item is lost, as `Emitter::emit` says.
     fn drop(&mut self) {
         let State::Waiting(item) = mem::replace(&mut self.state, State::Done) else {
             return;

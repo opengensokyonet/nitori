@@ -119,8 +119,12 @@ impl<Y> Emitter<'_, Y> {
     }
     /// Hand `item` to whoever polls the operation. Completes on the poll after
     /// the item has been delivered; dropping it after the first poll still
-    /// delivers it. When the caller discards items, drops `item` and
-    /// completes at once.
+    /// delivers it, with one exception: the operation has one item cell, so
+    /// an emission whose first poll found the cell holding an earlier item
+    /// of the same poll, and that is dropped before the poll ends, loses its
+    /// item. That takes dropping two emissions in one poll, as when each
+    /// loses a race against another future; awaiting each emission does not.
+    /// When the caller discards items, drops `item` and completes at once.
     pub fn emit(&mut self, item: Y) -> impl Future<Output = ()> + '_ {
         emit::Emit::new(self, item)
     }
