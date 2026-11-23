@@ -16,6 +16,11 @@ use nitori_clock::MonotonicClock;
 /// [`sleep_until`](MonotonicClock::sleep_until) panics outside a tokio
 /// runtime, or in one without its time driver enabled, as
 /// [`tokio::time::sleep_until`] does.
+///
+/// Tokio rounds the instant of a sleep up to its next millisecond, so
+/// [`checked_add`](MonotonicClock::checked_add) gives `None` also for a sum
+/// less than a millisecond before the last instant the standard library
+/// represents: every instant it gives can be slept until.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TokioClock;
 
@@ -28,7 +33,11 @@ impl MonotonicClock for TokioClock {
     }
 
     fn checked_add(&self, at: Instant, by: Duration) -> Option<Instant> {
-        at.checked_add(by)
+        let sum = at.checked_add(by)?;
+        // Tokio's timer adds up to a millisecond less a nanosecond to round
+        // the instant up to its tick, and panics when that overflows.
+        sum.checked_add(Duration::from_millis(1))?;
+        Some(sum)
     }
 
     fn sleep_until(&self, at: Instant) -> tokio::time::Sleep {
