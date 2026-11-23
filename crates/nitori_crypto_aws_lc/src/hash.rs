@@ -118,13 +118,47 @@ impl Hkdf for AwsLcBackend {
         info: &[&[u8]],
         len: ExpandLength,
     ) -> Secret {
+        let algorithm = algorithm.algorithm();
         let mut out = Secret::zeroed(len);
-        let prk = hkdf::Prk::new_less_safe(hkdf_algorithm(algorithm.algorithm()), prk.as_bytes());
+        // aws-lc-rs's `Prk` panics on a key longer than the longest hash
+        // output, such as a P-521 shared secret.
+        if prk.len() > digest::MAX_OUTPUT_LEN {
+            expand_with_hmac(algorithm, prk, info, &mut out);
+            return out;
+        }
+        let prk = hkdf::Prk::new_less_safe(hkdf_algorithm(algorithm), prk.as_bytes());
         // aws-lc-rs rejects only outputs above 255 hash lengths, and an
         // `ExpandLength` is at most 64 bytes.
         prk.expand(info, OutputLen(out.len()))
             .and_then(|okm| okm.fill(out.as_mut_bytes()))
             .expect("expand length is within 255 hash lengths");
         out
+    }
+}
+
+/// HKDF-Expand (RFC 5869 §2.3) of `prk` and `info` into `out`, computed
+/// with HMAC.
+///
+/// Each block T(i) is copied into `out` as soon as it is computed, and the
+/// next block reads T(i) back from `out`, so no block outlives its
+/// computation outside `out`.
+fn expand_with_hmac(algorithm: HashAlgorithm, prk: &Secret, info: &[&[u8]], out: &mut Secret) {
+    let hmac_algorithm = hmac_algorithm(algorithm);
+    let hash_len = hmac_algorithm.digest_algorithm().output_len();
+    let key = hmac::Key::new(hmac_algorithm, prk.as_bytes());
+    let out = out.as_mut_bytes();
+    let mut previous = 0..0;
+    // An `ExpandLength` is at most 64 bytes, two blocks of the shortest
+    // hash, so the counter stays far below its 255 limit.
+    for (counter, start) in (1u8..).zip((0..out.len()).step_by(hash_len)) {
+        let mut context = hmac::Context::with_key(&key);
+        context.update(&out[previous]);
+        for part in info {
+            context.update(part);
+        }
+        context.update(&[counter]);
+        let end = out.len().min(start + hash_len);
+        out[start..end].copy_from_slice(&context.sign().as_ref()[..end - start]);
+        previous = start..end;
     }
 }
