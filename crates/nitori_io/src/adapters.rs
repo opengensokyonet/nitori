@@ -329,6 +329,7 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
         let count = ready!(view.parent.with(|parent| {
             F::poll_write(parent.into_pin(), cx, &mut (&mut *input).take(remaining))
         }))?;
+        assert!(count <= remaining, "write exceeded the offered input");
         view.limit.0 -= count;
         Poll::Ready(Ok(count))
     }
