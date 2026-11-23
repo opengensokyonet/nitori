@@ -140,8 +140,9 @@ impl Hkdf for AwsLcBackend {
 /// with HMAC.
 ///
 /// Each block T(i) is copied into `out` as soon as it is computed, and the
-/// next block reads T(i) back from `out`, so no block outlives its
-/// computation outside `out`.
+/// next block reads T(i) back from `out`. The `Tag` that aws-lc-rs computes
+/// a block in is not zeroed, as in `extract`: its HMAC writes into a buffer
+/// of the caller's only for input in one slice.
 fn expand_with_hmac(algorithm: HashAlgorithm, prk: &Secret, info: &[&[u8]], out: &mut Secret) {
     let hmac_algorithm = hmac_algorithm(algorithm);
     let hash_len = hmac_algorithm.digest_algorithm().output_len();

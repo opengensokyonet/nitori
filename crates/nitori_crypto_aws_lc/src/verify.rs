@@ -51,7 +51,14 @@ fn key_form(scheme: SignatureScheme) -> KeyForm {
         SignatureScheme::ECDSA_SECP384R1_SHA384 => KeyForm::Point(97),
         SignatureScheme::ECDSA_SECP521R1_SHA512 => KeyForm::Point(133),
         SignatureScheme::ED25519 => KeyForm::Ed25519,
-        _ => KeyForm::RsaPublicKey,
+        SignatureScheme::RSA_PSS_RSAE_SHA256
+        | SignatureScheme::RSA_PSS_RSAE_SHA384
+        | SignatureScheme::RSA_PSS_RSAE_SHA512
+        | SignatureScheme::RSA_PKCS1_SHA256
+        | SignatureScheme::RSA_PKCS1_SHA384
+        | SignatureScheme::RSA_PKCS1_SHA512 => KeyForm::RsaPublicKey,
+        // invariant: `verify` takes only the schemes in `SCHEMES`.
+        _ => unreachable!("{scheme:?} is not a supported scheme"),
     }
 }
 
