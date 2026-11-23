@@ -762,7 +762,9 @@ pub trait Acquisitions<'view, L = AsAcquired>: acquisitions::Sealed {
     #[doc(hidden)]
     fn released() -> Self::Held;
     /// Acquire a view for each slot that needs one and holds none; whether
-    /// any was acquired.
+    /// any was acquired. When none was, the poll ends waiting, so the slots
+    /// that do not need a view are advanced as by
+    /// [`advance_unrequested`](Self::advance_unrequested).
     #[doc(hidden)]
     fn acquire(
         self: Pin<&mut Self>,
@@ -994,6 +996,16 @@ macro_rules! tuple_acquisitions {
                         };
                     }
                 )+
+                if !acquired {
+                    // A slot asked for earlier may have an acquisition still
+                    // pending; left unpolled, it could be granted the
+                    // resource and hold it while the operation waits here.
+                    $(
+                        if !needed.$index {
+                            unsafe { Pin::new_unchecked(&mut this.$index) }.idle(&held.$index, cx);
+                        }
+                    )+
+                }
                 acquired
             }
             fn release(
@@ -1226,7 +1238,9 @@ where
 /// with no acquired view, then with one acquired for each receiver whose slot
 /// asks, and without it again when it is released at a release point.
 /// Acquired views are released at the end of the poll, so none is held while
-/// the task waits for another.
+/// the task waits for another. However the poll ends, the slots not asked
+/// for in it are advanced, so an acquisition left pending by an earlier
+/// request does not hold a resource it is granted.
 #[inline]
 fn poll_acquiring<'view, S, L, Op, const DISCARD: bool>(
     mut acquisition: Pin<&mut S>,
@@ -1249,13 +1263,18 @@ where
             },
         );
         match event {
-            CallPoll::Ready(event) => return Poll::Ready(event),
+            CallPoll::Ready(event) => {
+                acquisition.advance_unrequested(held, cx);
+                return Poll::Ready(event);
+            }
             CallPoll::Pending => {
                 acquisition.advance_unrequested(held, cx);
                 return Poll::Pending;
             }
             CallPoll::NeedsView => {
-                // A pending acquisition arranges its own wakeup.
+                // A pending acquisition arranges its own wakeup; `acquire`
+                // advances the acquisitions of the other slots before
+                // reporting that none completed.
                 if !acquisition
                     .as_mut()
                     .acquire(held.as_mut(), call.views_needed(), cx)
