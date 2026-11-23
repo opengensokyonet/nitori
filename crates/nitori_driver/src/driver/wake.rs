@@ -16,7 +16,7 @@
 //! one is alive or the old one is on the stack: its head stays in the
 //! driver's table, retired, until then. A waker of a node that ended marks
 //! the retired head and wakes nothing.
-use alloc::{sync::Arc, task::Wake};
+use alloc::{sync::Arc, task::Wake, vec::Vec};
 use core::{
     sync::atomic::{
         AtomicBool, AtomicU64, AtomicUsize,
@@ -24,6 +24,17 @@ use core::{
         fence,
     },
     task::Waker,
+};
+
+use frunk_core::indices::Here as I0;
+
+use super::{
+    Driver, DriverComposition, NodeSlot, NthPlace, Place, PlaceNth, PlacesOf, Ready,
+    walk::{CallWalk, Cursor, PlaceWalk},
+};
+use crate::{
+    call::{PartsOf, RootOf},
+    structure::{ChildAddresses, End, NodeKind, RemainsOf},
 };
 
 /// What every waker of a driver shares.
@@ -133,5 +144,69 @@ impl Wake for PositionWaker {
     }
     fn wake_by_ref(self: &Arc<Self>) {
         self.shared.mark(&self.head, self.bit, Some(&self.outer));
+    }
+}
+
+impl<Q: DriverComposition> Driver<Q>
+where
+    Cursor<I0>: CallWalk<Q> + PlaceWalk<Q>,
+    PlacesOf<Q>: NthPlace<RootOf<Q>, I0, Item = Place<End>>,
+    Q::Places: PlaceNth<Q, PlacesOf<Q>, I0>,
+    Q: DriverComposition<Remains = RemainsOf<PartsOf<Q>, RootOf<Q>>>,
+    PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
+    <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
+{
+    /// The waker of the position `bit` of the node `id`, made with the
+    /// current outer waker.
+    pub(super) fn waker(&mut self, id: usize, bit: usize) -> Waker {
+        let epoch = self.epoch;
+        let outer = self.outer.clone().unwrap_or_else(|| Waker::noop().clone());
+        let shared = self.shared.clone();
+        let NodeSlot::Live(n) = &mut self.nodes[id] else {
+            return Waker::noop().clone();
+        };
+        match &n.wakers[bit] {
+            Some((e, w)) if *e == epoch => w.clone(),
+            _ => {
+                let w = Waker::from(Arc::new(PositionWaker {
+                    shared,
+                    head: n.head.clone(),
+                    bit: 1 << bit,
+                    outer,
+                }));
+                n.wakers[bit] = Some((epoch, w.clone()));
+                w
+            }
+        }
+    }
+    pub(super) fn mark(&self, id: usize, bits: u64) {
+        if let Some(n) = self.live(id) {
+            self.shared.mark(&n.head, bits, self.outer.as_ref());
+        }
+    }
+    /// Take the nodes marked, with their marks, in the order of their
+    /// first mark.
+    /// The nodes marked, each with its serial and the bits marked.
+    pub(super) fn take_ready(&mut self) -> Vec<Ready> {
+        let ids = self
+            .shared
+            .take(|id| self.nodes.get(id).and_then(NodeSlot::head));
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(head) = self.nodes.get(id).and_then(NodeSlot::head) else {
+                continue;
+            };
+            let bits = head.marks.swap(0, SeqCst);
+            if let Some(n) = self.live(id)
+                && bits != 0
+            {
+                out.push(Ready {
+                    node: id,
+                    serial: n.serial,
+                    bits,
+                });
+            }
+        }
+        out
     }
 }
