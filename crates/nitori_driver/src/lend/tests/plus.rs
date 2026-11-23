@@ -29,7 +29,7 @@ fn two_branches_that_overlap_taken_in_turn() {
             {
                 let mut all = links.take::<Under<ConnCore, Mut<LinkCore>>, _>();
                 let _: &KeyedView<(PathKey, LinkId), &mut LinkCore> = &all;
-                for (_, l) in all.members_mut() {
+                for (_, l) in all.iter_mut() {
                     l.rx += 1;
                 }
             }
@@ -37,7 +37,7 @@ fn two_branches_that_overlap_taken_in_turn() {
             mine.rx += 10;
             planner.next_pn += u64::from(keys.epoch);
             let all = Take::<Under<ConnCore, Mut<LinkCore>>, _>::take(&mut links);
-            all.members().map(|(k, l)| (*k, l.rx)).collect::<Vec<_>>()
+            all.iter().map(|(k, l)| (*k, l.rx)).collect::<Vec<_>>()
         }
     );
     assert_eq!(
@@ -57,7 +57,7 @@ fn two_branches_that_overlap_taken_in_turn() {
         links.take::<Mut<LinkCore>, _>().rx = 5;
         let all = links.take::<Under<ConnCore, Mut<LinkCore>>, _>();
         let _: &KeyedView<LinkId, &mut LinkCore> = &all;
-        all.members().map(|(k, l)| (*k, l.rx)).collect::<Vec<_>>()
+        all.iter().map(|(k, l)| (*k, l.rx)).collect::<Vec<_>>()
     });
     assert_eq!(got, Some(vec![(LinkId(1), 5), (LinkId(2), 0)]));
 }
@@ -72,9 +72,7 @@ impl Visit<Count> for CountLinks {
     type Out = usize;
     fn visit<'v, P: Pos>(self, view: View<'v, Count, P>) -> usize {
         let hlist_pat![mut plus] = view;
-        let n = plus
-            .take::<Under<ConnCore, Ref<LinkCore>>, _>()
-            .member_count();
+        let n = plus.take::<Under<ConnCore, Ref<LinkCore>>, _>().len();
         let hlist_pat![link, planner] = plus.take::<HList![Mut<LinkCore>, Ref<Planner>], _>();
         link.rx = n as u32 + planner.next_pn as u32;
         n
@@ -111,13 +109,11 @@ type PerPath = HList![Under<
 fn a_plus_at_each_member() {
     let mut root = tree_one();
     let got = lend!(&mut root, Conn1, PerPath, hlist![], |hlist_pat![mut v]| {
-        for (_, hlist_pat![plus]) in v.members_mut() {
-            let n = plus
-                .take::<Under<SentRecords, Ref<LinkCore>>, _>()
-                .member_count();
+        for (_, hlist_pat![plus]) in v.iter_mut() {
+            let n = plus.take::<Under<SentRecords, Ref<LinkCore>>, _>().len();
             plus.take::<Mut<SentRecords>, _>().acked = n as u32;
         }
-        v.members_mut()
+        v.iter_mut()
             .map(|(k, hlist_pat![plus])| (*k, plus.take::<Mut<SentRecords>, _>().acked))
             .collect::<Vec<_>>()
     });

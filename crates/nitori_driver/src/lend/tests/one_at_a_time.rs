@@ -19,15 +19,15 @@ fn members_share_an_exclusive_ancestor() {
     let mut root = tree_one();
     let got = lend!(&mut root, Conn1, Each, hlist![], |hlist_pat![mut v]| {
         let _: &OneView<'_, _, (PathKey, LinkId), _> = &v;
-        v.for_each_member(|_, hlist_pat![link, sent]| {
+        v.for_each_mut(|_, hlist_pat![link, sent]| {
             sent.acked += 1;
             link.rx = sent.acked;
         });
-        let hlist_pat![link, _] = v.member_mut(&(PathKey(20), LinkId(3))).unwrap();
+        let hlist_pat![link, _] = v.get_mut(&(PathKey(20), LinkId(3))).unwrap();
         link.rx += 10;
         let mut seen = Vec::new();
-        v.for_each_member(|k, hlist_pat![link, _]| seen.push((*k, link.rx)));
-        (seen, v.member_count())
+        v.for_each_mut(|k, hlist_pat![link, _]| seen.push((*k, link.rx)));
+        (seen, v.len())
     });
     assert_eq!(
         got,
@@ -45,9 +45,9 @@ fn members_share_an_exclusive_ancestor() {
         mut v
     ]| {
         let _: &OneView<'_, _, LinkId, _> = &v;
-        v.for_each_member(|_, hlist_pat![_, sent]| sent.acked += 1);
-        assert!(v.member_mut(&LinkId(9)).is_none());
-        let hlist_pat![_, sent] = v.member_mut(&LinkId(2)).unwrap();
+        v.for_each_mut(|_, hlist_pat![_, sent]| sent.acked += 1);
+        assert!(v.get_mut(&LinkId(9)).is_none());
+        let hlist_pat![_, sent] = v.get_mut(&LinkId(2)).unwrap();
         (sent.acked, v.keys().copied().collect::<Vec<_>>())
     });
     assert_eq!(got, Some((2, vec![LinkId(1), LinkId(2)])));
@@ -62,9 +62,9 @@ fn one_component_at_each_member() {
         HList![Under<ConnCore, OneAtATime<Mut<LinkCore>>>, Ref<Keys>],
         hlist![],
         |hlist_pat![mut v, keys]| {
-            v.for_each_member(|k, link| link.rx = k.0 + keys.epoch);
+            v.for_each_mut(|k, link| link.rx = k.0 + keys.epoch);
             let mut seen = Vec::new();
-            v.for_each_member(|k, link| seen.push((*k, link.rx)));
+            v.for_each_mut(|k, link| seen.push((*k, link.rx)));
             seen
         }
     );
@@ -74,7 +74,7 @@ fn one_component_at_each_member() {
         LinkPath,
         HList![Under<LinkCore, OneAtATime<Ref<Congestion>>>],
         hlist![LinkId(1)],
-        |hlist_pat![mut v]| v.member_mut(&()).map(|c| c.in_flight)
+        |hlist_pat![mut v]| v.get_mut(&()).map(|c| c.in_flight)
     );
     assert_eq!(got, Some(Some(0)));
 }

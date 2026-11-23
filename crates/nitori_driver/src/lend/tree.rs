@@ -474,9 +474,14 @@ pub trait Collect<AF, MF, LF>: ToShape {
     ) -> <Self::Shape as Shape>::Out<V>;
 }
 impl<AF, LF> Collect<AF, AF, LF> for ShSelf {
-    fn collect<V>(_: &[&AF], anchor: &AF, _: &LF, mut f: impl FnMut(&AF) -> V) -> V {
+    fn collect<V>(
+        _: &[&AF],
+        anchor: &AF,
+        _: &LF,
+        mut f: impl FnMut(&AF) -> V,
+    ) -> crate::need::SingleView<V> {
         // The anchor is on the chain of the lend point, which is there.
-        f(anchor)
+        crate::need::SingleView::new(f(anchor))
     }
 }
 impl<AF: PartialEq, LF> Collect<AF, AF, LF> for ShOpt {

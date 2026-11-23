@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use frunk_core::{HList, hlist, hlist_pat};
 
 use super::fixtures::{lend, *};
-use crate::need::{At, KeyedView, Mut, Ref, Under};
+use crate::need::{At, KeyedView, Mut, Ref, SingleView, Under};
 
 #[test]
 fn keyed_by_one_key_and_by_two() {
@@ -17,10 +17,10 @@ fn keyed_by_one_key_and_by_two() {
         |hlist_pat![mut sent, mut links]| {
             let _: &KeyedView<PathKey, &mut SentRecords> = &sent;
             let _: &KeyedView<(PathKey, LinkId), &mut LinkCore> = &links;
-            for (_, s) in sent.members_mut() {
+            for (_, s) in sent.iter_mut() {
                 s.acked += 1;
             }
-            links.member_mut(&(PathKey(20), LinkId(3))).unwrap().rx = 9;
+            links.get_mut(&(PathKey(20), LinkId(3))).unwrap().rx = 9;
             (
                 sent.keys().copied().collect::<Vec<_>>(),
                 links.keys().copied().collect::<Vec<_>>(),
@@ -56,8 +56,8 @@ fn the_anchor_itself_and_at_most_one() {
         LinkPath,
         HList![Under<ConnCore, Mut<SentRecords>>, Under<LinkCore, Mut<Congestion>>],
         hlist![LinkId(1)],
-        |hlist_pat![sent, congestion]| {
-            let _: &&mut SentRecords = &sent;
+        |hlist_pat![mut sent, congestion]| {
+            let _: &SingleView<&mut SentRecords> = &sent;
             let _: &Option<&mut Congestion> = &congestion;
             sent.acked += 1;
             congestion.map(|c| {
@@ -93,7 +93,7 @@ fn taking_at_each_member_has_the_same_view() {
                 &KeyedView<PathKey, &mut SentRecords>,
                 &KeyedView<(PathKey, LinkId), &mut LinkCore>,
             ) = (&sent, &links);
-            (sent.member_count(), links.member_count())
+            (sent.len(), links.len())
         }
     );
     assert_eq!(got, Some((2, 3)));

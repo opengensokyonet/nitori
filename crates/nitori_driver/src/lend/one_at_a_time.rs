@@ -67,7 +67,7 @@ where
         Self: 'a,
     {
         let all = Sh::collect(rows, anchor, at, |m| m.clone());
-        let (keys, members) = <<Sh::Shape as Shape>::Out<MF> as Members<MF>>::members(&all)
+        let (keys, members) = <<Sh::Shape as Shape>::Out<MF> as Members<MF>>::iter(&all)
             .map(|(k, m)| (k.clone(), m.clone()))
             .unzip();
         OneView::new(keys, OneHeld { members, hs }, one::<MC, T, PT>)

@@ -12,7 +12,7 @@ fn two_shared_needs_of_one_component() {
         LinkPath,
         HList![Ref<SentRecords>, Under<ConnCore, Ref<SentRecords>>, Ref<Keys>, Ref<Keys>],
         hlist![PathKey(20), LinkId(3)],
-        |hlist_pat![mine, all, a, b]| (mine.acked, all.member_count(), a.epoch + b.epoch)
+        |hlist_pat![mine, all, a, b]| (mine.acked, all.len(), a.epoch + b.epoch)
     );
     assert_eq!(got, Some((0, 2, 14)));
 }
@@ -28,7 +28,7 @@ fn one_component_of_two_kinds() {
         |hlist_pat![planner, mut credit, link]| {
             planner.next_pn += 1;
             link.rx += 1;
-            credit.member_mut(&LinkId(2)).map(|c| c.available)
+            credit.get_mut(&LinkId(2)).map(|c| c.available)
         }
     );
     assert_eq!(got, Some(Some(20)));

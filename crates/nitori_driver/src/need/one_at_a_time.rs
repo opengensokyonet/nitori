@@ -81,11 +81,15 @@ impl<'t, T: Need, K, P: Pos> OneView<'t, T, K, P> {
         self.keys.iter()
     }
     /// How many members there are.
-    pub fn member_count(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.keys.len()
     }
+    /// Whether there is no member.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
     /// The view of the member under `key`, borrowed from this one.
-    pub fn member_mut(&mut self, key: &K) -> Option<T::View<'_, P::Inner>>
+    pub fn get_mut(&mut self, key: &K) -> Option<T::View<'_, P::Inner>>
     where
         K: PartialEq,
     {
@@ -93,7 +97,7 @@ impl<'t, T: Need, K, P: Pos> OneView<'t, T, K, P> {
         Some((self.one)(&mut self.held, i))
     }
     /// `f` called with every member's key and view, one after another.
-    pub fn for_each_member(&mut self, mut f: impl FnMut(&K, T::View<'_, P::Inner>)) {
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(&K, T::View<'_, P::Inner>)) {
         for (i, k) in self.keys.iter().enumerate() {
             f(k, (self.one)(&mut self.held, i));
         }

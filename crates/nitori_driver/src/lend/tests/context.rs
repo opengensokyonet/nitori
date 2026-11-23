@@ -32,7 +32,7 @@ fn own_key() {
         HList![Under<ConnCore, At<SentRecords, HList![OwnKey<PathKey>]>>],
         hlist![],
         |hlist_pat![v]| v
-            .members()
+            .iter()
             .map(|(_, hlist_pat![k])| *k)
             .collect::<alloc::vec::Vec<_>>()
     );

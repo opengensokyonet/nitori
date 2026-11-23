@@ -75,11 +75,38 @@ pub trait Shape: 'static {
     type Out<V>: Members<V, Key = Self::Key>;
 }
 
-/// The members are the anchor itself: the result is the member's own.
+/// The members are the anchor itself: the result is a [`SingleView`].
 pub struct Single;
 impl Shape for Single {
     type Key = ();
-    type Out<V> = V;
+    type Out<V> = SingleView<V>;
+}
+
+/// The result of a [`Single`] shape: the one member's own value.
+///
+/// It dereferences to the value, and is the one member under the key `()`
+/// of [`Members`].
+pub struct SingleView<V>(V);
+impl<V> SingleView<V> {
+    /// A result made of `v`.
+    pub(crate) fn new(v: V) -> Self {
+        Self(v)
+    }
+    /// The value itself.
+    pub fn into_inner(self) -> V {
+        self.0
+    }
+}
+impl<V> core::ops::Deref for SingleView<V> {
+    type Target = V;
+    fn deref(&self) -> &V {
+        &self.0
+    }
+}
+impl<V> core::ops::DerefMut for SingleView<V> {
+    fn deref_mut(&mut self) -> &mut V {
+        &mut self.0
+    }
 }
 
 /// Every level between the anchor and the members keeps at most one child:
@@ -101,75 +128,75 @@ impl<K: Clone + PartialEq + 'static> Shape for KeyedBy<K> {
 
 /// The members of a result, one by one, whatever its shape: a single
 /// result is one member under the key `()`.
-///
-/// The methods have names of their own: every type is the single result
-/// of itself, so a method named as one of a collection's would stand for
-/// it wherever this trait is imported.
 pub trait Members<V> {
     /// What tells the members apart.
     type Key;
     /// How many members there are.
-    fn member_count(&self) -> usize;
+    fn len(&self) -> usize;
+    /// Whether there is no member.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Every member with its key.
-    fn members<'m>(&'m self) -> impl Iterator<Item = (&'m Self::Key, &'m V)>
+    fn iter<'m>(&'m self) -> impl Iterator<Item = (&'m Self::Key, &'m V)>
     where
         V: 'm;
     /// Every member with its key, exclusive.
-    fn members_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m Self::Key, &'m mut V)>
+    fn iter_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m Self::Key, &'m mut V)>
     where
         V: 'm;
     /// The member under `key`.
-    fn member(&self, key: &Self::Key) -> Option<&V>;
+    fn get(&self, key: &Self::Key) -> Option<&V>;
     /// The member under `key`, exclusive.
-    fn member_mut(&mut self, key: &Self::Key) -> Option<&mut V>;
+    fn get_mut(&mut self, key: &Self::Key) -> Option<&mut V>;
 }
 
-impl<V> Members<V> for V {
+impl<V> Members<V> for SingleView<V> {
     type Key = ();
-    fn member_count(&self) -> usize {
+    fn len(&self) -> usize {
         1
     }
-    fn members<'m>(&'m self) -> impl Iterator<Item = (&'m (), &'m V)>
+    fn iter<'m>(&'m self) -> impl Iterator<Item = (&'m (), &'m V)>
     where
         V: 'm,
     {
-        core::iter::once((&(), self))
+        core::iter::once((&(), &self.0))
     }
-    fn members_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m (), &'m mut V)>
+    fn iter_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m (), &'m mut V)>
     where
         V: 'm,
     {
-        core::iter::once((&(), self))
+        core::iter::once((&(), &mut self.0))
     }
-    fn member(&self, _: &()) -> Option<&V> {
-        Some(self)
+    fn get(&self, _: &()) -> Option<&V> {
+        Some(&self.0)
     }
-    fn member_mut(&mut self, _: &()) -> Option<&mut V> {
-        Some(self)
+    fn get_mut(&mut self, _: &()) -> Option<&mut V> {
+        Some(&mut self.0)
     }
 }
 
 impl<V> Members<V> for Option<V> {
     type Key = ();
-    fn member_count(&self) -> usize {
+    fn len(&self) -> usize {
         usize::from(self.is_some())
     }
-    fn members<'m>(&'m self) -> impl Iterator<Item = (&'m (), &'m V)>
+    fn iter<'m>(&'m self) -> impl Iterator<Item = (&'m (), &'m V)>
     where
         V: 'm,
     {
         Option::as_ref(self).into_iter().map(|v| (&(), v))
     }
-    fn members_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m (), &'m mut V)>
+    fn iter_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m (), &'m mut V)>
     where
         V: 'm,
     {
         Option::as_mut(self).into_iter().map(|v| (&(), v))
     }
-    fn member(&self, _: &()) -> Option<&V> {
+    fn get(&self, _: &()) -> Option<&V> {
         Option::as_ref(self)
     }
-    fn member_mut(&mut self, _: &()) -> Option<&mut V> {
+    fn get_mut(&mut self, _: &()) -> Option<&mut V> {
         Option::as_mut(self)
     }
 }
@@ -196,15 +223,19 @@ impl<K, V> KeyedView<K, V> {
         self.members.iter().map(|(k, _)| k)
     }
     /// How many members there are.
-    pub fn member_count(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.members.len()
     }
+    /// Whether there is no member.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
     /// Every member with its key.
-    pub fn members(&self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.members.iter().map(|(k, v)| (k, v))
     }
     /// Every member with its key, exclusive.
-    pub fn members_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         self.members.iter_mut().map(|(k, v)| (&*k, v))
     }
     /// The members of the lend point's own branch, exclusive, and the
@@ -231,11 +262,11 @@ impl<K, V> KeyedView<K, V> {
 }
 impl<K: PartialEq, V> KeyedView<K, V> {
     /// The member under `key`.
-    pub fn member(&self, key: &K) -> Option<&V> {
+    pub fn get(&self, key: &K) -> Option<&V> {
         self.members.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
     /// The member under `key`, exclusive.
-    pub fn member_mut(&mut self, key: &K) -> Option<&mut V> {
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.members
             .iter_mut()
             .find(|(k, _)| k == key)
@@ -244,25 +275,25 @@ impl<K: PartialEq, V> KeyedView<K, V> {
 }
 impl<K: PartialEq, V> Members<V> for KeyedView<K, V> {
     type Key = K;
-    fn member_count(&self) -> usize {
-        KeyedView::member_count(self)
+    fn len(&self) -> usize {
+        KeyedView::len(self)
     }
-    fn members<'m>(&'m self) -> impl Iterator<Item = (&'m K, &'m V)>
+    fn iter<'m>(&'m self) -> impl Iterator<Item = (&'m K, &'m V)>
     where
         V: 'm,
     {
-        KeyedView::members(self)
+        KeyedView::iter(self)
     }
-    fn members_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m K, &'m mut V)>
+    fn iter_mut<'m>(&'m mut self) -> impl Iterator<Item = (&'m K, &'m mut V)>
     where
         V: 'm,
     {
-        KeyedView::members_mut(self)
+        KeyedView::iter_mut(self)
     }
-    fn member(&self, key: &K) -> Option<&V> {
-        KeyedView::member(self, key)
+    fn get(&self, key: &K) -> Option<&V> {
+        KeyedView::get(self, key)
     }
-    fn member_mut(&mut self, key: &K) -> Option<&mut V> {
-        KeyedView::member_mut(self, key)
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        KeyedView::get_mut(self, key)
     }
 }

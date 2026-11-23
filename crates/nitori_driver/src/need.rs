@@ -148,7 +148,9 @@ mod view;
 
 pub use one_at_a_time::{OneAtATime, OneView};
 pub use plus::{BranchAt, Branches, Plus, PlusView, Take};
-pub use view::{EmptyPos, KeyedBy, KeyedView, Members, Need, Optional, Pos, Shape, Single, View};
+pub use view::{
+    EmptyPos, KeyedBy, KeyedView, Members, Need, Optional, Pos, Shape, Single, SingleView, View,
+};
 
 /// The component `X`, exclusive, of the one node from the lend point up to
 /// the root that has it.

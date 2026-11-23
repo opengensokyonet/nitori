@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use frunk_core::{HList, hlist, hlist_pat};
 
 use super::fixtures::{lend, *};
-use crate::need::{At, KeyedView, Mut, Ref, Under};
+use crate::need::{At, KeyedView, Mut, Ref, SingleView, Under};
 
 /// From a link path, the logical path (or, in structure two, the
 /// connection) becomes the lend point.
@@ -49,7 +49,7 @@ fn at_each_member_with_a_shared_ancestor() {
         |hlist_pat![mut v]| {
             let _: &KeyedView<(PathKey, LinkId), _> = &v;
             let mut made = 0;
-            for (_, hlist_pat![c, f]) in v.members_mut() {
+            for (_, hlist_pat![c, f]) in v.iter_mut() {
                 c.in_flight += 10;
                 made += f.made;
             }
@@ -91,8 +91,8 @@ fn nested_views() {
         let _: &KeyedView<PathKey, HList![&mut SentRecords, KeyedView<LinkId, &mut Congestion>]> =
             &v;
         let mut seen = Vec::new();
-        for (p, hlist_pat![sent, inner]) in v.members_mut() {
-            for (l, c) in inner.members_mut() {
+        for (p, hlist_pat![sent, inner]) in v.iter_mut() {
+            for (l, c) in inner.iter_mut() {
                 c.in_flight += 100;
                 sent.acked += 1;
                 seen.push((*p, *l));
@@ -109,9 +109,9 @@ fn nested_views() {
     );
     let mut root = tree_two();
     let got = lend!(&mut root, Conn2, Nested, hlist![], |hlist_pat![v]| {
-        let _: &HList![&mut SentRecords, KeyedView<LinkId, &mut Congestion>] = &v;
-        let hlist_pat![sent, inner] = v;
-        sent.acked = inner.member_count() as u32;
+        let _: &SingleView<HList![&mut SentRecords, KeyedView<LinkId, &mut Congestion>]> = &v;
+        let hlist_pat![sent, inner] = v.into_inner();
+        sent.acked = inner.len() as u32;
         sent.acked
     });
     assert_eq!(got, Some(1));

@@ -17,14 +17,14 @@ fn the_own_member_and_the_others() {
         |hlist_pat![mut v]| {
             let _: &KeyedView<LinkId, &mut Credit> = &v;
             let (mut own, rest) = v.split_own();
-            let others: u32 = rest.members().map(|(_, c)| c.available).sum();
-            for (_, c) in own.members_mut() {
+            let others: u32 = rest.iter().map(|(_, c)| c.available).sum();
+            for (_, c) in own.iter_mut() {
                 c.available += others;
             }
             (
                 own.keys().copied().collect::<Vec<_>>(),
                 rest.keys().copied().collect::<Vec<_>>(),
-                v.member(&LinkId(1)).map(|c| c.available),
+                v.get(&LinkId(1)).map(|c| c.available),
             )
         }
     );

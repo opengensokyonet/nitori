@@ -17,10 +17,10 @@ impl Visit<RecvNeeds> for Receive {
     type Out = usize;
     fn visit<'v, P: Pos>(self, view: View<'v, RecvNeeds, P>) -> usize {
         let hlist_pat![mut links, sent] = view;
-        for (_, link) in links.members_mut() {
+        for (_, link) in links.iter_mut() {
             link.rx += 1;
         }
-        let n = links.member_count();
+        let n = links.len();
         sent.sent.push(n as u64);
         n
     }
@@ -41,7 +41,7 @@ impl Visit<SendNeeds> for Send {
         let hlist_pat![planner, mut congestion, keys] = view;
         let pn = planner.next_pn;
         planner.next_pn += 1;
-        let in_flight = congestion.members_mut().next().map(|(_, c)| {
+        let in_flight = congestion.iter_mut().next().map(|(_, c)| {
             c.in_flight += 1;
             c.in_flight
         });
@@ -68,10 +68,7 @@ fn one_call_on_structure_one() {
         Conn1,
         HList![Under<ConnCore, Ref<LinkCore>>],
         hlist![],
-        |hlist_pat![v]| v
-            .members()
-            .map(|(_, l)| l.rx)
-            .collect::<alloc::vec::Vec<_>>()
+        |hlist_pat![v]| v.iter().map(|(_, l)| l.rx).collect::<alloc::vec::Vec<_>>()
     );
     assert_eq!(rx, Some(alloc::vec![1, 1, 1]));
 
