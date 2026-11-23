@@ -142,8 +142,12 @@
 //! ```
 use core::marker::PhantomData;
 
+mod one_at_a_time;
+mod plus;
 mod view;
 
+pub use one_at_a_time::{OneAtATime, OneView};
+pub use plus::{BranchAt, Branches, Plus, PlusView, Take};
 pub use view::{EmptyPos, KeyedBy, KeyedView, Members, Need, Optional, Pos, Shape, Single, View};
 
 /// The component `X`, exclusive, of the one node from the lend point up to
@@ -247,7 +251,8 @@ impl<X: 'static> Need for Ref<X> {
 /// [`At`]`<B, T2>`, which makes each member, the node that has `B`, the
 /// lend point of `T2`. The members must be borrowed apart: what `T` takes
 /// exclusive is at the member or below it, never above, where the members
-/// share it. How many members there are follows from the structure
+/// share it; [`OneAtATime`]`<T>` lifts this, handing out one member at a
+/// time. How many members there are follows from the structure
 /// ([`Shape`]).
 ///
 /// No node on the way up having `A`, or more than one; no kind at or below
@@ -405,8 +410,24 @@ impl<X: 'static> Need for Ref<X> {
 /// lends!(Conn, HList![Under<ConnCore, At<Congestion, HList![Mut<Congestion>, Mut<SentRecords>]>>]);
 /// ```
 pub struct Under<A, T>(PhantomData<fn() -> (A, T)>);
-impl<A: 'static, T: Need> Need for Under<A, T> {
-    type View<'t, P: Pos> = <P::Shape as Shape>::Out<T::View<'t, P::Inner>>;
+impl<A: 'static, T: MemberNeed> Need for Under<A, T> {
+    type View<'t, P: Pos> = T::Collected<'t, P>;
+}
+
+/// A need taken at each member of an [`Under`], and what the members'
+/// views are gathered into.
+pub trait MemberNeed: Need {
+    /// The result of the `Under`, lent for `'t` at its position `P`.
+    type Collected<'t, P: Pos>;
+}
+impl<X: 'static> MemberNeed for Mut<X> {
+    type Collected<'t, P: Pos> = <P::Shape as Shape>::Out<Self::View<'t, P::Inner>>;
+}
+impl<X: 'static> MemberNeed for Ref<X> {
+    type Collected<'t, P: Pos> = <P::Shape as Shape>::Out<Self::View<'t, P::Inner>>;
+}
+impl<B: 'static, T: Need> MemberNeed for At<B, T> {
+    type Collected<'t, P: Pos> = <P::Shape as Shape>::Out<Self::View<'t, P::Inner>>;
 }
 
 /// `T` taken with the node that has the component `B` as the lend point:

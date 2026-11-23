@@ -137,7 +137,9 @@ impl<X> ExactlyOneUp<X> for One {}
 pub trait ExactlyOneBelow<X> {}
 impl<X> ExactlyOneBelow<X> for One {}
 
-type UpCount<C, X> = <<<C as Ctx>::Chain as CountChain<X>>::N as Spell>::Name;
+/// How many nodes from the lend point `C` up to the root have `X`, as it
+/// is reported.
+pub type UpCount<C, X> = <<<C as Ctx>::Chain as CountChain<X>>::N as Spell>::Name;
 
 // ------------------------------------------------------------------ overlap
 
@@ -262,8 +264,8 @@ where
     UpKind<C, A, IA>: FindBelow<C::Parts, Bd::B, IK, Sh = Sh>,
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, Bd::B, IK>>::Rel>,
     MRoute<C, A, IA, Bd::B, IK>: Len,
-    MCx<C, A, IA, Bd::B, IK>: Ctx,
-    Bd: CheckBody<MCx<C, A, IA, Bd::B, IK>, PB>,
+    MCx<C, A, IA, Bd, IK>: Ctx,
+    Bd: CheckBody<MCx<C, A, IA, Bd, IK>, PB>,
 {
 }
 impl<C: Ctx, K> Check<C, KeyPos> for OwnKey<K> where C::Storage: KeyIs<K> {}
@@ -320,10 +322,10 @@ where
     UpKind<C, A, IA>: FindBelow<C::Parts, Bd::B, IK, Sh = Sh>,
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, Bd::B, IK>>::Rel>,
     MRoute<C, A, IA, Bd::B, IK>: Len,
-    MCx<C, A, IA, Bd::B, IK>: Ctx,
-    Bd: TakesBody<MCx<C, A, IA, Bd::B, IK>, PB>,
+    MCx<C, A, IA, Bd, IK>: Ctx,
+    Bd: TakesBody<MCx<C, A, IA, Bd, IK>, PB>,
 {
-    type Touches = <Bd as TakesBody<MCx<C, A, IA, Bd::B, IK>, PB>>::Touches;
+    type Touches = <Bd as TakesBody<MCx<C, A, IA, Bd, IK>, PB>>::Touches;
 }
 impl<C: Ctx, K> Takes<C, KeyPos> for OwnKey<K> {
     type Touches = HNil;

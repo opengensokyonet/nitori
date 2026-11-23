@@ -7,7 +7,7 @@ use frunk_core::hlist::{HCons, HNil};
 use super::{
     Lend,
     list::{HasPrefix, Prefix},
-    plan::{ExCol, Plan, ShCol},
+    plan::{ExCol, Plan, ShCol, Shared},
     tree::{AtPos, Ctx, Cx, DepthGe, FindUp, UpPos},
 };
 use crate::need::{At, Mut, Pos, Ref};
@@ -80,14 +80,14 @@ where
     UpCol<C, X, I>: 'static,
 {
     type Cols = ShCol<UpPre<C, X, I>, UpCol<C, X, I>, UpFk<C, X, I>, X>;
-    fn build<'a>(hs: &'a [(&'a UpFk<C, X, I>, &'a X)], at: &C::Fk) -> &'a X
+    fn build<'a>(hs: Shared<'a, UpFk<C, X, I>, X>, at: &C::Fk) -> &'a X
     where
         Self: 'a,
     {
         // Invariant: as for `Mut`.
         hs.iter()
             .find(|(f, _)| at.has_prefix(f))
-            .map(|(_, x)| *x)
+            .map(|(_, x)| x)
             .expect("the node above a lend point is in the tree")
     }
 }

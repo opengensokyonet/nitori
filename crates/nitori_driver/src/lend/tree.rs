@@ -8,7 +8,7 @@ use frunk_core::{
     indices::{Here, There},
 };
 
-use super::list::{Append, Concat, KeyTuple, Len, PushKey, S, ShiftFirst, Z};
+use super::list::{Append, Concat, KeyTuple, Len, PushKey, S, SameBranch, ShiftFirst, Z};
 use crate::{
     need::{KeyedBy, Optional, Pos, Shape, Single},
     structure::{
@@ -463,35 +463,42 @@ where
 
 /// How the members of a result are gathered, by its shape, from the full
 /// keys `rows` of the nodes of the members' kind: the anchor's full key is
-/// `AF`, a member's `MF`.
-pub trait Collect<AF, MF>: ToShape {
+/// `AF`, a member's `MF`, the lend point's `LF`.
+pub trait Collect<AF, MF, LF>: ToShape {
     /// The result, `f` called for each member.
     fn collect<V>(
         rows: &[&MF],
         anchor: &AF,
+        at: &LF,
         f: impl FnMut(&MF) -> V,
     ) -> <Self::Shape as Shape>::Out<V>;
 }
-impl<AF> Collect<AF, AF> for ShSelf {
-    fn collect<V>(_: &[&AF], anchor: &AF, mut f: impl FnMut(&AF) -> V) -> V {
+impl<AF, LF> Collect<AF, AF, LF> for ShSelf {
+    fn collect<V>(_: &[&AF], anchor: &AF, _: &LF, mut f: impl FnMut(&AF) -> V) -> V {
         // The anchor is on the chain of the lend point, which is there.
         f(anchor)
     }
 }
-impl<AF: PartialEq> Collect<AF, AF> for ShOpt {
-    fn collect<V>(rows: &[&AF], anchor: &AF, mut f: impl FnMut(&AF) -> V) -> Option<V> {
+impl<AF: PartialEq, LF> Collect<AF, AF, LF> for ShOpt {
+    fn collect<V>(rows: &[&AF], anchor: &AF, _: &LF, mut f: impl FnMut(&AF) -> V) -> Option<V> {
         rows.contains(&anchor).then(|| f(anchor))
     }
 }
-impl<AF: Concat<KL>, KL: KeyTuple + 'static> Collect<AF, AF::Out> for ShKeys<KL> {
+impl<AF: Concat<KL>, KL: KeyTuple + 'static, LF> Collect<AF, AF::Out, LF> for ShKeys<KL>
+where
+    AF::Out: SameBranch<LF>,
+{
     fn collect<V>(
         rows: &[&AF::Out],
         anchor: &AF,
+        at: &LF,
         mut f: impl FnMut(&AF::Out) -> V,
     ) -> crate::need::KeyedView<KL::Tuple, V> {
         crate::need::KeyedView::new(
             rows.iter()
-                .filter_map(|r| AF::strip(r, anchor).map(|keys| (keys.to_tuple(), f(r))))
+                .filter_map(|r| {
+                    AF::strip(r, anchor).map(|keys| (keys.to_tuple(), f(r), r.same_branch(at)))
+                })
                 .collect(),
         )
     }

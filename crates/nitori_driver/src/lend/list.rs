@@ -200,6 +200,43 @@ impl<H: PartialEq, T: HasPrefix<Q>, Q> HasPrefix<HCons<H, Q>> for HCons<H, T> {
     }
 }
 
+/// Whether two full keys agree as far as the shorter goes: one node is the
+/// other, or above it.
+pub trait SameBranch<B> {
+    /// Whether they agree.
+    fn same_branch(&self, other: &B) -> bool;
+}
+impl<B> SameBranch<B> for HNil {
+    fn same_branch(&self, _: &B) -> bool {
+        true
+    }
+}
+impl<H, T> SameBranch<HNil> for HCons<H, T> {
+    fn same_branch(&self, _: &HNil) -> bool {
+        true
+    }
+}
+impl<H: PartialEq, T: SameBranch<T2>, T2> SameBranch<HCons<H, T2>> for HCons<H, T> {
+    fn same_branch(&self, other: &HCons<H, T2>) -> bool {
+        self.head == other.head && self.tail.same_branch(&other.tail)
+    }
+}
+
+/// The position of the first [`True`] in a list of answers, `Rest` being
+/// the position after this one.
+pub trait FirstTrue<Rest> {
+    /// [`Here`] or [`There`].
+    type Out;
+}
+impl<Rest> FirstTrue<Rest> for True {
+    type Out = Here;
+}
+impl<Rest> FirstTrue<Rest> for False {
+    type Out = There<Rest>;
+}
+/// No position: what a search through a list that lacks the item gives.
+pub struct Nowhere;
+
 /// A full key `Self` followed by the keys `Sx`, and back.
 pub trait Concat<Sx> {
     /// The longer key.

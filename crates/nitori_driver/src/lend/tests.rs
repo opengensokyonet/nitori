@@ -5,5 +5,8 @@ mod context;
 mod fixtures;
 mod generic;
 mod logged;
+mod one_at_a_time;
 mod overlap;
+mod plus;
 mod shapes;
+mod split_own;

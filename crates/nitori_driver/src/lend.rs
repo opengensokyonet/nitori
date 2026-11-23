@@ -17,8 +17,10 @@ use crate::{
 
 pub(crate) mod check;
 pub(crate) mod list;
+pub(crate) mod one_at_a_time;
 pub(crate) mod own;
 pub(crate) mod plan;
+pub(crate) mod plus;
 pub(crate) mod table;
 pub(crate) mod tree;
 pub(crate) mod under;

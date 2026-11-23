@@ -1,7 +1,7 @@
 //! The components, kinds and parts of the two structures, and their trees.
 //!
-//! Structure one: `Conn1 { ConnCore, Keys, RecoveryFactory; [Entry by
-//! LinkId], [LogicalPath by PathKey { SentRecords; [LinkPath by LinkId {
+//! Structure one: `Conn1 { ConnCore, Keys, RecoveryFactory; [LogicalPath by
+//! PathKey { SentRecords; [Entry by LinkId], [LinkPath by LinkId {
 //! LinkCore, Planner; Recovery? { Congestion } }] }] }`. Structure two:
 //! `Conn2 { ConnCore, Keys, SentRecords, RecoveryFactory; [Entry by
 //! LinkId], [LinkPath by LinkId] }`. The components are split between two
@@ -70,14 +70,11 @@ impl NodeKind for LinkPath {
 }
 pub struct LogicalPath;
 impl NodeKind for LogicalPath {
-    type Children = HList![Child<LinkPath, SlotVec<LinkId>>];
+    type Children = HList![Child<Entry, SlotVec<LinkId>>, Child<LinkPath, SlotVec<LinkId>>];
 }
 pub struct Conn1;
 impl NodeKind for Conn1 {
-    type Children = HList![
-        Child<Entry, SlotVec<LinkId>>,
-        Child<LogicalPath, SlotVec<PathKey>>
-    ];
+    type Children = HList![Child<LogicalPath, SlotVec<PathKey>>];
 }
 pub struct Conn2;
 impl NodeKind for Conn2 {
@@ -148,18 +145,13 @@ fn recovery() -> Node<Recovery, Parts> {
     Node::new(hlist![hlist![], hlist![Congestion::default()]])
 }
 
-/// Structure one: entries 1–3; logical paths 10 (links 1 and 2) and 20
-/// (link 3); recovery on (10, 1) and (20, 3).
+/// Structure one: logical paths 10 (entries and links 1 and 2) and 20
+/// (entry and link 3); recovery on (10, 1) and (20, 3).
 pub fn tree_one() -> Node<Conn1, Parts> {
     let mut root = Node::new(hlist![
         hlist![ConnCore::default(), Keys { epoch: 7 }],
         hlist![RecoveryFactory { made: 5 }]
     ]);
-    for l in [1, 2, 3] {
-        insert(&mut root, End, LinkId(l), entry(l))
-            .ok()
-            .expect("the parent is there and the key is free");
-    }
     for (p, links) in [(10, &[1, 2][..]), (20, &[3][..])] {
         let path = insert(
             &mut root,
@@ -170,6 +162,9 @@ pub fn tree_one() -> Node<Conn1, Parts> {
         .ok()
         .expect("the parent is there and the key is free");
         for &l in links {
+            insert(&mut root, path, LinkId(l), entry(l))
+                .ok()
+                .expect("the parent is there and the key is free");
             let link = insert(&mut root, path, LinkId(l), link_path(l))
                 .ok()
                 .expect("the parent is there and the key is free");

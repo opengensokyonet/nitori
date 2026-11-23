@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use frunk_core::hlist::HNil;
+use frunk_core::hlist::{HCons, HNil};
 
 use super::{
     list::HasPrefix,
@@ -43,7 +43,40 @@ impl<Rt: 'static, J: 'static, F: 'static, X: 'static> Plan for ExCol<Rt, J, F, X
     type Hs<'a> = Vec<(F, &'a mut X)>;
 }
 impl<Rt: 'static, J: 'static, F: 'static, X: 'static> Plan for ShCol<Rt, J, F, X> {
-    type Hs<'a> = &'a [(&'a F, &'a X)];
+    type Hs<'a> = Shared<'a, F, X>;
+}
+impl Plan for HNil {
+    type Hs<'a> = HNil;
+}
+impl<A: Plan, B: Plan> Plan for HCons<A, B> {
+    type Hs<'a> = HCons<A::Hs<'a>, B::Hs<'a>>;
+}
+
+/// The handle of a shared column: the entries gathered from the rows, or
+/// those of a column a `Plus` holds exclusive, read through it.
+pub enum Shared<'a, F, X> {
+    /// Gathered from the rows.
+    Rows(&'a [(&'a F, &'a X)]),
+    /// Read through a column held exclusive.
+    Held(&'a [(F, &'a mut X)]),
+}
+impl<F, X> Clone for Shared<'_, F, X> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<F, X> Copy for Shared<'_, F, X> {}
+impl<'a, F, X> Shared<'a, F, X> {
+    /// Every entry: a node's full key and its component.
+    pub fn iter(self) -> impl Iterator<Item = (&'a F, &'a X)> {
+        let (rows, held) = match self {
+            Self::Rows(r) => (Some(r), None),
+            Self::Held(h) => (None, Some(h)),
+        };
+        let rows = rows.into_iter().flatten().map(|&(f, x)| (f, x));
+        let held = held.into_iter().flatten().map(|(f, x)| (f, &**x));
+        rows.chain(held)
+    }
 }
 impl<Rt: 'static, F: 'static> Plan for NodeSet<Rt, F> {
     type Hs<'a> = &'a [&'a F];
@@ -89,6 +122,64 @@ impl<R: KindTab<Pt, HNil>, Pt: 'static, X> Run<R, Pt, X> for () {
     where
         Self: 'a,
     {
+    }
+}
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X> Run<R, Pt, X> for HNil {
+    type Ex<'a> = HNil;
+    type Store<'b> = HNil;
+    fn take<'a>(_: &mut R::Table<'a>, _: &mut X) -> HNil
+    where
+        Self: 'a,
+    {
+        HNil
+    }
+    fn gather<'a: 'b, 'b>(_: &'b R::Table<'a>) -> HNil
+    where
+        Self: 'a,
+    {
+        HNil
+    }
+    fn handles<'a: 'c, 'b: 'c, 'c>(_: HNil, _: &'c HNil) -> HNil
+    where
+        Self: 'a,
+    {
+        HNil
+    }
+}
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X, A, B> Run<R, Pt, X> for HCons<A, B>
+where
+    A: Run<R, Pt, X>,
+    B: Run<R, Pt, X>,
+{
+    type Ex<'a> = HCons<A::Ex<'a>, B::Ex<'a>>;
+    type Store<'b> = HCons<A::Store<'b>, B::Store<'b>>;
+    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X) -> Self::Ex<'a>
+    where
+        Self: 'a,
+    {
+        let head = A::take(tab, cx);
+        HCons {
+            head,
+            tail: B::take(tab, cx),
+        }
+    }
+    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Self::Store<'b>
+    where
+        Self: 'a,
+    {
+        HCons {
+            head: A::gather(tab),
+            tail: B::gather(tab),
+        }
+    }
+    fn handles<'a: 'c, 'b: 'c, 'c>(ex: Self::Ex<'a>, store: &'c Self::Store<'b>) -> Self::Hs<'c>
+    where
+        Self: 'a,
+    {
+        HCons {
+            head: A::handles(ex.head, &store.head),
+            tail: B::handles(ex.tail, &store.tail),
+        }
     }
 }
 impl<R: KindTab<Pt, HNil>, Pt: 'static, X, A, B> Run<R, Pt, X> for (A, B)
@@ -186,11 +277,11 @@ where
             })
             .collect()
     }
-    fn handles<'a: 'c, 'b: 'c, 'c>(_: (), store: &'c Vec<(&'b F, &'b C)>) -> &'c [(&'c F, &'c C)]
+    fn handles<'a: 'c, 'b: 'c, 'c>(_: (), store: &'c Vec<(&'b F, &'b C)>) -> Shared<'c, F, C>
     where
         Self: 'a,
     {
-        store
+        Shared::Rows(store)
     }
 }
 impl<R, Pt: 'static, X, Rt: 'static, F: 'static> Run<R, Pt, X> for NodeSet<Rt, F>
@@ -234,6 +325,25 @@ impl<M> PartPlan<M> for () {
     {
     }
 }
+impl<M> PartPlan<M> for HNil {
+    fn part<'a>(_: &mut HNil, _: &M) -> HNil
+    where
+        Self: 'a,
+    {
+        HNil
+    }
+}
+impl<M, A: PartPlan<M>, B: PartPlan<M>> PartPlan<M> for HCons<A, B> {
+    fn part<'a>(hs: &mut Self::Hs<'a>, member: &M) -> Self::Hs<'a>
+    where
+        Self: 'a,
+    {
+        HCons {
+            head: A::part(&mut hs.head, member),
+            tail: B::part(&mut hs.tail, member),
+        }
+    }
+}
 impl<M, A: PartPlan<M>, B: PartPlan<M>> PartPlan<M> for (A, B) {
     fn part<'a>((a, b): &mut Self::Hs<'a>, member: &M) -> Self::Hs<'a>
     where
@@ -270,5 +380,48 @@ impl<M, Rt: 'static, F: 'static> PartPlan<M> for NodeSet<Rt, F> {
         Self: 'a,
     {
         *hs
+    }
+}
+
+/// The handles of a plan lent again, for a shorter time: what a view that
+/// hands out one member at a time gives each of them.
+pub trait Rebor: Plan {
+    /// The handles, borrowed from `hs` for `'b`.
+    fn rebor<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>) -> Self::Hs<'b>;
+}
+impl Rebor for () {
+    fn rebor<'b, 'c: 'b>(_: &'b mut ()) {}
+}
+impl<A: Rebor, B: Rebor> Rebor for (A, B) {
+    fn rebor<'b, 'c: 'b>((a, b): &'b mut Self::Hs<'c>) -> Self::Hs<'b> {
+        (A::rebor(a), B::rebor(b))
+    }
+}
+impl Rebor for HNil {
+    fn rebor<'b, 'c: 'b>(_: &'b mut HNil) -> HNil {
+        HNil
+    }
+}
+impl<A: Rebor, B: Rebor> Rebor for HCons<A, B> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>) -> Self::Hs<'b> {
+        HCons {
+            head: A::rebor(&mut hs.head),
+            tail: B::rebor(&mut hs.tail),
+        }
+    }
+}
+impl<Rt: 'static, J: 'static, F: Clone + 'static, X: 'static> Rebor for ExCol<Rt, J, F, X> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut Vec<(F, &'c mut X)>) -> Vec<(F, &'b mut X)> {
+        hs.iter_mut().map(|(f, x)| (f.clone(), &mut **x)).collect()
+    }
+}
+impl<Rt: 'static, J: 'static, F: 'static, X: 'static> Rebor for ShCol<Rt, J, F, X> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut Shared<'c, F, X>) -> Shared<'b, F, X> {
+        *hs
+    }
+}
+impl<Rt: 'static, F: 'static> Rebor for NodeSet<Rt, F> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut &'c [&'c F]) -> &'b [&'b F] {
+        hs
     }
 }

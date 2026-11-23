@@ -28,6 +28,10 @@ pub trait Pos: 'static {
     /// What [`OwnAddress`](super::OwnAddress) is lent as: the address of
     /// the lend point by keys, from the root.
     type Address: 'static = ();
+    /// What a view lent for `'t` holds to make the views it hands out one
+    /// at a time: those of the branches of a [`Plus`](super::Plus), or of
+    /// the members of a [`OneAtATime`](super::OneAtATime).
+    type Held<'t> = ();
 }
 
 /// The position of nothing: every item of [`Pos`] unused.
@@ -65,13 +69,16 @@ impl<N: Need, T: Need> Need for HCons<N, T> {
 /// structure decides: the anchor itself ([`Single`]), at most one node
 /// ([`Optional`]), or nodes told apart by keys ([`KeyedBy`]).
 pub trait Shape: 'static {
+    /// What tells the members apart.
+    type Key: Clone + PartialEq + 'static;
     /// The result, made of one `V` for each member.
-    type Out<V>: Members<V>;
+    type Out<V>: Members<V, Key = Self::Key>;
 }
 
 /// The members are the anchor itself: the result is the member's own.
 pub struct Single;
 impl Shape for Single {
+    type Key = ();
     type Out<V> = V;
 }
 
@@ -79,6 +86,7 @@ impl Shape for Single {
 /// the result is there or not.
 pub struct Optional;
 impl Shape for Optional {
+    type Key = ();
     type Out<V> = Option<V>;
 }
 
@@ -86,7 +94,8 @@ impl Shape for Optional {
 /// the result is a [`KeyedView`] by the keys `K` of those levels, the key
 /// itself when there is one level and a tuple when there are more.
 pub struct KeyedBy<K>(PhantomData<fn() -> K>);
-impl<K: PartialEq + 'static> Shape for KeyedBy<K> {
+impl<K: Clone + PartialEq + 'static> Shape for KeyedBy<K> {
+    type Key = K;
     type Out<V> = KeyedView<K, V>;
 }
 
@@ -172,11 +181,15 @@ impl<V> Members<V> for Option<V> {
 /// linear, as it is in the stores.
 pub struct KeyedView<K, V> {
     members: Vec<(K, V)>,
+    /// For each member, whether it is in the lend point's own branch.
+    own: Vec<bool>,
 }
 impl<K, V> KeyedView<K, V> {
-    /// A view of `members`, none of them under the same key.
-    pub(crate) fn new(members: Vec<(K, V)>) -> Self {
-        Self { members }
+    /// A view of `members`, none of them under the same key, each with
+    /// whether it is in the lend point's own branch.
+    pub(crate) fn new(members: Vec<(K, V, bool)>) -> Self {
+        let (members, own) = members.into_iter().map(|(k, v, o)| ((k, v), o)).unzip();
+        Self { members, own }
     }
     /// The keys of the members.
     pub fn keys(&self) -> impl Iterator<Item = &K> {
@@ -193,6 +206,27 @@ impl<K, V> KeyedView<K, V> {
     /// Every member with its key, exclusive.
     pub fn members_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         self.members.iter_mut().map(|(k, v)| (&*k, v))
+    }
+    /// The members of the lend point's own branch, exclusive, and the
+    /// others, shared.
+    ///
+    /// A member is in the own branch when its full key and the lend
+    /// point's agree as far as the shorter goes: the member is the lend
+    /// point, above it or below it.
+    #[allow(clippy::type_complexity)]
+    pub fn split_own(&mut self) -> (KeyedView<K, &mut V>, KeyedView<K, &V>)
+    where
+        K: Clone,
+    {
+        let (mut own, mut rest) = (Vec::new(), Vec::new());
+        for ((k, v), &o) in self.members.iter_mut().zip(&self.own) {
+            if o {
+                own.push((k.clone(), v, true));
+            } else {
+                rest.push((k.clone(), &*v, false));
+            }
+        }
+        (KeyedView::new(own), KeyedView::new(rest))
     }
 }
 impl<K: PartialEq, V> KeyedView<K, V> {
