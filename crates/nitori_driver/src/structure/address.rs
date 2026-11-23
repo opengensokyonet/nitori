@@ -1,7 +1,6 @@
 //! The driver's addresses: a string of handles from a node down, typed by
 //! the kinds alone.
-use alloc::{vec, vec::Vec};
-use core::{any::TypeId, fmt};
+use core::fmt;
 
 use frunk_core::{
     coproduct::{CNil, Coproduct},
@@ -9,8 +8,8 @@ use frunk_core::{
 };
 
 use super::{
-    Child, ChildIndex, ChildList, ChildOfKind, ChildStorage, ChildStores, KeyAt, KindFor, LinkList,
-    Node, NodeKind, Store,
+    Child, ChildIndex, ChildList, ChildOfKind, ChildStorage, ChildStores, KeyAt, KindFor, Node,
+    NodeKind, Store,
 };
 
 /// The driver's address of a node at or below a node of the kind `K`.
@@ -113,62 +112,21 @@ impl<K: NodeKind> fmt::Debug for KeyAddress<K> {
     }
 }
 
-/// Something done to the node an address leads to, whose kind is known
-/// only when the address is followed.
-pub trait Visit<P> {
-    /// Visit the node.
-    fn node<K: KindFor<P, Children: ChildAddresses<P>>>(&mut self, node: &mut Node<K, P>);
-}
-
-/// Following an address below a node, and listing the addresses below it.
+/// Following a key address below a node.
 pub trait ChildAddresses<P>: ChildStores<P> {
-    /// Follow `addr` from the stores; `false` when no node is there.
-    fn walk<V: Visit<P>>(stores: &mut Self::Stores, addr: &Self::Addr, v: &mut V) -> bool;
-    /// Every address below the stores, each node before the nodes below
-    /// it.
-    fn each<F: FnMut(Self::Addr)>(stores: &Self::Stores, f: &mut F);
     /// The address of the node a key address below the stores leads to,
     /// when it is there.
     fn resolve(stores: &Self::Stores, key: &Self::KeyAddr) -> Option<Self::Addr>;
-    /// Every address below the stores in an order of removal: each node
-    /// after the nodes below it, and the children of a kind in `targets`
-    /// (kinds other nodes link to) after their siblings' subtrees.
-    fn each_for_removal<F: FnMut(Self::Addr)>(stores: &Self::Stores, targets: &[TypeId], f: &mut F);
 }
 impl<P> ChildAddresses<P> for HNil {
-    fn walk<V: Visit<P>>(_: &mut HNil, addr: &CNil, _: &mut V) -> bool {
-        match *addr {}
-    }
-    fn each<F: FnMut(CNil)>(_: &HNil, _: &mut F) {}
     fn resolve(_: &HNil, key: &CNil) -> Option<CNil> {
         match *key {}
     }
-    fn each_for_removal<F: FnMut(CNil)>(_: &HNil, _: &[TypeId], _: &mut F) {}
 }
 impl<P, CK, S: ChildStorage, T: ChildAddresses<P>> ChildAddresses<P> for HCons<Child<CK, S>, T>
 where
     CK: KindFor<P, Children: ChildAddresses<P>>,
 {
-    fn walk<V: Visit<P>>(stores: &mut Self::Stores, addr: &Self::Addr, v: &mut V) -> bool {
-        match addr {
-            Coproduct::Inl((h, below)) => match stores.head.get_mut(*h) {
-                Some(n) => walk_node(n, below, v),
-                None => false,
-            },
-            Coproduct::Inr(r) => T::walk(&mut stores.tail, r, v),
-        }
-    }
-    fn each<F: FnMut(Self::Addr)>(stores: &Self::Stores, f: &mut F) {
-        for h in stores.head.handles() {
-            f(Coproduct::Inl((h, Address::here())));
-            if let Some(n) = stores.head.get(h) {
-                CK::Children::each(&n.children, &mut |below| {
-                    f(Coproduct::Inl((h, Address::below(below))))
-                });
-            }
-        }
-        T::each(&stores.tail, &mut |r| f(Coproduct::Inr(r)));
-    }
     fn resolve(stores: &Self::Stores, key: &Self::KeyAddr) -> Option<Self::Addr> {
         match key {
             Coproduct::Inl((k, below)) => {
@@ -178,47 +136,6 @@ where
             }
             Coproduct::Inr(r) => T::resolve(&stores.tail, r).map(Coproduct::Inr),
         }
-    }
-    fn each_for_removal<F: FnMut(Self::Addr)>(
-        stores: &Self::Stores,
-        targets: &[TypeId],
-        f: &mut F,
-    ) {
-        let head = |f: &mut F| {
-            for h in stores.head.handles() {
-                if let Some(n) = stores.head.get(h) {
-                    CK::Children::each_for_removal(&n.children, targets, &mut |below| {
-                        f(Coproduct::Inl((h, Address::below(below))))
-                    });
-                }
-                f(Coproduct::Inl((h, Address::here())));
-            }
-        };
-        let tail =
-            |f: &mut F| T::each_for_removal(&stores.tail, targets, &mut |r| f(Coproduct::Inr(r)));
-        if targets.contains(&TypeId::of::<CK>()) {
-            tail(f);
-            head(f);
-        } else {
-            head(f);
-            tail(f);
-        }
-    }
-}
-
-/// Follow `addr` from `n` and visit the node there; `false` when no node is
-/// there.
-pub fn walk_node<K: KindFor<P, Children: ChildAddresses<P>>, P, V: Visit<P>>(
-    n: &mut Node<K, P>,
-    addr: &Address<K>,
-    v: &mut V,
-) -> bool {
-    match &addr.0 {
-        None => {
-            v.node(n);
-            true
-        }
-        Some(a) => K::Children::walk(&mut n.children, a, v),
     }
 }
 
@@ -232,34 +149,4 @@ pub fn resolve_node<K: KindFor<P, Children: ChildAddresses<P>>, P>(
         None => Some(Address::here()),
         Some(k) => K::Children::resolve(&n.children, k).map(Address::below),
     }
-}
-
-/// Every address at and below `n`, `n` first, each node before the nodes
-/// below it.
-pub fn addresses_under<K: KindFor<P, Children: ChildAddresses<P>>, P>(
-    n: &Node<K, P>,
-) -> Vec<Address<K>> {
-    let mut out = vec![Address::here()];
-    K::Children::each(&n.children, &mut |a| out.push(Address::below(a)));
-    out
-}
-
-/// Every address at and below the root `n` in the order the driver removes
-/// nodes: a node after every node below it, and a node that others link to
-/// ([`NodeKind::Linked`]) after the last node that links to it. The root is
-/// last.
-///
-/// The links are by kind: the children of a kind that some kind in the
-/// structure links to come after their siblings' subtrees, where the
-/// linking nodes are.
-pub fn removal_order<K: KindFor<P, Children: ChildAddresses<P>>, P>(
-    n: &Node<K, P>,
-) -> Vec<Address<K>> {
-    let mut targets = Vec::new();
-    K::Linked::targets(&mut targets);
-    K::Children::link_targets(&mut targets);
-    let mut out = Vec::new();
-    K::Children::each_for_removal(&n.children, &targets, &mut |a| out.push(Address::below(a)));
-    out.push(Address::here());
-    out
 }

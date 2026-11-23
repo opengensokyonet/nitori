@@ -322,10 +322,7 @@ use crate::{
         PositionsOf, Raw1Of, Raw2Of, Rem1Of, ViewOf, Writes, linked,
     },
     need::ChainOf,
-    structure::{
-        Append, Child, ChildAt, ChildStorage, End, KindAt, KindFor, Node, NodeKind, PathFrom, Step,
-        Store,
-    },
+    structure::{Append, Child, ChildStorage, End, KindFor, Node, NodeKind, PathFrom},
 };
 
 // ---------------------------------------------------------------- kinds and the family
@@ -511,13 +508,13 @@ macro_rules! composition {
         impl $crate::driver::DriverComposition for $q {
             type Clock = $clock;
             type Remains = $crate::structure::RemainsOf<$p, $r>;
-            type Places = impl $crate::driver::PlacePack<Self, $crate::driver::PlacesOf<Self>>;
-            type Yields = impl $crate::driver::walk::YieldPack<Self, $crate::call::CallSlotsOf<Self>>;
+            type Places = impl $crate::__private::PlacePack<Self, $crate::__private::PlacesOf<Self>>;
+            type Yields = impl $crate::__private::YieldPack<Self, $crate::call::CallSlotsOf<Self>>;
             fn places() -> ::core::marker::PhantomData<Self::Places> {
-                $crate::driver::prove_places::<Self, $crate::driver::PlacesOf<Self>, _>()
+                $crate::__private::prove_places::<Self, $crate::__private::PlacesOf<Self>, _>()
             }
             fn yields() -> ::core::marker::PhantomData<Self::Yields> {
-                $crate::driver::walk::prove_yields::<Self, $crate::call::CallSlotsOf<Self>, _>()
+                $crate::__private::prove_yields::<Self, $crate::call::CallSlotsOf<Self>, _>()
             }
         }
     };
@@ -702,8 +699,6 @@ pub trait LendOne<'a, Q: Composition, S: SlotDesc + SlotYield<Q>>: SlotCall<Q, S
         call: Pin<&mut Self::Running>,
         cx: &mut Context<'_>,
     ) -> Result<CallStep<S::Yield>, LendError>;
-    /// Every node of the slot's path type now in the tree.
-    fn paths(root: &Node<RootOf<Q>, PartsOf<Q>>) -> Vec<S::At>;
 }
 /// The positions of every slot of the list `L` under `Q`.
 pub trait PackList<Q: Composition, L: ListShape<Q>> {
@@ -739,9 +734,6 @@ impl<Q: Composition> LendOne<'_, Q, NoSlot> for NoPos {
         _: &mut Context<'_>,
     ) -> Result<CallStep<core::convert::Infallible>, LendError> {
         match at {}
-    }
-    fn paths(_: &Node<RootOf<Q>, PartsOf<Q>>) -> Vec<core::convert::Infallible> {
-        Vec::new()
     }
 }
 impl<Q: Composition> PackList<Q, HNil> for HNil {
@@ -961,7 +953,7 @@ impl<'a, Q, X, C, IL, I1, I2, IK, IS> LendOne<'a, Q, Slot<X, C>>
 where
     Q: Composition,
     C: CallKind<Q>,
-    X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil> + AllPaths<RootOf<Q>, PartsOf<Q>>,
+    X: PathFrom<RootOf<Q>> + ChainOf<RootOf<Q>, HNil>,
     Needs<Q, C>: KeyedPositions<CxOf<RootOf<Q>, PartsOf<Q>, X>, IK>,
     KPOf<Q, C, X, IK>: Positions<Q, C> + 'static,
     C::Op: RunsOn<Lent<Q, C, KPOf<Q, C, X, IK>>, C::Yield>,
@@ -1028,32 +1020,5 @@ where
             Poll::Ready(ControlFlow::Break(())) => CallStep::Finished,
             Poll::Ready(ControlFlow::Continue(item)) => CallStep::Yielded(item),
         })
-    }
-    fn paths(root: &Node<RootOf<Q>, PartsOf<Q>>) -> Vec<X> {
-        X::all(root)
-    }
-}
-
-/// Every path of the type `Self` from a node of the kind `K`.
-pub trait AllPaths<K: KindFor<P>, P>: Sized {
-    /// The paths to every node of the type now in the tree.
-    fn all(n: &Node<K, P>) -> Vec<Self>;
-}
-impl<K: KindFor<P>, P> AllPaths<K, P> for End {
-    fn all(_: &Node<K, P>) -> Vec<End> {
-        alloc::vec![End]
-    }
-}
-impl<K: KindFor<P>, P, I, H: Copy, R> AllPaths<K, P> for Step<I, H, R>
-where
-    K::Children: ChildAt<I, P, Storage: ChildStorage<Handle = H>>,
-    R: AllPaths<KindAt<K::Children, I>, P>,
-{
-    fn all(n: &Node<K, P>) -> Vec<Self> {
-        let s = <K::Children as ChildAt<I, P>>::store(&n.children);
-        s.handles()
-            .filter_map(|h| Some((h, s.get(h)?)))
-            .flat_map(|(h, c)| R::all(c).into_iter().map(move |r| Step::new(h, r)))
-            .collect()
     }
 }

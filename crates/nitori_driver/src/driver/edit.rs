@@ -16,7 +16,7 @@ use frunk_core::{
 };
 
 use super::{
-    Driver,
+    AddError, Driver,
     place::{
         ChildPlace, DriverComposition, LinkPlace, NoLinkPlace, NthPlace, PlaceAt, PlaceDesc,
         PlaceKey, PlaceKeyOf, PlaceNth, PlaceOps, PlacePositionsAt, PlacesOf, TargetOf,
@@ -56,7 +56,7 @@ pub trait DriverOps {
         parent: usize,
         key: PlaceKeyOf<Self::Q, Pl::At>,
         start: StartOf<TargetOf<Self::Q, Pl::At>>,
-    ) -> Option<usize>;
+    ) -> Result<usize, AddError>;
     /// The node of the place `Pl` under `parent`, kept under `key`.
     fn find_child<Pl: PlaceDesc<RootOf<Self::Q>>, Pos: PlaceOps<Self::Q, Pl>>(
         &self,
@@ -110,7 +110,7 @@ where
         parent: usize,
         key: PlaceKeyOf<Q, Pl::At>,
         start: StartOf<TargetOf<Q, Pl::At>>,
-    ) -> Option<usize> {
+    ) -> Result<usize, AddError> {
         self.editing(|d, todo| d.add_typed::<Pl, Pos>(p, parent, key, start, todo))
     }
     fn find_child<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(
@@ -138,8 +138,7 @@ where
     ) -> bool {
         self.editing(|d, todo| {
             Driver::end_typed::<Pl, Pos>(d, id, reason, todo);
-            d.add_typed::<Pl, Pos>(p, parent, key, start, todo)
-                .is_some()
+            d.add_typed::<Pl, Pos>(p, parent, key, start, todo).is_ok()
         })
     }
     fn move_node(&mut self, id: usize, to: usize) -> Result<(), MoveError> {
@@ -189,7 +188,7 @@ where
         parent: usize,
         key: PlaceKeyOf<Q, Pc::At>,
         start: StartOf<TargetOf<Q, Pc::At>>,
-    ) -> Option<usize> {
+    ) -> Result<usize, AddError> {
         self.driver.add_child::<Pc, Ps>(p, parent, key, start)
     }
     fn find_child<Pc: PlaceDesc<RootOf<Q>>, Ps: PlaceOps<Q, Pc>>(
@@ -304,7 +303,7 @@ where
     fn add<E: DriverOps<Q = Q>>(e: &mut E, key: S::Key, start: CK::Start) -> bool {
         let node = e.node();
         e.add_child::<Place<Xc>, Pc>(N::VALUE, node, key, start)
-            .is_some()
+            .is_ok()
     }
     fn end<E: DriverOps<Q = Q>>(e: &mut E, key: &S::Key, reason: CK::EndReason) -> bool {
         let Some(id) = e.find_child::<Place<Xc>, Pc>(e.node(), key) else {
@@ -326,6 +325,10 @@ where
         let Some(id) = e.find_child::<Place<Xc>, Pc>(node, &key) else {
             return false;
         };
+        // as for `end`: a node others link to ends after the last of them
+        if e.linked_to(id) {
+            return false;
+        }
         e.replace_typed::<Place<Xc>, Pc>(N::VALUE, node, id, key, start, reason)
     }
 }
@@ -391,16 +394,20 @@ where
 /// the node it links to if that is not there.
 pub trait LinkAdd<Q, K: NodeKind, Key> {
     /// The linked node, built from `start` when it was not there; `None`
-    /// when it could not be built, `Some(None)` for no link.
+    /// for no link.
     fn ensure<E: DriverOps<Q = Q>>(
         e: &mut E,
         key: &Key,
         start: &mut K::Start,
-    ) -> Option<Option<usize>>;
+    ) -> Result<Option<usize>, AddError>;
 }
 impl<Q, K: NodeKind, Key> LinkAdd<Q, K, Key> for NoLinkPlace {
-    fn ensure<E: DriverOps<Q = Q>>(_: &mut E, _: &Key, _: &mut K::Start) -> Option<Option<usize>> {
-        Some(None)
+    fn ensure<E: DriverOps<Q = Q>>(
+        _: &mut E,
+        _: &Key,
+        _: &mut K::Start,
+    ) -> Result<Option<usize>, AddError> {
+        Ok(None)
     }
 }
 impl<Q, K, Key, Xb, Pb, N> LinkAdd<Q, K, Key> for LinkPlace<Xb, Pb, N>
@@ -416,10 +423,10 @@ where
         e: &mut E,
         key: &Key,
         start: &mut K::Start,
-    ) -> Option<Option<usize>> {
+    ) -> Result<Option<usize>, AddError> {
         let root = e.root_node();
         if let Some(target) = e.find_child::<Place<Xb>, Pb>(root, key) {
-            return Some(Some(target));
+            return Ok(Some(target));
         }
         let start = K::linked_start(start);
         e.add_child::<Place<Xb>, Pb>(N::VALUE, root, key.clone(), start)

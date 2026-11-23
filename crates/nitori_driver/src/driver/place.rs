@@ -276,6 +276,7 @@ where
     OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>:
         LendAt<'static, RootOf<Q>, P_<Q>, X, In, LendInstant<Q>> + Writes<P_<Q>>,
     X: BuildAt<'static, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>,
+    C::BuildNeeds: Writes<P_<Q>>,
     C::Subscribes: Subscriptions<ChainAt<Q, X>, P_<Q>, Is>,
     C::Returns: IntoRequestSum<RequestSumOf<RootOf<Q>>, Ir>,
 {
@@ -314,6 +315,8 @@ where
     fn subscriptions(out: &mut Vec<Subscription>);
     /// The components its hooks take exclusive.
     fn writes(out: &mut Vec<TypeId>);
+    /// The components its `build` takes exclusive at the parent.
+    fn build_writes(out: &mut Vec<TypeId>);
     /// What a hook returned, in the requests of the tree.
     fn returned(r: C::Returns) -> RequestSumOf<RootOf<Q>>;
 }
@@ -325,6 +328,7 @@ where
     OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>>:
         LendAt<'a, RootOf<Q>, P_<Q>, X, In, LendInstant<Q>> + Writes<P_<Q>>,
     X: BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>,
+    C::BuildNeeds: Writes<P_<Q>>,
     C::Subscribes: Subscriptions<ChainAt<Q, X>, P_<Q>, Is>,
     C::Returns: IntoRequestSum<RequestSumOf<RootOf<Q>>, Ir>,
 {
@@ -369,6 +373,9 @@ where
     }
     fn writes(out: &mut Vec<TypeId>) {
         <OwnNeeds<C, O, P_<Q>, TargetOf<Q, X>> as Writes<P_<Q>>>::writes(out);
+    }
+    fn build_writes(out: &mut Vec<TypeId>) {
+        <C::BuildNeeds as Writes<P_<Q>>>::writes(out);
     }
     fn returned(r: C::Returns) -> RequestSumOf<RootOf<Q>> {
         r.into_sum()
@@ -515,6 +522,26 @@ pub fn prove_places<Q, L: ProvePlaces<Q, I>, I>() -> PhantomData<L::Out> {
     PhantomData
 }
 
+// ---------------------------------------------------------------- lends of hooks
+
+/// What a hook's lend came to. The driver lends a hook only at a node it
+/// has, so the lend finds it: debug builds check it.
+fn lent<T>(r: Result<T, LendError>) -> Option<T> {
+    debug_assert!(
+        r.is_ok(),
+        "a hook is lent at a node the driver has, so the lend finds it"
+    );
+    r.ok()
+}
+trait Lent<T> {
+    fn lent(self) -> Option<T>;
+}
+impl<T> Lent<T> for Result<T, LendError> {
+    fn lent(self) -> Option<T> {
+        lent(self)
+    }
+}
+
 // ---------------------------------------------------------------- what the driver keeps of a place
 
 /// A component of a place, as the driver keeps it.
@@ -530,6 +557,8 @@ pub struct CompInfo {
     pub subscriptions: Vec<Subscription>,
     /// The components its hooks take exclusive.
     pub writes: Vec<TypeId>,
+    /// The components its `build` takes exclusive at the parent.
+    pub build_writes: Vec<TypeId>,
 }
 /// A place, as the driver keeps it.
 #[derive(Debug)]
@@ -695,7 +724,10 @@ where
         <CP as CompLend<'_, Q, X, O, C>>::subscriptions(&mut subscriptions);
         let mut writes = Vec::new();
         <CP as CompLend<'_, Q, X, O, C>>::writes(&mut writes);
+        let mut build_writes = Vec::new();
+        <CP as CompLend<'_, Q, X, O, C>>::build_writes(&mut build_writes);
         out.push(CompInfo {
+            build_writes,
             type_id: TypeId::of::<C>(),
             timed: <C::Timing as Timing<C, O, P_<Q>, TargetOf<Q, X>, InstantOf<Q>>>::TIMED,
             acts_before_calls: C::ACTS_BEFORE_CALLS,
@@ -737,7 +769,7 @@ where
             <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| {
                 <C::Timing as Timing<C, O, P_<Q>, TargetOf<Q, X>, InstantOf<Q>>>::deadline(&view)
             })
-            .ok()
+            .lent()
             .flatten(),
         )
     }
@@ -755,7 +787,7 @@ where
             <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| {
                 <C::Timing as Timing<C, O, P_<Q>, TargetOf<Q, X>, InstantOf<Q>>>::expire(view, now)
             })
-            .ok()
+            .lent()
             .flatten()
             .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
@@ -772,7 +804,7 @@ where
         }
         Some(
             <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::on_events(events, view))
-                .ok()
+                .lent()
                 .flatten()
                 .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
@@ -791,17 +823,27 @@ where
             <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| {
                 C::before_calls(view, waker)
             })
-            .ok()
+            .lent()
             .flatten()
             .map(<CP as CompLend<'_, Q, X, O, C>>::returned),
         )
     }
     fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>) {
-        let _ = <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::aborted(view, cause));
+        lent(<CP as CompLend<'_, Q, X, O, C>>::lend(
+            root,
+            at,
+            o,
+            |view| C::aborted(view, cause),
+        ));
         SP::aborted(root, at, cause, o);
     }
     fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>) {
-        let _ = <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::end(view, reason));
+        lent(<CP as CompLend<'_, Q, X, O, C>>::lend(
+            root,
+            at,
+            o,
+            |view| C::end(view, reason),
+        ));
         SP::end(root, at, reason, o);
     }
     fn remains(
@@ -812,7 +854,12 @@ where
     ) where
         O: Share<TargetOf<Q, X>>,
     {
-        let _ = <CP as CompLend<'_, Q, X, O, C>>::lend(root, at, o, |view| C::remains(view, out));
+        lent(<CP as CompLend<'_, Q, X, O, C>>::lend(
+            root,
+            at,
+            o,
+            |view| C::remains(view, out),
+        ));
         SP::remains(root, at, out, o);
     }
 }
@@ -1249,7 +1296,7 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         start: StartOf<TargetOf<Q, Pl::At>>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
-    ) -> Option<AddressOf<Q>>;
+    ) -> Result<AddressOf<Q>, super::AddError>;
     /// The node of the place kept under `key` under the parent at
     /// `parent`.
     fn find_child(
@@ -1398,13 +1445,16 @@ where
         mut start: StartOf<TargetOf<Q, X>>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
-    ) -> Option<AddressOf<Q>> {
+    ) -> Result<AddressOf<Q>, super::AddError> {
         if X::find_under(root, parent, &key).is_some() {
-            return None;
+            return Err(super::AddError::Occupied);
         }
-        let pp = X::parent_path(parent)?;
-        let node = Self::build(Some(root), &pp, &key, args, &mut start, o).ok()?;
-        X::attach(root, parent, key, node)
+        let pp = X::parent_path(parent).ok_or(super::AddError::NoParent)?;
+        let node = Self::build(Some(root), &pp, &key, args, &mut start, o)
+            .map_err(super::AddError::Build)?;
+        // Invariant: the parent was reached by the build and its key was
+        // free just above.
+        X::attach(root, parent, key, node).ok_or(super::AddError::NoParent)
     }
     fn find_child(
         root: &RootNode<Q>,
@@ -1500,8 +1550,8 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: StartOf<RootOf<Q>>,
         _: &ArgsOf<P_<Q>>,
         _: &OutboxOf<Q>,
-    ) -> Option<AddressOf<Q>> {
-        None
+    ) -> Result<AddressOf<Q>, super::AddError> {
+        Err(super::AddError::NoParent)
     }
     fn find_child(_: &RootNode<Q>, _: &AddressOf<Q>, _: &()) -> Option<AddressOf<Q>> {
         None

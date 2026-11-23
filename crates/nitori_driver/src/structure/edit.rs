@@ -69,8 +69,8 @@ pub type LastKind<R, X> = KindAt<LastChildren<R, X>, <X as SplitLast>::Index>;
 /// Take the node at `at` out of the tree, with every node below it.
 ///
 /// The nodes below it go with it, so they are removed before it; a node
-/// that others link to is removed only after them (see
-/// [`removal_order`](super::removal_order)), which is the caller's to keep.
+/// that others link to is removed only after them, which is the caller's
+/// to keep (the driver does).
 pub fn remove<R, P, X>(root: &mut Node<R, P>, at: X) -> Option<Node<LastKind<R, X>, P>>
 where
     R: KindFor<P>,
@@ -107,8 +107,8 @@ impl core::error::Error for MoveError {}
 /// Move the node at `at`, with every node below it, under `to`, a node of
 /// the kind of its parent, keeping its key. Returns the new path.
 ///
-/// When the move fails the node goes back under its parent; a store that
-/// reuses slots may give it another handle there.
+/// Both ends are checked before the node is taken out: when the move
+/// fails the node has not moved, and keeps its handle.
 #[allow(clippy::type_complexity)]
 pub fn move_to<R, P, X, B>(
     root: &mut Node<R, P>,
@@ -123,29 +123,31 @@ where
     LastChildren<R, X>: ChildAt<X::Index, P, Storage: ChildStorage<Handle = X::Handle>>,
 {
     let (parent, h) = at.split_last();
-    let from = parent.node_mut(root).ok_or(MoveError::NoSource)?;
-    let store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut from.children);
+    let from = parent.node(root).ok_or(MoveError::NoSource)?;
+    let store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store(&from.children);
     let key = store.key(h).ok_or(MoveError::NoSource)?.clone();
-    let node = store.remove(h).ok_or(MoveError::NoSource)?;
-    let put_back = |root: &mut Node<R, P>, key, node| {
-        // Invariant: the source parent was reached above and nothing has
-        // removed it since; its key was just freed, so the insert succeeds.
-        let from = parent
-            .node_mut(root)
-            .expect("the source parent was reached a moment ago");
-        let store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut from.children);
-        let _ = store.insert(key, node);
-    };
-    let Some(dest) = to.node_mut(root) else {
-        put_back(root, key, node);
-        return Err(MoveError::NoDestination);
-    };
-    let store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut dest.children);
-    match store.insert(key.clone(), node) {
+    let dest = to.node(root).ok_or(MoveError::NoDestination)?;
+    let dest_store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store(&dest.children);
+    if dest_store.find(&key).is_some() {
+        return Err(MoveError::Occupied);
+    }
+    // Invariant: the source was reached just above and nothing has
+    // changed the tree since.
+    let from = parent
+        .node_mut(root)
+        .expect("the source parent was reached a moment ago");
+    let node = <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut from.children)
+        .remove(h)
+        .expect("the node was found a moment ago");
+    // Invariant: the destination was reached and its key was free just
+    // above, and taking the node out changed neither.
+    let dest = to
+        .node_mut(root)
+        .expect("the destination was reached a moment ago");
+    match <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut dest.children)
+        .insert(key, node)
+    {
         Ok(h) => Ok(to.append(h)),
-        Err(Occupied(node)) => {
-            put_back(root, key, node);
-            Err(MoveError::Occupied)
-        }
+        Err(_) => unreachable!("the destination's key was free a moment ago"),
     }
 }

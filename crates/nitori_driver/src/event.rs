@@ -212,7 +212,72 @@ where
 /// it and the nodes below it.
 pub struct Hear<E>(PhantomData<fn() -> E>);
 /// Hear the event `E` from the nodes the anchor `A` and the steps `S`
-/// reach from the subscriber's node (to a linked node: not supported).
+/// reach from the subscriber's node; steps to a linked node do not
+/// compile:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use core::time::Duration;
+/// # use frunk_core::{HList, hlist::HNil};
+/// # use nitori_driver::{
+/// #     call::ShareCalls, composition,
+/// #     event::{HearAt, NodeStarted},
+/// #     hooks::{ArgsOf, BuildKeyed, BuildView, Hooks, Part, PartList},
+/// #     lend::KeyedList,
+/// #     need::{Kind, MyLink, ToChild},
+/// #     structure::{ByOwnKey, Child, LinkedStart, NodeKind, Share, SlotVec},
+/// # };
+/// # #[derive(Clone, Default)]
+/// # struct Clock;
+/// # impl nitori_clock::MonotonicClock for Clock {
+/// #     type Instant = Duration;
+/// #     type Sleep = core::future::Pending<()>;
+/// #     fn now(&self) -> Duration { Duration::ZERO }
+/// #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+/// #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+/// #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+/// # }
+/// # struct Root;
+/// # struct Route;
+/// # struct Peer;
+/// # impl NodeKind for Root {
+/// #     type Children = HList![Child<Route, SlotVec<u32>>, Child<Peer, SlotVec<u32>>];
+/// #     type Linked = HNil;
+/// # }
+/// # impl NodeKind for Route {
+/// #     type Children = HNil;
+/// #     type Linked = HList![ByOwnKey<Peer>];
+/// # }
+/// # impl LinkedStart<Peer> for Route {
+/// #     fn linked_start(_: &mut ()) {}
+/// # }
+/// # impl NodeKind for Peer {
+/// #     type Children = HNil;
+/// #     type Linked = HNil;
+/// # }
+/// # struct Base;
+/// # impl<L> Part<L> for Base { type Args = (); }
+/// # impl ShareCalls<Root> for Base { type Calls = HNil; }
+/// # impl ShareCalls<Route> for Base { type Calls = HNil; }
+/// # impl ShareCalls<Peer> for Base { type Calls = HNil; }
+/// # impl Share<Root> for Base { type Data = HNil; }
+/// # impl Share<Peer> for Base { type Data = HNil; }
+/// /// A route hears its peer start: through a link, which is not heard.
+/// struct Hears;
+/// impl<L: PartList<L> + 'static> Hooks<Base, L, Route> for Hears {
+///     type Subscribes = HList![HearAt<NodeStarted<Peer>, Kind<Root>, ToChild<Peer, MyLink>>];
+///     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Route>>>(
+///         _: BuildView<'_, Self, Base, L, Route, KP>,
+///         _: &ArgsOf<L>,
+///         _: &mut (),
+///     ) -> Self {
+///         Hears
+///     }
+/// }
+/// impl Share<Route> for Base { type Data = HList![Hears]; }
+/// struct Q;
+/// composition!(impl driver for Q: Root, HList![Base], Clock);
+/// ```
 #[allow(clippy::type_complexity)]
 pub struct HearAt<E, A, S>(PhantomData<fn() -> (E, A, S)>);
 /// Hear the event `E` as [`Hear`] does, only to have the component's
@@ -286,11 +351,22 @@ impl<Ch, P, E: Event> Subscriptions<Ch, P, ()> for ForDeadline<E> {
         });
     }
 }
+/// A place reached by steps that do not go through a link.
+#[diagnostic::on_unimplemented(
+    message = "a subscription's steps go to a linked node",
+    label = "`HearAt` with `MyLink`",
+    note = "`HearAt` hears the nodes its steps reach down the tree; a linked node (`ToChild<_, MyLink>`) is not one of them"
+)]
+pub trait WithoutLink {}
+impl WithoutLink for HNil {}
+impl<T: WithoutLink> WithoutLink for HCons<frunk_core::indices::Here, T> {}
+impl<I, T: WithoutLink> WithoutLink for HCons<frunk_core::indices::There<I>, T> {}
+
 impl<Ch, P, E: Event, A, S, AI, SI> Subscriptions<Ch, P, (AI, SI)> for HearAt<E, A, S>
 where
     A: Anchor<Ch, P, AI, Pre: Depth>,
     S: Steps<A::Kind, A::Pre, Plain, SI>,
-    StepsPath<A, S, Ch, P, AI, SI>: 'static,
+    StepsPath<A, S, Ch, P, AI, SI>: WithoutLink + 'static,
 {
     fn subscriptions(out: &mut Vec<Subscription>) {
         out.push(Subscription {
@@ -316,13 +392,13 @@ impl<'a> Triggered<'a> {
     pub fn new(bits: u64, subscribed: &'a [TypeId]) -> Self {
         Self { bits, subscribed }
     }
-    /// Whether `E` is among them.
+    /// Whether `E` is among them, through any of the subscriptions to it.
     pub fn contains<E: Event>(&self) -> bool {
         let event = TypeId::of::<E>();
         self.subscribed
             .iter()
-            .position(|&e| e == event)
-            .is_some_and(|at| self.bits & (1 << at) != 0)
+            .enumerate()
+            .any(|(at, &e)| e == event && self.bits & (1 << at) != 0)
     }
     /// Whether none reached it.
     pub fn is_empty(&self) -> bool {

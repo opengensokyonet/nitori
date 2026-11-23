@@ -44,6 +44,7 @@ impl NodeKind for NoChild {
     type Linked = HNil;
     type Start = Infallible;
 }
+impl super::storage::sealed::Sealed for NoChild {}
 impl ChildStorage for NoChild {
     type Key = Infallible;
     type Handle = Infallible;
@@ -252,7 +253,7 @@ pub trait LinkedStart<CK: NodeKind>: NodeKind {
 ///
 /// The linked node is there as long as the node linking to it is: the
 /// structure starts and ends them together, and a node is removed only
-/// after the last node linking to it ([`removal_order`](super::removal_order)).
+/// after the last node linking to it.
 pub trait Link<K: NodeKind> {
     /// The kind of the linked node.
     type Target: NodeKind;

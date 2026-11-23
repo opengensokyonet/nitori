@@ -4,7 +4,7 @@
 //! call of every node and the driver's own tables, and runs as a future
 //! that ends when the root ends. Internally a node has a number; the
 //! places of the tree and the call slots are reached by their numbers
-//! ([`walk`]), so no function's type names a whole pack.
+//! (the walk), so no function's type names a whole pack.
 //!
 //! A poll:
 //!
@@ -647,10 +647,10 @@
 //!
 //! [`NodeStarted`]: crate::event::NodeStarted
 //! [`NodeEnding`]: crate::event::NodeEnding
-mod edit;
-mod place;
+pub(crate) mod edit;
+pub(crate) mod place;
 mod wake;
-pub mod walk;
+pub(crate) mod walk;
 
 use alloc::{
     boxed::Box,
@@ -671,18 +671,15 @@ use core::{
 use frunk_core::indices::Here as I0;
 use nitori_clock::MonotonicClock;
 
-pub use edit::{
-    Deliver, DriverOps, GrandchildPlace, GrandchildPlaces, LinkAdd, NoChildPlace,
-    NoGrandchildPlace, NoPlaceEdits, PlaceEdit,
-};
+pub(crate) use edit::DriverOps;
 pub use place::{
-    AddressOf, BuildAt, ChildPath, ChildPlace, ChildPlaces, ClockInstantOf, ClockOf, CompInfo,
-    CompLend, CompPositions, Detach, DriverComposition, FindPlace, InstantOf, LinkPlace,
-    NoLinkPlace, NoPlace, NoPlacePos, NthPlace, ParentOf, ParentPlace, PartsOps, Place, PlaceAt,
-    PlaceDesc, PlaceInfo, PlaceKey, PlaceKeyOf, PlaceNth, PlaceOps, PlacePack, PlacePositions,
-    PlacePositionsAt, PlaceShape, PlacesOf, PlacesUnder, ProveChildPlaces, ProveComp,
-    ProveLinkPlace, ProveParts, ProvePlace, ProvePlaces, RequestsOf, RootNode, SelfParts, ShareOps,
-    TargetOf, prove_places,
+    AddressOf, ClockInstantOf, ClockOf, DriverComposition, InstantOf, RequestsOf, RootNode,
+    TargetOf,
+};
+#[allow(unused_imports)]
+pub(crate) use place::{
+    FindPlace, NthPlace, Place, PlaceAt, PlaceDesc, PlaceInfo, PlaceKey, PlaceKeyOf, PlaceNth,
+    PlaceOps, PlacePositionsAt, PlacesOf, PlacesUnder,
 };
 use wake::{NodeHead, PositionWaker, Shared};
 use walk::{CallWalk, Cursor, Number, PlaceVisit, PlaceWalk, SlotInfo, SlotStore, SlotVisit};
@@ -743,6 +740,10 @@ pub enum AddError {
     NoParent,
     /// The parent has a child of this kind under the same key.
     Occupied,
+    /// A component's `build` could not be lent the parent.
+    Build(crate::lend::LendError),
+    /// The node it links to was not there and could not be built.
+    Linked(Box<AddError>),
 }
 impl fmt::Display for AddError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -750,10 +751,20 @@ impl fmt::Display for AddError {
             Self::Ended => "the root ended",
             Self::NoParent => "no node at the parent's path",
             Self::Occupied => "the parent has a child of this kind under this key",
+            Self::Build(_) => "a component could not be built",
+            Self::Linked(_) => "the node it links to could not be built",
         })
     }
 }
-impl core::error::Error for AddError {}
+impl core::error::Error for AddError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Build(e) => Some(e),
+            Self::Linked(e) => Some(&**e),
+            _ => None,
+        }
+    }
+}
 
 // ---------------------------------------------------------------- the driver's tables
 
@@ -789,10 +800,22 @@ impl PlaceRt {
         self.calls.len() + self.before.len()
     }
     fn calls_mask(&self) -> u64 {
-        (1u64 << self.calls.len()) - 1
+        low_bits(self.calls.len())
     }
     fn before_mask(&self) -> u64 {
-        ((1u64 << self.before.len()) - 1) << self.calls.len()
+        // Invariant: the positions are at most 64 (`Driver::new`), so the
+        // calls' bits leave room for the shift.
+        low_bits(self.before.len())
+            .checked_shl(self.calls.len() as u32)
+            .unwrap_or(0)
+    }
+}
+
+/// The lowest `n` bits set, `n` up to 64.
+fn low_bits(n: usize) -> u64 {
+    match n {
+        0 => 0,
+        n => u64::MAX >> (64 - n.min(64)),
     }
 }
 
@@ -887,6 +910,11 @@ where
     outbox: OutboxOf<Q>,
     /// What the edits of the request being handled reach.
     pending: Vec<Hit>,
+    /// What a `settle` that reached its bound left, handled in the next
+    /// poll.
+    deferred: Vec<Hit>,
+    /// The timers that came again in one poll, put back after it.
+    deferred_timers: Vec<(InstantOf<Q>, usize, usize)>,
     /// The serial of the last node registered.
     serial: u64,
     remains: Option<Q::Remains>,
@@ -1076,7 +1104,13 @@ impl<Q: DriverComposition> SlotVisit<Q> for PollCall<'_, '_, Q> {
             return Polled::Pending;
         };
         match Pos::poll(self.root, at, self.outbox, call.as_mut(), self.cx) {
-            Ok(CallStep::Pending) | Err(_) => Polled::Pending,
+            Ok(CallStep::Pending) => Polled::Pending,
+            Err(_) => {
+                // Invariant: a call is polled only at a node the driver
+                // has, so its lend finds the node.
+                debug_assert!(false, "a call is lent at a node the driver has");
+                Polled::Pending
+            }
             Ok(CallStep::Finished | CallStep::NoLongerNeeded) => {
                 store.calls[self.node] = None;
                 Polled::Dropped
@@ -1239,6 +1273,8 @@ where
             deadlines: BTreeMap::new(),
             outbox,
             pending: Vec::new(),
+            deferred: Vec::new(),
+            deferred_timers: Vec::new(),
             serial: 0,
             remains: None,
             ended: false,
@@ -1259,6 +1295,11 @@ where
     /// published at it. Returns its path. The position `I` among the
     /// parent's children and the number `N` of the new node's place are
     /// inferred.
+    ///
+    /// The path returned is by handles: after the node ends, a store that
+    /// reuses its slots ([`SlotVec`](crate::structure::SlotVec)) may give
+    /// the same handle to a node added later, which the same path then
+    /// reaches. A request names its node by keys and does not have this.
     #[allow(clippy::type_complexity)]
     pub fn add<CK, X, I, N>(
         &mut self,
@@ -1299,8 +1340,11 @@ where
             start,
             &mut todo,
         );
+        // the linked node a link built was built through the edit
+        // operations, which keep their hits aside
+        todo.append(&mut self.pending);
         self.settle(todo);
-        let id = added.ok_or(AddError::Occupied)?;
+        let id = added?;
         let addr = self.live(id).map(|n| n.addr).ok_or(AddError::Ended)?;
         // Invariant: the node was added under `parent` at the position `I`,
         // so its address is one of the path type `parent` and `I` give.
@@ -1311,7 +1355,9 @@ where
     /// (each for its kind's default reason), as a request's edit handle
     /// does. The root is ended with [`end`](Driver::end). Returns whether
     /// a node was there and was removed: a node others link to is removed
-    /// after the last of them, not on its own.
+    /// after the last of them, not on its own. A path is by handles, as
+    /// [`add`](Driver::add) says: one kept after its node ended may reach
+    /// a node added later.
     pub fn remove<X, N>(&mut self, at: X, reason: EndReasonOf<TargetOf<Q, X>>) -> bool
     where
         X: PathFrom<RootOf<Q>> + PlaceKey<RootOf<Q>> + ParentPath + 'static,
@@ -1356,7 +1402,16 @@ where
                 .sum::<usize>()
                 * (self.nodes.len() + 1)
                 + 2;
-            debug_assert!(round <= bound, "events did not settle");
+            if round > bound {
+                // a component publishes or moves deadlines without end; the
+                // rest waits for the next poll
+                debug_assert!(round <= bound, "events did not settle");
+                self.deferred.append(&mut todo);
+                if let Some(outer) = &self.outer {
+                    outer.wake_by_ref();
+                }
+                break;
+            }
             todo.sort_unstable_by_key(|h| (h.node, h.serial, h.target));
             let mut merged: Vec<Hit> = Vec::with_capacity(todo.len());
             for hit in todo {
@@ -1459,6 +1514,11 @@ where
         self.shared.notified.store(false, SeqCst);
         let now = self.clock.now();
         self.outbox.set_now(now);
+        let deferred = core::mem::take(&mut self.deferred);
+        self.settle(deferred);
+        if self.ended {
+            return Poll::Ready(());
+        }
         // the actions before the calls, the nodes above first
         let mut ready = self.take_ready();
         let mut before: Vec<(usize, u64)> = ready
@@ -1561,12 +1621,20 @@ where
                 }
             }
         }
-        // the deadlines that came, last
+        // the deadlines that came, last; each component expires at most once
+        // a poll, so a deadline that did not move past `now` comes again in
+        // the next poll instead of looping here
+        let mut expired = BTreeSet::new();
         while let Some(&(at, id, c)) = self.timers.first() {
             if at > now {
                 break;
             }
             self.timers.pop_first();
+            let serial = self.live(id).map_or(0, |n| n.serial);
+            if !expired.insert((id, serial, c)) {
+                self.deferred_timers.push((at, id, c));
+                continue;
+            }
             self.deadlines.remove(&(id, c));
             if self.live(id).is_none() {
                 continue;
@@ -1611,6 +1679,9 @@ where
                 }
                 later => self.set_deadline(id, c, later),
             }
+        }
+        for t in core::mem::take(&mut self.deferred_timers) {
+            self.timers.insert(t);
         }
         #[cfg(debug_assertions)]
         self.check_deadlines();
@@ -1659,6 +1730,11 @@ where
     /// below end first; the root's components write what their parts keep
     /// ([`remains`](Driver::remains)) and end. The driver's future is
     /// ready afterwards.
+    ///
+    /// The events of the ending are not handled: the driver ends with the
+    /// root, so a [`NodeEnding`](crate::event::NodeEnding) of a node below
+    /// does not reach the root's components, as it does when a node is
+    /// removed with [`remove`](Driver::remove).
     pub fn end(&mut self, reason: EndReasonOf<RootOf<Q>>) {
         if self.ended {
             return;
@@ -1850,27 +1926,44 @@ where
         key: PlaceKeyOf<Q, Pl::At>,
         mut start: StartOf<TargetOf<Q, Pl::At>>,
         todo: &mut Vec<Hit>,
-    ) -> Option<usize> {
-        let parent_addr = self.live(parent)?.addr;
+    ) -> Result<usize, AddError> {
+        let parent_addr = self.live(parent).ok_or(AddError::NoParent)?.addr;
         debug_assert_eq!(
             self.places[p].info.parent,
             self.live(parent).map(|n| self.places[n.place].info.path),
             "a place's nodes are added under nodes of its parent place",
         );
-        if Pos::find_child(self.root.as_ref()?, &parent_addr, &key).is_some() {
-            return None;
+        let root = self.root.as_ref().ok_or(AddError::Ended)?;
+        if Pos::find_child(root, &parent_addr, &key).is_some() {
+            return Err(AddError::Occupied);
         }
-        let link = <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start)?;
-        let root = self.root.as_mut()?;
-        let addr = Pos::add(root, &parent_addr, key, start, &self.args, &self.outbox)?;
-        // what the builds published, at the parent and above
-        self.effects(parent, &[], None, todo);
+        let link = <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start)
+            .map_err(|e| AddError::Linked(Box::new(e)))?;
+        let root = self.root.as_mut().ok_or(AddError::Ended)?;
+        let addr = match Pos::add(root, &parent_addr, key, start, &self.args, &self.outbox) {
+            Ok(addr) => addr,
+            Err(e) => {
+                // what the builds published before one failed belongs to
+                // no node
+                let _ = self.outbox.take();
+                return Err(e);
+            }
+        };
+        // what the builds published, at the parent and above, and the
+        // deadlines of what they took exclusive there
+        let writes: Vec<TypeId> = self.places[p]
+            .info
+            .comps
+            .iter()
+            .flat_map(|c| c.build_writes.iter().copied())
+            .collect();
+        self.effects(parent, &writes, None, todo);
         let id = self.register(addr, p, Some(parent));
         if let NodeSlot::Live(n) = &mut self.nodes[id] {
             n.link = link;
         }
         self.started(id, todo);
-        Some(id)
+        Ok(id)
     }
     /// The node of the place `Pl` under the node `parent`, kept under
     /// `key`.
@@ -2045,6 +2138,8 @@ where
         self.deadlines.clear();
         self.sleep = None;
         self.pending.clear();
+        self.deferred.clear();
+        self.deferred_timers.clear();
         if let Some(outer) = &self.outer {
             outer.wake_by_ref();
         }
@@ -2353,5 +2448,20 @@ where
         let turned = driver.turn(cx);
         driver.running = false;
         turned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::low_bits;
+
+    #[test]
+    fn the_low_bits_up_to_a_word() {
+        assert_eq!(low_bits(0), 0);
+        assert_eq!(low_bits(1), 1);
+        assert_eq!(low_bits(63), u64::MAX >> 1);
+        assert_eq!(low_bits(64), u64::MAX);
+        // 64 calls and none before them: no shift past the word
+        assert_eq!(low_bits(0).checked_shl(64).unwrap_or(0), 0);
     }
 }

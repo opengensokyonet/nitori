@@ -33,13 +33,20 @@ pub trait Store<N, K, H>: Default {
 /// the store.
 ///
 /// The structure chooses it for each child; the host does not replace it.
-pub trait ChildStorage: 'static {
+/// The storage kinds are this crate's ([`AtMostOne`], [`SlotVec`]): the
+/// driver knows how to lend each, so the trait is sealed.
+pub trait ChildStorage: sealed::Sealed + 'static {
     /// The key of a child under its parent.
     type Key: Clone + Eq + 'static;
     /// What the driver keeps to reach a child again.
     type Handle: Copy + Eq + core::fmt::Debug;
     /// The store of children `N`.
     type Store<N>: Store<N, Self::Key, Self::Handle>;
+}
+
+pub(crate) mod sealed {
+    /// Only the storage kinds of this crate: the driver lends their stores.
+    pub trait Sealed {}
 }
 
 /// The store a storage kind `S` gives for the nodes `N`.
@@ -51,6 +58,7 @@ pub type StoreOf<S, N> = <S as ChildStorage>::Store<N>;
 /// For what appears and goes away over time under a node, such as a layer
 /// that exists only in some phases.
 pub struct AtMostOne;
+impl sealed::Sealed for AtMostOne {}
 impl ChildStorage for AtMostOne {
     type Key = ();
     type Handle = ();
@@ -87,6 +95,7 @@ impl<N> Store<N, (), ()> for Option<N> {
 /// Any number of children told apart by a key `K`: the handle is the index
 /// of a slot, freed slots are reused, finding a key is linear.
 pub struct SlotVec<K>(PhantomData<fn() -> K>);
+impl<K> sealed::Sealed for SlotVec<K> {}
 impl<K: Clone + Eq + 'static> ChildStorage for SlotVec<K> {
     type Key = K;
     type Handle = usize;

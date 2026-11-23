@@ -531,41 +531,48 @@
 //! type Needs = HList![At<Provides<Count>, Here, Ref<Count>>];
 //! lend::<Needs, _, _, _, _, _>(&mut root, item, &nitori_driver::event::Outbox::new(), |_| ()).unwrap();
 //! ```
-mod cells;
-mod check;
-mod keyed;
+pub(crate) mod cells;
+pub(crate) mod check;
+pub(crate) mod keyed;
 mod now;
-mod own_key;
-mod pass;
-mod view;
-mod writes;
+pub(crate) mod own_key;
+pub(crate) mod pass;
+pub(crate) mod view;
+pub(crate) mod writes;
 
 use core::fmt;
 
 pub(crate) use cells::linked;
-pub use cells::{
+#[allow(unused_imports)]
+pub(crate) use cells::{
     All, Cell, ChainAtPos, ChainCells, ChildrenCells, False, FromSplit, GivenKey, IndexEq,
     LinkAtPos, LinkSpec, LinkTo, NoChain, NoLink, OffChain, OnChain, OptChildren, OptNodeCells,
     OptStoreCells, Others, OwnKeyCell, OwnKeyPlace, OwnKeyRef, OwnKeySource, RoleCells, RoleChain,
     RoleLink, RoleOf, RoleOther, SplitError, SplitKey, True, Wrap, WrapOpt,
 };
-pub use check::{
+#[allow(unused_imports)]
+pub(crate) use check::{
     Distinct, FindAll, FindCell, FindOthers, Locate, LocateIn, NoneAt, Pairwise, Places,
 };
-pub use keyed::{
-    Keyed, KeyedCell, KeyedDesc, KeyedItem, KeyedList, KeyedMany, KeyedManyP, KeyedP, KeyedPos,
-    KeyedRef, KeyedRefItem, KeyedShape, NoKeyed, NoKeyedPos, Refs, SharedKeyed,
+pub use keyed::{Keyed, KeyedList, KeyedRef};
+#[allow(unused_imports)]
+pub(crate) use keyed::{
+    KeyedCell, KeyedDesc, KeyedItem, KeyedMany, KeyedManyP, KeyedP, KeyedPos, KeyedRefItem,
+    KeyedShape, NoKeyed, NoKeyedPos, Refs, SharedKeyed,
 };
-pub use own_key::FindOwnKey;
-pub use pass::{
+#[allow(unused_imports)]
+pub(crate) use pass::{
     CellOf, Cx, Freeze, FreezeOne, KeyedPositions, Pass1, Pass2, RefShape, Shape, WrapManyPosition,
     WrapPosition,
 };
-pub use view::{
-    Build, Flat, NeedList, NeedSet, TagFlat, TagFlatMany, TagFlatRef, TagNeed, TagNeedBuild,
-    TagNeedRef, TagNeedRefBuild, ViewOf,
+#[allow(unused_imports)]
+pub(crate) use view::{
+    Build, NeedList, TagFlat, TagFlatMany, TagFlatRef, TagNeed, TagNeedBuild, TagNeedRef,
+    TagNeedRefBuild,
 };
-pub use writes::{TypeIds, Writes};
+pub use view::{Flat, NeedSet, ViewOf};
+#[allow(unused_imports)]
+pub(crate) use writes::{TypeIds, Writes};
 
 use frunk_core::hlist::{HCons, HNil};
 

@@ -18,7 +18,11 @@
 //! the retired head and wakes nothing.
 use alloc::{sync::Arc, task::Wake};
 use core::{
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst},
+    sync::atomic::{
+        AtomicBool, AtomicU64, AtomicUsize,
+        Ordering::{Acquire, SeqCst},
+        fence,
+    },
     task::Waker,
 };
 
@@ -54,7 +58,17 @@ impl NodeHead {
     /// Whether nothing refers to the head but the driver's table, and it
     /// is not on the stack: its number can go to another node.
     pub(crate) fn reusable(head: &Arc<Self>) -> bool {
-        Arc::strong_count(head) == 1 && head.marks.load(SeqCst) == 0
+        if Arc::strong_count(head) != 1 {
+            return false;
+        }
+        // `strong_count` is a relaxed read. A waker that marked the head
+        // did so (`fetch_or`) before it dropped its `Arc`, which releases;
+        // this fence makes that drop, seen through the count of one,
+        // happen before the read of the marks below, so a mark made before
+        // the last waker went away is seen and the number is not given out
+        // while the node is still on the stack.
+        fence(Acquire);
+        head.marks.load(SeqCst) == 0
     }
 }
 

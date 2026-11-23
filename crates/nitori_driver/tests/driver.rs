@@ -79,8 +79,8 @@ fn outer() -> (Arc<Counting>, Waker) {
 fn poll<Q: nitori_driver::driver::DriverComposition>(d: &mut Driver<Q>, w: &Waker) -> Poll<()>
 where
     Driver<Q>: core::future::Future<Output = ()>,
-    nitori_driver::driver::walk::Cursor<frunk_core::indices::Here>:
-        nitori_driver::driver::walk::CallWalk<Q>,
+    nitori_driver::__private::Cursor<frunk_core::indices::Here>:
+        nitori_driver::__private::CallWalk<Q>,
 {
     Pin::new(d).poll(&mut Context::from_waker(w))
 }

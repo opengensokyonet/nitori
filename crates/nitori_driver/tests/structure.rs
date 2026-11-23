@@ -7,8 +7,7 @@ use core::any::type_name;
 use common::{http::*, net::*, new};
 use frunk_core::hlist::Selector;
 use nitori_driver::structure::{
-    Address, Append, End, InsertError, MoveError, Node, NodePath, PathFrom, Visit, addresses_under,
-    insert, move_to, removal_order, remove, walk_node,
+    Address, Append, End, InsertError, MoveError, Node, NodePath, PathFrom, insert, move_to, remove,
 };
 
 fn component<X, I, D: Selector<X, I>>(d: &mut D) -> &mut X {
@@ -96,52 +95,7 @@ fn addresses_name_no_part() {
         !name.contains("Core") && !name.contains("Streaming"),
         "{name}"
     );
-    let all2 = addresses_under(&root2);
-    let all4 = addresses_under(&root4);
-    assert_eq!(all2, all4);
-    assert_eq!(all2.len(), 8);
-    assert_eq!(all2[0], Address::here());
-    assert!(all2.contains(&a2));
-}
-
-struct CountTimers(u32);
-impl<P> Visit<P> for CountTimers {
-    fn node<
-        K: nitori_driver::structure::KindFor<P, Children: nitori_driver::structure::ChildAddresses<P>>,
-    >(
-        &mut self,
-        _: &mut Node<K, P>,
-    ) {
-        if core::any::TypeId::of::<K>() == core::any::TypeId::of::<Timer>() {
-            self.0 += 1;
-        }
-    }
-}
-
-#[test]
-fn walk_an_address() {
-    let (mut root, _, p0, _, _, timer) = build!(P2);
-    let mut v = CountTimers(0);
-    assert!(walk_node(&mut root, &timer.address(), &mut v));
-    assert!(walk_node(&mut root, &p0.address(), &mut v));
-    assert_eq!(v.0, 1);
-    remove(&mut root, timer).unwrap();
-    assert!(!walk_node(&mut root, &timer.address(), &mut v));
-}
-
-/// Children before their parent; a peer, which routes link to, after the
-/// routes; the root last.
-#[test]
-fn removal_order_puts_linked_nodes_after_their_links() {
-    let (root, peer, p0, p2, route, timer) = build!(P2);
-    let order = removal_order(&root);
-    let at = |a: Address<Connection>| order.iter().position(|x| *x == a).unwrap();
-    assert_eq!(order.len(), 8);
-    assert!(at(timer.address()) < at(route.address()));
-    assert!(at(route.address()) < at(p0.address()));
-    assert!(at(route.address()) < at(peer.address()));
-    assert!(at(p2.address()) < at(peer.address()));
-    assert_eq!(*order.last().unwrap(), Address::here());
+    let _ = (root2, root4);
 }
 
 #[test]
@@ -152,12 +106,9 @@ fn a_second_structure() {
     let s8: StreamAt = insert(&mut root, End, StreamId(8), new()).ok().unwrap();
     let body: BodyAt = insert(&mut root, s4, (), new()).ok().unwrap();
     body.node_mut(&mut root).unwrap().data.head.head.0 = 10;
-    assert_eq!(addresses_under(&root).len(), 5);
     remove(&mut root, s4).unwrap();
     assert!(body.node(&root).is_none());
     assert!(s8.node(&root).is_some());
-    let order = removal_order(&root);
-    assert_eq!(order.len(), 3);
     let name = type_name::<Address<HttpConnection>>();
     assert!(
         !name.contains("Http,") && !name.contains("::Http>"),
