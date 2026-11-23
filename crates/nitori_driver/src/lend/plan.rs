@@ -15,6 +15,7 @@ use core::marker::PhantomData;
 use frunk_core::hlist::{HCons, HNil};
 
 use super::{
+    context::LendContext,
     list::HasPrefix,
     table::{KindTab, SlotAt, TabAt},
 };
@@ -83,17 +84,18 @@ impl<Rt: 'static, F: 'static> Plan for NodeSet<Rt, F> {
 }
 
 /// Taking a plan from the tables of the root kind `R` for the parts `Pt`,
-/// with the context `X` of the lending.
+/// and from the row of the context `X` of the lending.
 ///
 /// The tables borrow the tree for `'a`; the second pass borrows the tables
 /// for `'b`, and the handles borrow what it gathered for `'c`.
-pub trait Run<R: KindTab<Pt, HNil>, Pt: 'static, X>: Plan {
+pub trait Run<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext>: Plan {
     /// What the first pass takes.
     type Ex<'a>;
     /// What the second pass gathers.
     type Store<'b>;
-    /// The first pass: the exclusive columns, taken out of the rows.
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X) -> Self::Ex<'a>
+    /// The first pass: the exclusive columns, taken out of the rows, and
+    /// the pieces of the context, out of its row.
+    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a;
     /// The second pass: the shared columns and node sets.
@@ -105,10 +107,10 @@ pub trait Run<R: KindTab<Pt, HNil>, Pt: 'static, X>: Plan {
     where
         Self: 'a;
 }
-impl<R: KindTab<Pt, HNil>, Pt: 'static, X> Run<R, Pt, X> for () {
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext> Run<R, Pt, X> for () {
     type Ex<'a> = ();
     type Store<'b> = ();
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X) -> Self::Ex<'a>
+    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
@@ -124,10 +126,10 @@ impl<R: KindTab<Pt, HNil>, Pt: 'static, X> Run<R, Pt, X> for () {
     {
     }
 }
-impl<R: KindTab<Pt, HNil>, Pt: 'static, X> Run<R, Pt, X> for HNil {
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext> Run<R, Pt, X> for HNil {
     type Ex<'a> = HNil;
     type Store<'b> = HNil;
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X) -> HNil
+    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> HNil
     where
         Self: 'a,
     {
@@ -146,14 +148,14 @@ impl<R: KindTab<Pt, HNil>, Pt: 'static, X> Run<R, Pt, X> for HNil {
         HNil
     }
 }
-impl<R: KindTab<Pt, HNil>, Pt: 'static, X, A, B> Run<R, Pt, X> for HCons<A, B>
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext, A, B> Run<R, Pt, X> for HCons<A, B>
 where
     A: Run<R, Pt, X>,
     B: Run<R, Pt, X>,
 {
     type Ex<'a> = HCons<A::Ex<'a>, B::Ex<'a>>;
     type Store<'b> = HCons<A::Store<'b>, B::Store<'b>>;
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X) -> Self::Ex<'a>
+    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
@@ -182,14 +184,14 @@ where
         }
     }
 }
-impl<R: KindTab<Pt, HNil>, Pt: 'static, X, A, B> Run<R, Pt, X> for (A, B)
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext, A, B> Run<R, Pt, X> for (A, B)
 where
     A: Run<R, Pt, X>,
     B: Run<R, Pt, X>,
 {
     type Ex<'a> = (A::Ex<'a>, B::Ex<'a>);
     type Store<'b> = (A::Store<'b>, B::Store<'b>);
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X) -> Self::Ex<'a>
+    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
@@ -212,15 +214,15 @@ where
         (A::handles(a, sa), B::handles(b, sb))
     }
 }
-impl<R, Pt: 'static, X, Rt: 'static, J: 'static, F: Clone + 'static, C: 'static> Run<R, Pt, X>
-    for ExCol<Rt, J, F, C>
+impl<R, Pt: 'static, X: LendContext, Rt: 'static, J: 'static, F: Clone + 'static, C: 'static>
+    Run<R, Pt, X> for ExCol<Rt, J, F, C>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F>,
     R::AtComps: SlotAt<J, C = C>,
 {
     type Ex<'a> = Vec<(F, &'a mut C)>;
     type Store<'b> = ();
-    fn take<'a>(tab: &mut R::Table<'a>, _: &mut X) -> Vec<(F, &'a mut C)>
+    fn take<'a>(tab: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Vec<(F, &'a mut C)>
     where
         Self: 'a,
     {
@@ -248,7 +250,7 @@ where
         ex
     }
 }
-impl<R, Pt: 'static, X, Rt: 'static, J: 'static, F: 'static, C: 'static> Run<R, Pt, X>
+impl<R, Pt: 'static, X: LendContext, Rt: 'static, J: 'static, F: 'static, C: 'static> Run<R, Pt, X>
     for ShCol<Rt, J, F, C>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F>,
@@ -256,7 +258,7 @@ where
 {
     type Ex<'a> = ();
     type Store<'b> = Vec<(&'b F, &'b C)>;
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X) -> Self::Ex<'a>
+    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
@@ -284,13 +286,13 @@ where
         Shared::Rows(store)
     }
 }
-impl<R, Pt: 'static, X, Rt: 'static, F: 'static> Run<R, Pt, X> for NodeSet<Rt, F>
+impl<R, Pt: 'static, X: LendContext, Rt: 'static, F: 'static> Run<R, Pt, X> for NodeSet<Rt, F>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F>,
 {
     type Ex<'a> = ();
     type Store<'b> = Vec<&'b F>;
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X) -> Self::Ex<'a>
+    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {

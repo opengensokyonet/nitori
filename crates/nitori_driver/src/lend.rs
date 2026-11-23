@@ -16,7 +16,9 @@ use crate::{
 };
 
 pub(crate) mod check;
+pub(crate) mod context;
 pub(crate) mod list;
+pub(crate) mod locator;
 pub(crate) mod one_at_a_time;
 pub(crate) mod own;
 pub(crate) mod plan;
@@ -25,11 +27,13 @@ pub(crate) mod table;
 pub(crate) mod tree;
 pub(crate) mod under;
 pub(crate) mod up;
+pub(crate) mod waker;
 
 #[cfg(test)]
 mod tests;
 
 use check::{Check, Disjoint, Takes};
+pub(crate) use context::LendContext;
 use plan::{Plan, Run};
 use table::{KindTab, TabAt};
 use tree::{Ctx, Cx, Locate};
@@ -47,10 +51,11 @@ pub trait Lend<C: Ctx, P: Pos>: Need {
 }
 
 /// The lend point of the kind `L` in the tree whose root is `R`, for the
-/// parts `Pt`; `IL` is where `L` is in the structure (inferred).
-pub type PointCx<R, Pt, L, IL> = Cx<R, Pt, <R as Locate<L, IL>>::Route, list::Z>;
+/// parts `Pt`, lent with the context `Xc`; `IL` is where `L` is in the
+/// structure (inferred).
+pub type PointCx<R, Pt, L, IL, Xc> = Cx<R, Pt, <R as Locate<L, IL>>::Route, list::Z, Xc>;
 /// The full key of a node of the kind `L`.
-pub type PointFk<R, Pt, L, IL> = <PointCx<R, Pt, L, IL> as Ctx>::Fk;
+pub type PointFk<R, Pt, L, IL, Xc> = <PointCx<R, Pt, L, IL, Xc> as Ctx>::Fk;
 
 /// Code that takes a view at a position it is generic over, as a call
 /// does: the driver gives it the position it inferred.
@@ -70,24 +75,25 @@ pub trait Visit<N: Need> {
 #[allow(clippy::type_complexity)]
 pub(crate) fn lend<R, Pt: 'static, L, IL, N, P, X, F, O>(
     root: &mut Node<R, Pt>,
-    at: &PointFk<R, Pt, L, IL>,
+    at: &PointFk<R, Pt, L, IL, X>,
     cx: &mut X,
     f: F,
 ) -> Option<O>
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
-    PointCx<R, Pt, L, IL>: Ctx,
-    N: Check<PointCx<R, Pt, L, IL>, P>,
-    N: Takes<PointCx<R, Pt, L, IL>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL>, P>>::Touches: Disjoint,
-    N: Lend<PointCx<R, Pt, L, IL>, P>,
+    PointCx<R, Pt, L, IL, X>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL, X>, P>,
+    N: Takes<PointCx<R, Pt, L, IL, X>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
     R: TabAt<
             Pt,
             frunk_core::hlist::HNil,
             <R as Locate<L, IL>>::Route,
-            AtFk = PointFk<R, Pt, L, IL>,
+            AtFk = PointFk<R, Pt, L, IL, X>,
         >,
+    X: LendContext,
     N::Cols: Run<R, Pt, X>,
     F: for<'v> FnOnce(N::View<'v, P>) -> O,
 {
@@ -96,7 +102,8 @@ where
     if !R::rows(&tab).iter().any(|(f, _)| f == at) {
         return None;
     }
-    let ex = <N::Cols as Run<R, Pt, X>>::take(&mut tab, cx);
+    let mut row = cx.row();
+    let ex = <N::Cols as Run<R, Pt, X>>::take(&mut tab, &mut row);
     let store = <N::Cols as Run<R, Pt, X>>::gather(&tab);
     let hs = <N::Cols as Run<R, Pt, X>>::handles(ex, &store);
     Some(f(N::build(hs, at)))
@@ -106,24 +113,25 @@ where
 #[allow(clippy::type_complexity)]
 pub(crate) fn lend_visit<R, Pt: 'static, L, IL, N, P, X, V>(
     root: &mut Node<R, Pt>,
-    at: &PointFk<R, Pt, L, IL>,
+    at: &PointFk<R, Pt, L, IL, X>,
     cx: &mut X,
     v: V,
 ) -> Option<V::Out>
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
-    PointCx<R, Pt, L, IL>: Ctx,
-    N: Check<PointCx<R, Pt, L, IL>, P>,
-    N: Takes<PointCx<R, Pt, L, IL>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL>, P>>::Touches: Disjoint,
-    N: Lend<PointCx<R, Pt, L, IL>, P>,
+    PointCx<R, Pt, L, IL, X>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL, X>, P>,
+    N: Takes<PointCx<R, Pt, L, IL, X>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
     R: TabAt<
             Pt,
             frunk_core::hlist::HNil,
             <R as Locate<L, IL>>::Route,
-            AtFk = PointFk<R, Pt, L, IL>,
+            AtFk = PointFk<R, Pt, L, IL, X>,
         >,
+    X: LendContext,
     N::Cols: Run<R, Pt, X>,
     V: Visit<N>,
 {
@@ -131,18 +139,36 @@ where
 }
 
 /// Prove the needs `N` at the kind `L` of the tree whose root is `R`, for
-/// the parts `Pt`, without lending them: what the checks of a lending
+/// the parts `Pt`, with no context, without lending them: what the checks of a lending
 /// report, for the examples of the documentation.
 #[doc(hidden)]
 #[allow(private_bounds)]
 pub fn assert_lends<R, Pt, L, N, IL, P>()
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
-    PointCx<R, Pt, L, IL>: Ctx,
-    N: Check<PointCx<R, Pt, L, IL>, P>,
-    N: Takes<PointCx<R, Pt, L, IL>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL>, P>>::Touches: Disjoint,
-    N: Lend<PointCx<R, Pt, L, IL>, P>,
+    PointCx<R, Pt, L, IL, ()>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL, ()>, P>,
+    N: Takes<PointCx<R, Pt, L, IL, ()>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL, ()>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL, ()>, P>,
     P: Pos,
+{
+}
+
+/// Prove the needs `N` at the kind `L` of the tree whose root is `R`, for
+/// the parts `Pt`, lent with the context `X`, without lending them: what
+/// the checks of a lending report, for the examples of the documentation.
+#[doc(hidden)]
+#[allow(private_bounds)]
+pub fn assert_lends_in<R, Pt, X, L, N, IL, P>()
+where
+    R: KindFor<Pt> + NodeKind + Locate<L, IL>,
+    PointCx<R, Pt, L, IL, X>: Ctx,
+    N: Check<PointCx<R, Pt, L, IL, X>, P>,
+    N: Takes<PointCx<R, Pt, L, IL, X>, P>,
+    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint,
+    N: Lend<PointCx<R, Pt, L, IL, X>, P>,
+    P: Pos,
+    X: LendContext,
 {
 }

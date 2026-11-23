@@ -23,7 +23,9 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, GenericParam, parse_macro_input, parse_quote};
 
-/// The type-level number of a type: `nitori_driver::id::Numbered`.
+/// The type-level number of a type: `nitori_driver::id::Numbered`; and,
+/// the type being a component, what `At` makes of the node that has it:
+/// `nitori_driver::need::AtTarget`, the one node.
 #[proc_macro_derive(Numbered)]
 pub fn derive_numbered(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -84,9 +86,15 @@ fn numbered(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         quote!(::nitori_driver::id::Mixed<#bits, #numbers>)
     };
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let (at_impl_generics, at_ty_generics, at_where_clause) = input.generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics ::nitori_driver::id::Numbered for #name #ty_generics #where_clause {
             type Number = #number;
+        }
+        impl #at_impl_generics ::nitori_driver::need::AtTarget
+            for #name #at_ty_generics #at_where_clause
+        {
+            type Count = ::nitori_driver::need::ExactlyOne;
         }
     })
 }

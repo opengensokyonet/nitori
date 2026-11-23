@@ -8,7 +8,7 @@ use frunk_core::{
     indices::{Here, There},
 };
 
-use super::list::{Append, Concat, KeyTuple, Len, PushKey, S, SameBranch, ShiftFirst, Z};
+use super::list::{Append, Concat, KeyTuple, PushKey, S, SameBranch, ShiftFirst, Z};
 use crate::{
     need::{KeyedBy, Optional, Pos, Shape, Single},
     structure::{
@@ -266,9 +266,10 @@ where
 }
 
 /// A lend point as types: the root kind `R`, the parts `Pt`, the route
-/// `Rt` from the root, and the depth `Sd` of the members being lent (zero
-/// outside an `Under`), above which nothing may be taken exclusive.
-pub struct Cx<R, Pt, Rt, Sd>(PhantomData<fn() -> (R, Pt, Rt, Sd)>);
+/// `Rt` from the root, the depth `Sd` of the members being lent (zero
+/// outside an `Under`), above which nothing may be taken exclusive, and the
+/// type `Xc` of the lending's context.
+pub struct Cx<R, Pt, Rt, Sd, Xc>(PhantomData<fn() -> (R, Pt, Rt, Sd, Xc)>);
 
 /// What a lend point gives the needs taken at it.
 pub trait Ctx {
@@ -289,8 +290,10 @@ pub trait Ctx {
     /// The storage kind the lend point is kept by ([`NoParent`] for the
     /// root).
     type Storage;
+    /// The context of the lending, which the context needs read.
+    type Context;
 }
-impl<R: NodeKind, Pt, Rt, Sd> Ctx for Cx<R, Pt, Rt, Sd>
+impl<R: NodeKind, Pt, Rt, Sd, Xc> Ctx for Cx<R, Pt, Rt, Sd, Xc>
 where
     (R, Rt): ChainOf<Pt, HNil, HNil, NoParent>,
 {
@@ -302,11 +305,8 @@ where
     type Fk = <(R, Rt) as ChainOf<Pt, HNil, HNil, NoParent>>::Fk;
     type Kind = <(R, Rt) as ChainOf<Pt, HNil, HNil, NoParent>>::Kind;
     type Storage = <(R, Rt) as ChainOf<Pt, HNil, HNil, NoParent>>::Storage;
+    type Context = Xc;
 }
-
-/// The lend point of the members at the route `Rt` below the root `R`,
-/// for the parts `Pt`: what each member is lent as.
-pub type MemberCx<R, Pt, Rt> = Cx<R, Pt, Rt, <Rt as Len>::N>;
 
 // ------------------------------------------------------------------ up
 

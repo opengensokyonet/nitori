@@ -208,3 +208,67 @@ macro_rules! lend {
     };
 }
 pub(crate) use lend;
+
+/// [`lend!`], with the context `$cx`.
+macro_rules! lend_in {
+    ($root:expr, $kind:ty, $needs:ty, $at:expr, $cx:expr, $f:expr) => {
+        $crate::lend::lend::<_, _, $kind, _, $needs, _, _, _, _>($root, &$at, $cx, $f)
+    };
+}
+pub(crate) use lend_in;
+
+/// A clock whose instants are durations since it started.
+#[derive(Clone, Debug)]
+pub struct TestClock {
+    /// The last instant it can give.
+    pub last: core::time::Duration,
+}
+impl nitori_clock::MonotonicClock for TestClock {
+    type Instant = core::time::Duration;
+    type Sleep = core::future::Ready<()>;
+    fn now(&self) -> core::time::Duration {
+        core::time::Duration::ZERO
+    }
+    fn checked_add(
+        &self,
+        at: core::time::Duration,
+        by: core::time::Duration,
+    ) -> Option<core::time::Duration> {
+        at.checked_add(by).filter(|t| *t <= self.last)
+    }
+    fn sleep_until(&self, _: core::time::Duration) -> Self::Sleep {
+        core::future::ready(())
+    }
+    fn timer_granularity(&self) -> core::time::Duration {
+        core::time::Duration::from_millis(1)
+    }
+}
+
+/// A request to probe a link.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Ping(pub LinkId);
+/// A request to close the connection.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Close;
+
+/// The context the tests lend with: a clock read at one second, and boxes
+/// for pings and closes.
+pub type TestCx = HList![
+    crate::need::LentClock<TestClock>,
+    crate::need::RequestBox<Ping>,
+    crate::need::RequestBox<Close>,
+];
+
+/// The context, read at one second, with empty boxes.
+pub fn test_cx() -> TestCx {
+    hlist![
+        crate::need::LentClock::new(
+            TestClock {
+                last: core::time::Duration::from_secs(10)
+            },
+            core::time::Duration::from_secs(1)
+        ),
+        crate::need::RequestBox::new(),
+        crate::need::RequestBox::new(),
+    ]
+}

@@ -3,9 +3,11 @@
 //! A need is written in terms of components, never of kinds: [`Mut`] and
 //! [`Ref`] take the component on the way up from the lend point to the
 //! root, [`Under`] takes it from every node of one kind below an anchor,
-//! and [`At`] moves the lend point. [`OwnKey`] and [`OwnAddress`] read the
-//! lend point itself. A list of needs is an `HList` of them, taken at once
-//! and disjoint.
+//! and [`At`] moves the lend point, to a node found by component or picked
+//! by a [`Locator`]. [`WakerOf`] takes a component's waker. [`OwnKey`] and
+//! [`OwnAddress`] read the lend point itself, [`Clock`] and [`Requests`]
+//! the lending. A list of needs is an `HList` of them, taken at once and
+//! disjoint.
 //!
 //! The view of a need ([`Need::View`]) depends on the need and on a
 //! position ([`Pos`]) the driver infers where the structure is known, so a
@@ -142,15 +144,21 @@
 //! ```
 use core::marker::PhantomData;
 
+mod context;
+mod locator;
 mod one_at_a_time;
 mod plus;
 mod view;
+mod waker;
 
+pub use context::{Clock, LentClock, RequestBox, Requests};
+pub use locator::{AtTarget, Count, ExactlyOne, Locator, OneOrNone};
 pub use one_at_a_time::{OneAtATime, OneView};
 pub use plus::{BranchAt, Branches, Plus, PlusView, Take};
 pub use view::{
     EmptyPos, KeyedBy, KeyedView, Members, Need, Optional, Pos, Shape, Single, SingleView, View,
 };
+pub use waker::{ComponentWaker, WakerOf};
 
 /// The component `X`, exclusive, of the one node from the lend point up to
 /// the root that has it.
@@ -428,18 +436,20 @@ impl<X: 'static> MemberNeed for Mut<X> {
 impl<X: 'static> MemberNeed for Ref<X> {
     type Collected<'t, P: Pos> = <P::Shape as Shape>::Out<Self::View<'t, P::Inner>>;
 }
-impl<B: 'static, T: Need> MemberNeed for At<B, T> {
+impl<B: AtTarget + 'static, T: Need> MemberNeed for At<B, T> {
     type Collected<'t, P: Pos> = <P::Shape as Shape>::Out<Self::View<'t, P::Inner>>;
 }
 
 /// `T` taken with the node that has the component `B` as the lend point:
 /// the one node from the lend point up to the root that has it, or each
-/// member inside an [`Under`].
+/// member inside an [`Under`]; or with the node a [`Locator`] `B` picks.
 ///
-/// `T` is any need, taken up and down from the new lend point.
+/// `T` is any need, taken up and down from the new lend point. Its view is
+/// the view of `At`, in an `Option` when `B` is a locator that picks
+/// [`OneOrNone`].
 pub struct At<B, T>(PhantomData<fn() -> (B, T)>);
-impl<B: 'static, T: Need> Need for At<B, T> {
-    type View<'t, P: Pos> = T::View<'t, P::Inner>;
+impl<B: AtTarget + 'static, T: Need> Need for At<B, T> {
+    type View<'t, P: Pos> = <B::Count as Count>::Out<T::View<'t, P::Inner>>;
 }
 
 /// The key the lend point is kept under by its parent, `K`, cloned.

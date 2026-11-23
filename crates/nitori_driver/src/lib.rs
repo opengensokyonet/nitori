@@ -24,5 +24,5 @@ pub mod structure;
 /// nothing here is stable.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::lend::assert_lends;
+    pub use crate::lend::{assert_lends, assert_lends_in};
 }

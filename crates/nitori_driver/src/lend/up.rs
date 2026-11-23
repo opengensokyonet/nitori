@@ -10,7 +10,7 @@ use super::{
     plan::{ExCol, Plan, ShCol, Shared},
     tree::{AtPos, Ctx, Cx, DepthGe, FindUp, UpPos},
 };
-use crate::need::{At, Mut, Pos, Ref};
+use crate::need::{At, AtTarget, ExactlyOne, Mut, Pos, Ref};
 
 /// The kind of the node up the chain of `C` that has `X`, found at `I`.
 pub type UpKind<C, X, I> = <<C as Ctx>::Chain as FindUp<X, I>>::Kind;
@@ -94,9 +94,11 @@ where
 
 /// The lend point an `At` moves to from `C`: the node up the chain that
 /// has `B`, found at `I`, with the same depth of members.
-pub type AtCx<C, B, I> = Cx<<C as Ctx>::Root, <C as Ctx>::Parts, UpPre<C, B, I>, <C as Ctx>::Depth>;
+pub type AtCx<C, B, I> =
+    Cx<<C as Ctx>::Root, <C as Ctx>::Parts, UpPre<C, B, I>, <C as Ctx>::Depth, <C as Ctx>::Context>;
 
-impl<C: Ctx, B: 'static, T, I: 'static, PT: Pos> Lend<C, AtPos<I, PT>> for At<B, T>
+impl<C: Ctx, B: AtTarget<Count = ExactlyOne> + 'static, T, I: 'static, PT: Pos>
+    Lend<C, AtPos<I, PT>> for At<B, T>
 where
     C::Chain: FindUp<B, I>,
     AtCx<C, B, I>: Ctx,

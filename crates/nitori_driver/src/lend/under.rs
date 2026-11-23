@@ -12,7 +12,7 @@ use super::{
     up::{UpFk, UpKind, UpPre},
 };
 use crate::{
-    need::{At, MemberNeed, Mut, Need, Pos, Ref, Shape, Under},
+    need::{At, AtTarget, ExactlyOne, MemberNeed, Mut, Need, Pos, Ref, Shape, Under},
     structure::Shares,
 };
 
@@ -34,7 +34,7 @@ impl<X: 'static> UnderBody for Ref<X> {
     type B = X;
     type Depth<Rt: Len> = Rt::N;
 }
-impl<B: 'static, T: Need> UnderBody for At<B, T> {
+impl<B: AtTarget + 'static, T: Need> UnderBody for At<B, T> {
     type B = B;
     type Depth<Rt: Len> = Rt::N;
 }
@@ -94,7 +94,8 @@ where
             .expect("a member has its own component")
     }
 }
-impl<MC: Ctx, B: 'static, T, PT: Pos> Body<MC, AtPos<AtMember, PT>> for At<B, T>
+impl<MC: Ctx, B: AtTarget<Count = ExactlyOne> + 'static, T, PT: Pos> Body<MC, AtPos<AtMember, PT>>
+    for At<B, T>
 where
     T: Lend<MC, PT>,
 {
@@ -184,7 +185,7 @@ where
         by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at)
     }
 }
-impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, B: 'static, T: Need>
+impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, B: AtTarget + 'static, T: Need>
     Gather<MC, AF, LF, UnderPos<IA, IK, Sh, PB>> for At<B, T>
 where
     Self: Body<MC, PB>,
@@ -217,6 +218,7 @@ pub type MCx<C, A, IA, Bd, IK> = Cx<
     <C as Ctx>::Parts,
     MRoute<C, A, IA, BodyB<Bd>, IK>,
     <Bd as UnderBody>::Depth<MRoute<C, A, IA, BodyB<Bd>, IK>>,
+    <C as Ctx>::Context,
 >;
 /// The full key of a member.
 pub type MFk<C, A, IA, Bd, IK> = <MCx<C, A, IA, Bd, IK> as Ctx>::Fk;
