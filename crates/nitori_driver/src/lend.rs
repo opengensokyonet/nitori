@@ -540,7 +540,6 @@ pub(crate) mod pass;
 pub(crate) mod view;
 pub(crate) mod writes;
 
-pub(crate) use cells::linked;
 pub(crate) use cells::{All, Cell, ChainCells, FromSplit, GivenKey, LinkSpec, Others, OwnKeyCell};
 pub(crate) use check::{Locate, Pairwise, Places};
 pub use keyed::{Keyed, KeyedList, KeyedRef};
@@ -563,6 +562,7 @@ use crate::{
 
 /// The node lent is not in the tree.
 #[derive(Debug, snafu::Snafu, PartialEq, Eq)]
+#[snafu(module)]
 pub enum LendError {
     /// No node at the path.
     #[snafu(display("no node at the path lent"))]
@@ -651,10 +651,10 @@ where
         own: Kc,
         f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> O,
     ) -> Result<O, LendError> {
-        let link = linked(<LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::find(root, &at))?;
+        let link = <LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::find(root, &at)?;
         let cells = HCons {
             head: Cell::new(outbox),
-            tail: linked(at.cells(root, link, own))?,
+            tail: at.cells(root, link, own)?,
         };
         let (raw1, rem) = <N as Pass1<'a, CxOf<R, P, X>, _, I1>>::take(cells);
         let frozen = rem.freeze();

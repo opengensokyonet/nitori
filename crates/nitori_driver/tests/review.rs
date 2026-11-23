@@ -25,11 +25,12 @@ use nitori_driver::{
     lend::KeyedList,
     need::{At, Here, Kind, Mut, ToChild, Up},
     request::{
-        Edit, Editor, EndError, LinkedToError, NoChildError, NodeRequest, ReplaceError, Request,
+        Edit, Editor, EndError, LinkedToError, MoveGrandchildError, NoChildError, NodeRequest,
+        Request,
     },
     structure::{
-        AtMostOne, ByOwnKey, Child, End, KeyAddress, LinkedStart, MoveError, NoParentError,
-        NodeKind, NodePath, OccupiedError, Share, SlotVec, Store,
+        AtMostOne, ByOwnKey, Child, End, KeyAddress, LinkedStart, NoParentError, NodeKind,
+        NodePath, OccupiedError, Share, SlotVec, Store,
     },
 };
 
@@ -85,7 +86,7 @@ mod moves {
         pub to: u32,
     }
     thread_local! {
-        pub static RESULT: RefCell<Option<Result<(), MoveError>>> = const { RefCell::new(None) };
+        pub static RESULT: RefCell<Option<Result<(), MoveGrandchildError>>> = const { RefCell::new(None) };
         pub static QUEUE: RefCell<Vec<MoveB>> = const { RefCell::new(Vec::new()) };
     }
     impl Request<Root> for MoveB {
@@ -148,7 +149,7 @@ fn a_failed_move_leaves_the_node_where_it_was() {
     let b10 = d.add::<B, _, _, _>(a1, 10, ()).unwrap();
     let b11 = d.add::<B, _, _, _>(a1, 11, ()).unwrap();
     d.add::<B, _, _, _>(a2, 11, ()).unwrap();
-    assert!(d.remove(b10, ()));
+    d.remove(b10, ()).unwrap();
     QUEUE.with(|q| {
         q.borrow_mut().push(MoveB {
             from: 1,
@@ -160,14 +161,14 @@ fn a_failed_move_leaves_the_node_where_it_was() {
     let _ = poll(&mut d);
     assert_eq!(
         RESULT.with(|r| r.borrow_mut().take()),
-        Some(Err(MoveError::Occupied {
+        Some(Err(MoveGrandchildError::Occupied {
             source: OccupiedError
         }))
     );
     let a1n = a1.node(d.root().unwrap()).unwrap();
     assert_eq!(a1n.children.head.key(1), Some(&11));
     assert_eq!(a1n.children.head.key(0), None);
-    assert!(d.remove(b11, ()));
+    d.remove(b11, ()).unwrap();
     assert!(b11.node(d.root().unwrap()).is_none());
     // a move to a node not there leaves it too
     let b12 = d.add::<B, _, _, _>(a1, 12, ()).unwrap();
@@ -182,8 +183,33 @@ fn a_failed_move_leaves_the_node_where_it_was() {
     let _ = poll(&mut d);
     assert_eq!(
         RESULT.with(|r| r.borrow_mut().take()),
-        Some(Err(MoveError::NoDestination))
+        Some(Err(MoveGrandchildError::NoTo {
+            source: NoChildError
+        }))
     );
+    assert!(b12.node(d.root().unwrap()).is_some());
+    // from a child not there, or of a grandchild not there
+    for (from, key, error) in [
+        (
+            3,
+            12,
+            MoveGrandchildError::NoFrom {
+                source: NoChildError,
+            },
+        ),
+        (
+            1,
+            13,
+            MoveGrandchildError::NoGrandchild {
+                source: NoChildError,
+            },
+        ),
+    ] {
+        QUEUE.with(|q| q.borrow_mut().push(MoveB { from, key, to: 2 }));
+        wake();
+        let _ = poll(&mut d);
+        assert_eq!(RESULT.with(|r| r.borrow_mut().take()), Some(Err(error)));
+    }
     assert!(b12.node(d.root().unwrap()).is_some());
 }
 
@@ -223,7 +249,7 @@ mod linked {
     pub struct ReplaceEntry(pub u32);
     thread_local! {
         pub static QUEUE: RefCell<Vec<ReplaceEntry>> = const { RefCell::new(Vec::new()) };
-        pub static REPLACED: RefCell<Option<Result<(), ReplaceError>>> = const { RefCell::new(None) };
+        pub static REPLACED: RefCell<Option<Result<(), EndError>>> = const { RefCell::new(None) };
     }
     impl Request<Root> for ReplaceEntry {
         fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
@@ -288,16 +314,14 @@ fn a_linked_node_is_not_replaced() {
     let _ = poll(&mut d);
     let o9 = d.add::<Other, _, _, _>(End, 9, ()).unwrap();
     let p1 = d.add::<Path, _, _, _>(End, 1, ()).unwrap();
-    assert!(d.remove(o9, ()));
+    d.remove(o9, ()).unwrap();
     QUEUE.with(|q| q.borrow_mut().push(ReplaceEntry(1)));
     wake();
     let _ = poll(&mut d);
     assert_eq!(
         REPLACED.with(|r| r.borrow_mut().take()),
-        Some(Err(ReplaceError::End {
-            source: EndError::LinkedTo {
-                source: LinkedToError
-            }
+        Some(Err(EndError::LinkedTo {
+            source: LinkedToError
         }))
     );
     QUEUE.with(|q| q.borrow_mut().push(ReplaceEntry(5)));
@@ -305,14 +329,12 @@ fn a_linked_node_is_not_replaced() {
     let _ = poll(&mut d);
     assert_eq!(
         REPLACED.with(|r| r.borrow_mut().take()),
-        Some(Err(ReplaceError::End {
-            source: EndError::NoChild {
-                source: NoChildError
-            }
+        Some(Err(EndError::NoChild {
+            source: NoChildError
         }))
     );
     d.add::<Other, _, _, _>(End, 8, ()).unwrap();
-    assert!(d.remove(p1, ()));
+    d.remove(p1, ()).unwrap();
     let r = d.root().unwrap();
     assert!(r.children.head.find(&1).is_none());
     assert!(r.children.tail.tail.head.find(&8).is_some());
@@ -575,7 +597,7 @@ fn an_add_fails_for_its_reason() {
             source: OccupiedError
         })
     );
-    assert!(d.remove(a1, ()));
+    d.remove(a1, ()).unwrap();
     assert_eq!(
         d.add::<B, _, _, _>(a1, 1, ()).err(),
         Some(AddError::NoParent {
@@ -656,7 +678,7 @@ fn a_node_is_told_why_it_ends() {
     use causes::*;
     let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
     let layer = d.add::<Layer, _, _, _>(End, (), ()).unwrap();
-    assert!(d.remove(layer, 7));
+    d.remove(layer, 7).unwrap();
     assert_eq!(told(), ["Reason(7)"]);
     d.add::<Layer, _, _, _>(End, (), ()).unwrap();
     d.end("closed");

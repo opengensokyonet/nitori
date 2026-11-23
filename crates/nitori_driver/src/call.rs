@@ -319,7 +319,7 @@ use crate::{
     lend::{
         Build, Cell, CellsOf, ChainCells, CxOf, Flat, Freeze, FrozenOf, KeyedList, KeyedPositions,
         LendError, LinkOf, LinkSpec, LinkedOf, Locate, NeedSet, Pairwise, Pass1, Pass2, Places,
-        PositionsOf, Raw1Of, Raw2Of, Rem1Of, ViewOf, Writes, linked,
+        PositionsOf, Raw1Of, Raw2Of, Rem1Of, ViewOf, Writes,
     },
     need::ChainOf,
     structure::{Append, Child, ChildStorage, End, KindFor, Node, NodeKind, PathFrom},
@@ -992,15 +992,11 @@ where
         call: Pin<&mut Self::Running>,
         cx: &mut Context<'_>,
     ) -> Result<CallStep<C::Yield>, LendError> {
-        let link = linked(<LinkedOf<RootOf<Q>, X> as LinkSpec<
-            RootOf<Q>,
-            PartsOf<Q>,
-            X,
-            IL,
-        >>::find(root, &at))?;
+        let link =
+            <LinkedOf<RootOf<Q>, X> as LinkSpec<RootOf<Q>, PartsOf<Q>, X, IL>>::find(root, &at)?;
         let cells = HCons {
             head: Cell::new(outbox),
-            tail: linked(at.cells(root, link, crate::lend::FromSplit))?,
+            tail: at.cells(root, link, crate::lend::FromSplit)?,
         };
         let (raw1, rem) =
             <Needs<Q, C> as Pass1<'a, CxOf<RootOf<Q>, PartsOf<Q>, X>, _, I1>>::take(cells);

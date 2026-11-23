@@ -262,7 +262,7 @@ use frunk_core::{
 
 use crate::{
     driver::{AddError, Place},
-    structure::{ChildOfKind, KeyAddress, KeyAt, MoveError, NodeKind, PathFrom, StorageAt},
+    structure::{ChildOfKind, KeyAddress, KeyAt, NodeKind, OccupiedError, PathFrom, StorageAt},
 };
 
 /// A request a node of the kind `K` handles on its own subtree.
@@ -280,10 +280,10 @@ impl<K: NodeKind> Request<K> for Infallible {
 pub(crate) mod sealed {
     use frunk_core::indices::{Here, There};
 
-    use super::{EndError, LinkedToError, ReplaceError};
+    use super::{EndError, LinkedToError, MoveGrandchildError};
     use crate::{
         driver::{AddError, DriverOps},
-        structure::{ChildList, ChildStorage, MoveError, NodeKind},
+        structure::{ChildList, ChildStorage, NodeKind},
     };
 
     /// What the driver does for an edit handle of a node of the kind `K`,
@@ -327,7 +327,7 @@ pub(crate) mod sealed {
             key: S::Key,
             start: CK::Start,
             reason: CK::EndReason,
-        ) -> Result<(), ReplaceError>;
+        ) -> Result<(), EndError>;
     }
     /// The moves of each grandchild of a list `L` under children kept by
     /// `S`.
@@ -346,7 +346,7 @@ pub(crate) mod sealed {
             from: &S::Key,
             key: &G::Key,
             to: &S::Key,
-        ) -> Result<(), MoveError>;
+        ) -> Result<(), MoveGrandchildError>;
     }
 
     /// The item at the position `I` of a list of operations on children.
@@ -463,7 +463,7 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
         key: KeyAt<K::Children, I>,
         start: CK::Start,
         reason: CK::EndReason,
-    ) -> Result<(), ReplaceError>
+    ) -> Result<(), EndError>
     where
         K::Children: ChildOfKind<CK, I>,
         ChildOps<E, K>: NthChildEdit<Qe<E>, K::Children, I>,
@@ -476,13 +476,15 @@ impl<'e, E: Editor<K>, K: NodeKind> Edit<'e, E, K> {
     /// to the one kept under `to`, keeping its key. It ends where it was
     /// for the nodes above ([`NodeEnding`](crate::event::NodeEnding)) and
     /// starts where it goes ([`NodeStarted`](crate::event::NodeStarted));
-    /// its calls go on.
+    /// its calls go on. Refused, and nothing moves, when a child or the
+    /// grandchild is not there or `to` has a child of the kind `GK` under
+    /// `key`.
     pub fn move_grandchild<CK: NodeKind, I, GK: NodeKind, J>(
         &mut self,
         from: &KeyAt<K::Children, I>,
         key: &KeyAt<CK::Children, J>,
         to: &KeyAt<K::Children, I>,
-    ) -> Result<(), MoveError>
+    ) -> Result<(), MoveGrandchildError>
     where
         K::Children: ChildOfKind<CK, I>,
         CK::Children: ChildOfKind<GK, J>,
@@ -517,18 +519,14 @@ impl<E, K> fmt::Debug for Edit<'_, E, K> {
 /// No child of this kind is kept under the key.
 #[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
 #[snafu(display("no child of this kind under this key"))]
-#[snafu(context(suffix(ErrorSnafu)))]
-#[snafu(visibility(pub(crate)))]
 pub struct NoChildError;
 /// Nodes link to the node: the structure ends it after the last of them.
 #[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
 #[snafu(display("nodes link to it; it ends after the last of them"))]
-#[snafu(context(suffix(ErrorSnafu)))]
-#[snafu(visibility(pub(crate)))]
 pub struct LinkedToError;
 /// Why an edit handle did not end a child.
 #[derive(Debug, Snafu, PartialEq, Eq)]
-#[snafu(visibility(pub(crate)))]
+#[snafu(module)]
 pub enum EndError {
     /// No child of the kind is kept under the key.
     #[snafu(display("the child was not ended"))]
@@ -543,21 +541,33 @@ pub enum EndError {
         source: LinkedToError,
     },
 }
-/// Why an edit handle did not replace a child.
+/// Why an edit handle did not move a grandchild; nothing moved.
 #[derive(Debug, Snafu, PartialEq, Eq)]
-#[snafu(visibility(pub(crate)))]
-pub enum ReplaceError {
-    /// The child could not be ended; none is built.
-    #[snafu(display("the child was not replaced"))]
-    End {
+#[snafu(module)]
+pub enum MoveGrandchildError {
+    /// No child is kept under `from`.
+    #[snafu(display("no child to move the grandchild from"))]
+    NoFrom {
         /// Why.
-        source: EndError,
+        source: NoChildError,
     },
-    /// The child ended, and the new one could not be built.
-    #[snafu(display("the child ended and its replacement was not built"))]
-    Add {
+    /// The child under `from` keeps no grandchild under `key`.
+    #[snafu(display("no grandchild to move"))]
+    NoGrandchild {
         /// Why.
-        source: AddError,
+        source: NoChildError,
+    },
+    /// No child is kept under `to`.
+    #[snafu(display("no child to move the grandchild to"))]
+    NoTo {
+        /// Why.
+        source: NoChildError,
+    },
+    /// The child under `to` keeps a grandchild of the kind under `key`.
+    #[snafu(display("the grandchild was not moved"))]
+    Occupied {
+        /// Why.
+        source: OccupiedError,
     },
 }
 

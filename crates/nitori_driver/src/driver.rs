@@ -701,6 +701,52 @@
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
 //! ```
 //!
+//! The root removed by a path: a path to remove is at least one step long,
+//! and the root is ended with [`Driver::end`]:
+//!
+//! ```compile_fail
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use core::time::Duration;
+//! # use frunk_core::{HList, hlist::HNil};
+//! # use nitori_driver::{
+//! #     call::ShareCalls,
+//! #     composition,
+//! #     driver::Driver,
+//! #     hooks::Part,
+//! #     structure::{AtMostOne, Child, End, NodeKind, Share},
+//! # };
+//! # #[derive(Clone, Default)]
+//! # struct Clock;
+//! # impl nitori_clock::MonotonicClock for Clock {
+//! #     type Instant = Duration;
+//! #     type Sleep = core::future::Pending<()>;
+//! #     fn now(&self) -> Duration { Duration::ZERO }
+//! #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+//! #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+//! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+//! # }
+//! # struct Root;
+//! # struct Layer;
+//! # impl NodeKind for Root {
+//! #     type Children = HList![Child<Layer, AtMostOne>];
+//! #     type Linked = HNil;
+//! # }
+//! # impl NodeKind for Layer {
+//! #     type Children = HNil;
+//! #     type Linked = HNil;
+//! # }
+//! # struct Base;
+//! # impl<L> Part<L> for Base { type Args = (); }
+//! # impl ShareCalls<Root> for Base { type Calls = HNil; }
+//! # impl ShareCalls<Layer> for Base { type Calls = HNil; }
+//! # impl Share<Root> for Base { type Data = HNil; }
+//! # impl Share<Layer> for Base { type Data = HNil; }
+//! # struct Q;
+//! # composition!(impl driver for Q: Root, HList![Base], Clock);
+//! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()], ()).unwrap();
+//! let _ = driver.remove(End, ());
+//! ```
+//!
 //! [`NodeStarted`]: crate::event::NodeStarted
 //! [`NodeEnding`]: crate::event::NodeEnding
 pub(crate) mod edit;
@@ -743,10 +789,12 @@ use crate::{
     call::{CallStep, LendOne, OutboxOf, PartsOf, RootOf, SlotCall, SlotDesc, SlotYield},
     event::{Outbox, Scope, Triggered},
     hooks::{AbortCause, ArgsOf, EndCause, EndReasonOf, StartOf},
+    request::LinkedToError,
     structure::{
         Address, Append, ChildAddresses, ChildAt, ChildList, ChildOfKind, End, FromAddress,
         HandleAt, KeyAddress, KeyAt, KindFor, LinkList, MoveError, NoParentError, NodeKind,
-        NodePath, OccupiedError, ParentChildren, ParentPath, PathFrom, RemainsOf, resolve_node,
+        NodePath, OccupiedError, ParentChildren, ParentPath, PathFrom, RemainsOf, SplitLast,
+        resolve_node,
     },
 };
 
@@ -754,6 +802,7 @@ use crate::{
 
 /// Why a composition cannot be driven.
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(module)]
 pub enum CompositionError {
     /// A place has more than 64 calls and components that act before the
     /// calls together: a node marks each in one bit of a word.
@@ -777,6 +826,7 @@ pub enum CompositionError {
 
 /// Why a node was not added.
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(module)]
 pub enum AddError {
     /// The root ended.
     #[snafu(display("the root ended"))]
@@ -793,18 +843,6 @@ pub enum AddError {
         /// Why.
         source: OccupiedError,
     },
-    /// A component's `build` could not be lent the parent.
-    #[snafu(display("a component of the node could not be built"))]
-    Build {
-        /// Why.
-        source: crate::lend::LendError,
-    },
-    /// The node it links to was not there and could not be built.
-    #[snafu(display("the node it links to could not be built"))]
-    Linked {
-        /// Why.
-        source: Box<AddError>,
-    },
 }
 impl AddError {
     pub(crate) fn no_parent() -> Self {
@@ -817,6 +855,21 @@ impl AddError {
             source: OccupiedError,
         }
     }
+}
+
+/// Why [`Driver::remove`] removed no node.
+#[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(module)]
+pub enum RemoveError {
+    /// No node at the path.
+    #[snafu(display("no node at the path to remove"))]
+    NoNode,
+    /// Nodes link to it.
+    #[snafu(display("the node was not removed"))]
+    LinkedTo {
+        /// Why.
+        source: LinkedToError,
+    },
 }
 
 // ---------------------------------------------------------------- the driver's tables
@@ -1416,28 +1469,38 @@ where
 
     /// Remove the node at `at`, for `reason`, with every node below it
     /// (each told that a node above ended), as a request's edit handle
-    /// does. The root is ended with [`end`](Driver::end). Returns whether
-    /// a node was there and was removed: a node others link to is removed
-    /// after the last of them, not on its own. A path is by handles, as
+    /// does. The path is at least one step long: the root is ended with
+    /// [`end`](Driver::end). Refused when no node is at the path, or when
+    /// nodes link to it: a node others link to is removed after the last
+    /// of them, not on its own. A path is by handles, as
     /// [`add`](Driver::add) says: one kept after its node ended may reach
     /// a node added later.
-    pub fn remove<X, N>(&mut self, at: X, reason: EndReasonOf<TargetOf<Q, X>>) -> bool
+    pub fn remove<X, N>(
+        &mut self,
+        at: X,
+        reason: EndReasonOf<TargetOf<Q, X>>,
+    ) -> Result<(), RemoveError>
     where
-        X: PathFrom<RootOf<Q>> + PlaceKey<RootOf<Q>> + ParentPath + 'static,
+        X: PathFrom<RootOf<Q>> + PlaceKey<RootOf<Q>> + ParentPath + SplitLast + 'static,
         PlacesOf<Q>: FindPlace<X, N> + NthPlace<RootOf<Q>, N, Item = Place<X>>,
         Q::Places: PlaceNth<Q, PlacesOf<Q>, N>,
     {
-        let Some(id) = self.find(&at.address()) else {
-            return false;
-        };
-        if id == self.root_id() || self.linked_to(id) {
-            return false;
+        let id = self.find(&at.address()).ok_or(RemoveError::NoNode)?;
+        debug_assert_ne!(
+            id,
+            self.root_id(),
+            "a path of a step or more is not the root's"
+        );
+        if self.linked_to(id) {
+            return Err(RemoveError::LinkedTo {
+                source: LinkedToError,
+            });
         }
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
         self.end_typed::<Place<X>, PlacePositionsAt<Q, N>>(id, reason, &mut todo);
         self.settle(todo);
-        true
+        Ok(())
     }
 
     /// Have the node a request is for handle it; what its edits reach goes
@@ -1979,9 +2042,10 @@ where
     }
 
     /// Build a node of the place `Pl` (whose number is `p` and positions
-    /// `Pos`) under the node `parent`, under `key`, from `start`; `None`
-    /// when the key is taken. A node whose kind links to another has it
-    /// built first, under its own key, when it is not there.
+    /// `Pos`) under the node `parent`, under `key`, from `start`; refused
+    /// when the key is taken, or when `parent` or the root is not there. A
+    /// node whose kind links to another has it built first, under its own
+    /// key, when it is not there.
     fn add_typed<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(
         &mut self,
         p: usize,
@@ -2000,22 +2064,9 @@ where
         if Pos::find_child(root, &parent_addr, &key).is_some() {
             return Err(AddError::occupied());
         }
-        let link =
-            <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start).map_err(|e| {
-                AddError::Linked {
-                    source: Box::new(e),
-                }
-            })?;
+        let link = <Pos::Link as edit::LinkAdd<_, _, _>>::ensure(self, &key, &mut start);
         let root = self.root.as_mut().ok_or(AddError::Ended)?;
-        let addr = match Pos::add(root, &parent_addr, key, start, &self.args, &self.outbox) {
-            Ok(addr) => addr,
-            Err(e) => {
-                // what the builds published before one failed belongs to
-                // no node
-                let _ = self.outbox.take();
-                return Err(e);
-            }
-        };
+        let addr = Pos::add(root, &parent_addr, key, start, &self.args, &self.outbox);
         // what the builds published, at the parent and above, and the
         // deadlines of what they took exclusive there
         let writes: Vec<TypeId> = self.places[p]
@@ -2231,17 +2282,27 @@ where
 
     /// Move the node `id` under the node `to`, of the place of its parent:
     /// it ends where it was for the nodes above, its subtree's addresses
-    /// follow it, and it starts where it goes; its calls go on.
-    fn move_node(&mut self, id: usize, to: usize, todo: &mut Vec<Hit>) -> Result<(), MoveError> {
-        let n = self.live(id).ok_or(MoveError::NoSource)?;
+    /// follow it, and it starts where it goes; its calls go on. Both are
+    /// there; refused when `to` has a child of its kind under its key.
+    fn move_node(
+        &mut self,
+        id: usize,
+        to: usize,
+        todo: &mut Vec<Hit>,
+    ) -> Result<(), OccupiedError> {
+        // Invariant: the edit handle found both a moment ago, and nothing
+        // was handled since.
+        let n = self.live(id).expect("the node to move was found");
         let (p, at, from) = (n.place, n.addr, n.parent);
-        let dest = self.live(to).ok_or(MoveError::NoDestination)?;
-        let to_addr = dest.addr;
+        let to_addr = self.live(to).expect("the new parent was found").addr;
         if from == Some(to) {
             return Ok(());
         }
-        let root = self.root.as_mut().ok_or(MoveError::NoSource)?;
-        let new = <Cursor<I0> as PlaceWalk<Q>>::visit(
+        let root = self
+            .root
+            .as_mut()
+            .expect("the root is there while a request is handled");
+        let moved = <Cursor<I0> as PlaceWalk<Q>>::visit(
             p,
             MoveUnder::<Q> {
                 root,
@@ -2249,7 +2310,15 @@ where
                 to: &to_addr,
             },
         )
-        .unwrap_or(Err(MoveError::NoSource))?;
+        // Invariant: `p` is the place of a node, so the walk reaches it.
+        .expect("the walk reaches the place of a node");
+        let new = match moved {
+            Ok(new) => new,
+            Err(MoveError::Occupied { source }) => return Err(source),
+            // Invariant: both nodes are in the tree, at the paths of their
+            // addresses.
+            Err(e) => unreachable!("both ends of a move are there: {e}"),
+        };
         // it ends where it was: the nodes above it there hear it
         let ending = self.places[p].info.ending;
         self.deliver(id, ending, None, true, todo);

@@ -12,17 +12,16 @@ pub type ParentChildren<R, X> = ChildrenOf<<X as PathFrom<R>>::Target>;
 /// The parent keeps a child of this kind under the key already.
 #[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
 #[snafu(display("the parent has a child of this kind under this key"))]
-#[snafu(context(suffix(ErrorSnafu)))]
 pub struct OccupiedError;
 
 /// No node is at the parent's path.
 #[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
 #[snafu(display("no node at the parent's path"))]
-#[snafu(context(suffix(ErrorSnafu)))]
 pub struct NoParentError;
 
 /// Why a node could not be added; the node comes back.
 #[derive(Debug, Snafu)]
+#[snafu(module)]
 pub enum InsertError<N> {
     /// No node at the parent's path.
     #[snafu(display("the node was not added"))]
@@ -106,6 +105,7 @@ where
 
 /// Why a node could not be moved; it stays where it was.
 #[derive(Debug, Snafu, PartialEq, Eq)]
+#[snafu(module)]
 pub enum MoveError {
     /// No node at the path to move.
     #[snafu(display("no node at the path to move"))]
@@ -114,7 +114,7 @@ pub enum MoveError {
     #[snafu(display("no node at the new parent's path"))]
     NoDestination,
     /// The new parent has a child of this kind under the same key.
-    #[snafu(display("the node was not moved"), context(suffix(MoveSnafu)))]
+    #[snafu(display("the node was not moved"))]
     Occupied {
         /// Why.
         source: OccupiedError,

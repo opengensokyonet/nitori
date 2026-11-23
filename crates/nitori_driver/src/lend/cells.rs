@@ -338,17 +338,7 @@ pub trait RoleCells<'a, CK: KindFor<P>, S: ChildStorage, P, Pre, Pos, Ch, Lk, Kc
         ch: Ch,
         lk: Lk,
         kc: Kc,
-    ) -> Result<Self::Out, SplitError>;
-}
-/// Why splitting the tree around a node failed.
-#[derive(Debug, snafu::Snafu, PartialEq, Eq)]
-pub enum SplitError {
-    /// A node on the path is not there.
-    #[snafu(display("a node on the path is not there"))]
-    NoNode,
-    /// The linked node is not there.
-    #[snafu(display("the linked node is not there"))]
-    NoLinked,
+    ) -> Result<Self::Out, LendError>;
 }
 impl<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> for RoleOther
 where
@@ -356,12 +346,7 @@ where
     S: OffChain<'a, CK, P, HCons<Pos, Pre>>,
 {
     type Out = S::Out;
-    fn cells(
-        s: &'a mut StoreOf<S, Node<CK, P>>,
-        _: Ch,
-        _: Lk,
-        _: Kc,
-    ) -> Result<S::Out, SplitError> {
+    fn cells(s: &'a mut StoreOf<S, Node<CK, P>>, _: Ch, _: Lk, _: Kc) -> Result<S::Out, LendError> {
         Ok(S::cells(s))
     }
 }
@@ -380,8 +365,8 @@ where
         ch: Step<Pos, H, R>,
         _: Lk,
         kc: Kc,
-    ) -> Result<Self::Out, SplitError> {
-        let (key, n, others) = S::split(s, ch.handle).ok_or(SplitError::NoNode)?;
+    ) -> Result<Self::Out, LendError> {
+        let (key, n, others) = S::split(s, ch.handle).ok_or(LendError::NoNode)?;
         Ok(ch.rest.cells(n, NoLink, kc.pick(key))? + others)
     }
 }
@@ -399,8 +384,11 @@ where
         _: Ch,
         lk: LinkTo<Pos, H>,
         _: Kc,
-    ) -> Result<Self::Out, SplitError> {
-        let n = s.get_mut(lk.0).ok_or(SplitError::NoLinked)?;
+    ) -> Result<Self::Out, LendError> {
+        // Invariant: the structure starts and ends a linked node together
+        // with the nodes linking to it, so it is there whenever they are;
+        // the link was found a moment ago.
+        let n = s.get_mut(lk.0).expect(LINK_INVARIANT);
         End.cells(n, NoLink, FromSplit)
     }
 }
@@ -411,12 +399,11 @@ pub trait ChildrenCells<'a, P, Pre, Pos, Ch, Lk, Kc>: ChildStores<P> {
     /// The cells.
     type Out;
     /// Split the stores.
-    fn cells(stores: &'a mut Self::Stores, ch: Ch, lk: Lk, kc: Kc)
-    -> Result<Self::Out, SplitError>;
+    fn cells(stores: &'a mut Self::Stores, ch: Ch, lk: Lk, kc: Kc) -> Result<Self::Out, LendError>;
 }
 impl<'a, P, Pre, Pos, Ch, Lk, Kc> ChildrenCells<'a, P, Pre, Pos, Ch, Lk, Kc> for HNil {
     type Out = HNil;
-    fn cells(_: &'a mut HNil, _: Ch, _: Lk, _: Kc) -> Result<HNil, SplitError> {
+    fn cells(_: &'a mut HNil, _: Ch, _: Lk, _: Kc) -> Result<HNil, LendError> {
         Ok(HNil)
     }
 }
@@ -433,12 +420,7 @@ where
     RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc>: Add<T::Out>,
 {
     type Out = <RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> as Add<T::Out>>::Output;
-    fn cells(
-        stores: &'a mut Self::Stores,
-        ch: Ch,
-        lk: Lk,
-        kc: Kc,
-    ) -> Result<Self::Out, SplitError> {
+    fn cells(stores: &'a mut Self::Stores, ch: Ch, lk: Lk, kc: Kc) -> Result<Self::Out, LendError> {
         let HCons { head, tail } = stores;
         let here = <RoleAt<Ch, Lk, Pos> as RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc>>::cells(
             head, ch, lk, kc,
@@ -547,7 +529,7 @@ pub trait ChainCells<'a, K: KindFor<P>, P, Pre, Lk, Kc = FromSplit>: Copy {
     /// The cells.
     type Out;
     /// Split the node.
-    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, SplitError>;
+    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, LendError>;
 }
 impl<'a, K, P: 'a, Pre, Lk: Copy, Kc> ChainCells<'a, K, P, Pre, Lk, Kc> for End
 where
@@ -561,7 +543,7 @@ where
     OwnCells<'a, Kc>: Add<NodeCells<'a, K, P, Pre, NoChain, Lk, Kc>>,
 {
     type Out = <OwnCells<'a, Kc> as Add<NodeCells<'a, K, P, Pre, NoChain, Lk, Kc>>>::Output;
-    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, SplitError> {
+    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, LendError> {
         let Node { data, children, .. } = n;
         Ok(kc.cells() + (data.flat_mut().wrap() + K::Children::cells(children, NoChain, lk, kc)?))
     }
@@ -577,7 +559,7 @@ where
         Add<<K::Children as ChildrenCells<'a, P, Pre, I0, Step<I, H, R>, Lk, Kc>>::Out>,
 {
     type Out = NodeCells<'a, K, P, Pre, Step<I, H, R>, Lk, Kc>;
-    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, SplitError> {
+    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, LendError> {
         let Node { data, children, .. } = n;
         Ok(data.flat_mut().wrap() + K::Children::cells(children, self, lk, kc)?)
     }
@@ -589,11 +571,11 @@ pub trait LinkSpec<R: KindFor<P>, P, X, LI> {
     /// The link, as the split takes it.
     type Lk: Copy;
     /// Find the linked node.
-    fn find(root: &Node<R, P>, at: &X) -> Result<Self::Lk, SplitError>;
+    fn find(root: &Node<R, P>, at: &X) -> Result<Self::Lk, LendError>;
 }
 impl<R: KindFor<P>, P, X> LinkSpec<R, P, X, ()> for HNil {
     type Lk = NoLink;
-    fn find(_: &Node<R, P>, _: &X) -> Result<NoLink, SplitError> {
+    fn find(_: &Node<R, P>, _: &X) -> Result<NoLink, LendError> {
         Ok(NoLink)
     }
 }
@@ -604,11 +586,13 @@ where
     X: KeyedPath<R, P, (), Key = KeyAt<R::Children, L>>,
 {
     type Lk = LinkTo<L, HandleAt<R::Children, L>>;
-    fn find(root: &Node<R, P>, at: &X) -> Result<Self::Lk, SplitError> {
-        let key = at.key_of(root, &()).ok_or(SplitError::NoNode)?;
+    fn find(root: &Node<R, P>, at: &X) -> Result<Self::Lk, LendError> {
+        let key = at.key_of(root, &()).ok_or(LendError::NoNode)?;
+        // Invariant: the structure starts and ends a linked node together
+        // with the nodes linking to it, so it is there whenever they are.
         let h = <R::Children as ChildAt<L, P>>::store(&root.children)
             .find(key)
-            .ok_or(SplitError::NoLinked)?;
+            .expect(LINK_INVARIANT);
         Ok(LinkTo(h, PhantomData))
     }
 }
@@ -617,16 +601,3 @@ where
 /// linking to it is.
 pub(crate) const LINK_INVARIANT: &str = "a node whose kind links to another node (`NodeKind::Linked`) \
      exists only while that node exists";
-
-/// A split's result: a node on the path gone is the caller's error; the
-/// linked node gone breaks the structure's invariant.
-pub(crate) fn linked<T>(r: Result<T, SplitError>) -> Result<T, LendError> {
-    let found = match r {
-        Ok(t) => Some(t),
-        Err(SplitError::NoNode) => return Err(LendError::NoNode),
-        Err(SplitError::NoLinked) => None,
-    };
-    // Invariant: the structure starts and ends a linked node together with
-    // the nodes linking to it, so it is there whenever they are.
-    Ok(found.expect(LINK_INVARIANT))
-}

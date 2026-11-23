@@ -21,7 +21,7 @@ use nitori_call::{LentAccess, call};
 use nitori_driver::{
     call::{CallFamily, CallKind, Composition, LoanNeeds, Positions, ShareCalls, View},
     composition,
-    driver::Driver,
+    driver::{Driver, RemoveError},
     event::{Event, ForDeadline, Hear, HearAt, NodeEnding, NodeStarted, Publish, Triggered},
     hooks::{
         AbortCause, ArgsOf, BuildKeyed, BuildView, EndReasonOf, HasDeadline, HookKeys, HookView,
@@ -29,7 +29,7 @@ use nitori_driver::{
     },
     lend::KeyedList,
     need::{At, ByKey, Here, Kind, Mut, Ref, ToChild, Up},
-    request::NodeRequest,
+    request::{LinkedToError, NodeRequest},
     structure::{End, KeyAddress, NodeKind, Share},
 };
 
@@ -604,10 +604,10 @@ fn removing_a_node_ends_it_and_its_subtree() {
     log();
     // the peer the route linked to ends after it: no node links to it
     // any more
-    assert!(d.remove(p, ()));
+    d.remove(p, ()).unwrap();
     assert_eq!(log(), ["end Route", "end Path", "end Peer"]);
     assert_eq!(heard(&d).1, 1, "NodeEnding<Path> reaches the connection");
-    assert!(!d.remove(p, ()));
+    assert_eq!(d.remove(p, ()), Err(RemoveError::NoNode));
 }
 
 #[test]
@@ -626,10 +626,15 @@ fn a_route_builds_its_peer_and_the_last_route_ends_it() {
     let peer = peers.find(&PeerId(5)).expect("built with the first route");
     // a peer routes link to is not removed on its own
     let at: PeerAt = nitori_driver::structure::Step::new(peer, End);
-    assert!(!d.remove(at, ()));
-    assert!(d.remove(r1, ()));
+    assert_eq!(
+        d.remove(at, ()),
+        Err(RemoveError::LinkedTo {
+            source: LinkedToError
+        })
+    );
+    d.remove(r1, ()).unwrap();
     assert_eq!(log(), ["end Route"]);
-    assert!(d.remove(r2, ()));
+    d.remove(r2, ()).unwrap();
     assert_eq!(log(), ["end Route", "end Peer"]);
     assert!(
         d.root()
@@ -681,7 +686,7 @@ fn old_wakers_after_a_node_goes() {
     let _ = poll(&mut d, &w);
     log();
     let old = stashed("bump").pop().unwrap();
-    assert!(d.remove(p, ()));
+    d.remove(p, ()).unwrap();
     // the old node's waker marks nothing
     old.wake_by_ref();
     let _ = poll(&mut d, &w);

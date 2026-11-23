@@ -1,6 +1,5 @@
 //! The cases the fourth review of the driver found: a node ended while it
-//! is added, a node others link to asking to end itself, why a removal
-//! fails, a move of a grandchild that names the wrong child, and a node
+//! is added, a node others link to asking to end itself, and a node
 //! replaced in the poll that runs its actions.
 #![feature(impl_trait_in_assoc_type)]
 mod common;
@@ -269,7 +268,7 @@ fn a_linked_node_ending_itself_is_refused() {
     let _ = poll(&mut d);
     assert_eq!(ENDED.with(|e| *e.borrow()), Some(Err(LinkedToError)));
     assert!(d.root().unwrap().children.head.find(&1).is_some());
-    assert!(d.remove(route, ()));
+    d.remove(route, ()).unwrap();
     assert!(d.root().unwrap().children.head.find(&1).is_none());
     // one no node links to ends
     d.add::<Entry, _, _, _>(End, 2, ()).unwrap();

@@ -719,9 +719,9 @@ fn a_logical_path_moves_a_recovery_layer_between_its_link_paths() {
         log(),
         [
             "refused",
-            "move: no node at the path to move",
+            "move: no grandchild to move",
             "refused",
-            "move: no node at the new parent's path",
+            "move: no child to move the grandchild to",
             "refused"
         ]
     );

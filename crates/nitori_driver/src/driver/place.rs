@@ -1384,8 +1384,8 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
     /// Take the node out of its parent's store.
     fn detach(root: &mut RootNode<Q>, at: &AddressOf<Q>) -> bool;
     /// Build a node of the place under the parent at `parent`, under `key`
-    /// (of the place's store), and keep it there; `None` when the key is
-    /// taken: nothing is built.
+    /// (of the place's store), and keep it there. The parent is there and
+    /// the key is free: the driver checked both.
     fn add(
         root: &mut RootNode<Q>,
         parent: &AddressOf<Q>,
@@ -1393,7 +1393,7 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         start: StartOf<TargetOf<Q, Pl::At>>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
-    ) -> Result<AddressOf<Q>, super::AddError>;
+    ) -> AddressOf<Q>;
     /// The node of the place kept under `key` under the parent at
     /// `parent`.
     fn find_child(
@@ -1542,16 +1542,18 @@ where
         mut start: StartOf<TargetOf<Q, X>>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
-    ) -> Result<AddressOf<Q>, super::AddError> {
-        if X::find_under(root, parent, &key).is_some() {
-            return Err(super::AddError::occupied());
-        }
-        let pp = X::parent_path(parent).ok_or_else(super::AddError::no_parent)?;
+    ) -> AddressOf<Q> {
+        // Invariant: `parent` is the address of a node of the parent place,
+        // which the driver found live; the tree keeps a node at the
+        // address of each live node.
+        let pp = X::parent_path(parent).expect("the parent's address is of the parent place");
+        // Invariant: as above, the parent is in the tree, and a build lends
+        // only the parent and the nodes around it, which the tree has.
         let node = Self::build(Some(root), &pp, &key, args, &mut start, o)
-            .map_err(|source| super::AddError::Build { source })?;
-        // Invariant: the parent was reached by the build and its key was
-        // free just above.
-        X::attach(root, parent, key, node).ok_or_else(super::AddError::no_parent)
+            .expect("the parent is lent to the new node's build");
+        // Invariant: the parent was reached by the build, and the driver
+        // found its key free; a build adds no node.
+        X::attach(root, parent, key, node).expect("the new node is kept under a free key")
     }
     fn find_child(
         root: &RootNode<Q>,
@@ -1653,8 +1655,8 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: StartOf<RootOf<Q>>,
         _: &ArgsOf<P_<Q>>,
         _: &OutboxOf<Q>,
-    ) -> Result<AddressOf<Q>, super::AddError> {
-        Err(super::AddError::no_parent())
+    ) -> AddressOf<Q> {
+        unreachable!("{NO_PLACE}")
     }
     fn find_child(_: &RootNode<Q>, _: &AddressOf<Q>, _: &()) -> Option<AddressOf<Q>> {
         None

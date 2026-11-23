@@ -9,8 +9,6 @@
 //! matched to a place at run time.
 use core::{convert::Infallible, marker::PhantomData};
 
-use snafu::ResultExt;
-
 use frunk_core::{
     coproduct::{CNil, Coproduct},
     hlist::{HCons, HNil},
@@ -30,13 +28,13 @@ use crate::{
     driver::Place,
     hooks::{EndReasonOf, StartOf},
     request::{
-        AddSnafu, Edit, Editor, EndError, EndSnafu, LinkedToError, NoChildError, NodeRequest,
-        ReplaceError, Request,
+        Edit, Editor, EndError, LinkedToError, MoveGrandchildError, NoChildError, NodeRequest,
+        Request,
         sealed::{ChildEdit, ChildEdits, EditOps, GrandchildEdit, GrandchildEdits},
     },
     structure::{
-        Child, ChildAddresses, ChildList, ChildStorage, End, LinkedStart, MoveError, NoChild,
-        NodeKind, ParentPath, PathFrom, RemainsList, RemainsOf,
+        Child, ChildAddresses, ChildList, ChildStorage, End, LinkedStart, NoChild, NodeKind,
+        OccupiedError, ParentPath, PathFrom, RemainsList, RemainsOf,
     },
 };
 
@@ -73,7 +71,8 @@ pub trait DriverOps {
         reason: EndReasonOf<TargetOf<Self::Q, Pl::At>>,
     );
     /// End the node `id` of the place `Pl` for `reason`, and build one in
-    /// its place under `parent`, with nothing in between.
+    /// its place under `parent`, with nothing in between; returns the new
+    /// one.
     #[allow(clippy::too_many_arguments)]
     fn replace_typed<Pl: PlaceDesc<RootOf<Self::Q>>, Pos: PlaceOps<Self::Q, Pl>>(
         &mut self,
@@ -83,9 +82,9 @@ pub trait DriverOps {
         key: PlaceKeyOf<Self::Q, Pl::At>,
         start: StartOf<TargetOf<Self::Q, Pl::At>>,
         reason: EndReasonOf<TargetOf<Self::Q, Pl::At>>,
-    ) -> Result<usize, AddError>;
+    ) -> usize;
     /// Move the node `id` under the node `to`.
-    fn move_node(&mut self, id: usize, to: usize) -> Result<(), MoveError>;
+    fn move_node(&mut self, id: usize, to: usize) -> Result<(), OccupiedError>;
 }
 
 impl<Q: DriverComposition> DriverOps for Driver<Q>
@@ -138,13 +137,23 @@ where
         key: PlaceKeyOf<Q, Pl::At>,
         start: StartOf<TargetOf<Q, Pl::At>>,
         reason: EndReasonOf<TargetOf<Q, Pl::At>>,
-    ) -> Result<usize, AddError> {
+    ) -> usize {
         self.editing(|d, todo| {
             Driver::end_typed::<Pl, Pos>(d, id, reason, todo);
+            // Invariant: the root is there while a request is handled; the
+            // key was freed just above, and nothing was added since; and
+            // `parent` did not end with the child. A node that ends with
+            // the child is below it, or a linked node no node links to any
+            // more, or below one; for `parent` to be among them, a node
+            // below a linked node would link, through the nodes below the
+            // nodes it links to, back to that linked node. Such a cycle of
+            // links does not compile: the positions of each linked node's
+            // place would hold their own.
             d.add_typed::<Pl, Pos>(p, parent, key, start, todo)
+                .expect("the replacement is built under the parent, under the freed key")
         })
     }
-    fn move_node(&mut self, id: usize, to: usize) -> Result<(), MoveError> {
+    fn move_node(&mut self, id: usize, to: usize) -> Result<(), OccupiedError> {
         self.editing(|d, todo| Driver::move_node(d, id, to, todo))
     }
 }
@@ -216,11 +225,11 @@ where
         key: PlaceKeyOf<Q, Pc::At>,
         start: StartOf<TargetOf<Q, Pc::At>>,
         reason: EndReasonOf<TargetOf<Q, Pc::At>>,
-    ) -> Result<usize, AddError> {
+    ) -> usize {
         self.driver
             .replace_typed::<Pc, Ps>(p, parent, id, key, start, reason)
     }
-    fn move_node(&mut self, id: usize, to: usize) -> Result<(), MoveError> {
+    fn move_node(&mut self, id: usize, to: usize) -> Result<(), OccupiedError> {
         DriverOps::move_node(&mut *self.driver, id, to)
     }
 }
@@ -277,7 +286,7 @@ impl<Q> ChildEdit<Q, NoChild, NoChild> for NoChildPlace {
         key: Infallible,
         _: Infallible,
         _: (),
-    ) -> Result<(), ReplaceError> {
+    ) -> Result<(), EndError> {
         match key {}
     }
 }
@@ -293,7 +302,7 @@ impl<Q, S: ChildStorage> GrandchildEdit<Q, S, NoChild> for NoGrandchildPlace {
         _: &S::Key,
         key: &Infallible,
         _: &S::Key,
-    ) -> Result<(), MoveError> {
+    ) -> Result<(), MoveGrandchildError> {
         match *key {}
     }
 }
@@ -328,12 +337,11 @@ where
         key: S::Key,
         start: CK::Start,
         reason: CK::EndReason,
-    ) -> Result<(), ReplaceError> {
+    ) -> Result<(), EndError> {
         let node = e.node();
-        let id = end_target::<E, Xc, Pc>(e, &key).context(EndSnafu)?;
-        e.replace_typed::<Place<Xc>, Pc>(N::VALUE, node, id, key, start, reason)
-            .map(drop)
-            .context(AddSnafu)
+        let id = end_target::<E, Xc, Pc>(e, &key)?;
+        e.replace_typed::<Place<Xc>, Pc>(N::VALUE, node, id, key, start, reason);
+        Ok(())
     }
 }
 
@@ -399,18 +407,25 @@ where
         from: &S::Key,
         key: &G::Key,
         to: &S::Key,
-    ) -> Result<(), MoveError> {
+    ) -> Result<(), MoveGrandchildError> {
         let node = e.node();
-        let from = e
-            .find_child::<Place<Xc>, Pc>(node, from)
-            .ok_or(MoveError::NoSource)?;
-        let moved = e
-            .find_child::<Place<Xg>, Pg>(from, key)
-            .ok_or(MoveError::NoSource)?;
+        let from =
+            e.find_child::<Place<Xc>, Pc>(node, from)
+                .ok_or(MoveGrandchildError::NoFrom {
+                    source: NoChildError,
+                })?;
+        let moved =
+            e.find_child::<Place<Xg>, Pg>(from, key)
+                .ok_or(MoveGrandchildError::NoGrandchild {
+                    source: NoChildError,
+                })?;
         let to = e
             .find_child::<Place<Xc>, Pc>(node, to)
-            .ok_or(MoveError::NoDestination)?;
+            .ok_or(MoveGrandchildError::NoTo {
+                source: NoChildError,
+            })?;
         e.move_node(moved, to)
+            .map_err(|source| MoveGrandchildError::Occupied { source })
     }
 }
 
@@ -421,19 +436,11 @@ where
 pub trait LinkAdd<Q, K: NodeKind, Key> {
     /// The linked node, built from `start` when it was not there; `None`
     /// for no link.
-    fn ensure<E: DriverOps<Q = Q>>(
-        e: &mut E,
-        key: &Key,
-        start: &mut K::Start,
-    ) -> Result<Option<usize>, AddError>;
+    fn ensure<E: DriverOps<Q = Q>>(e: &mut E, key: &Key, start: &mut K::Start) -> Option<usize>;
 }
 impl<Q, K: NodeKind, Key> LinkAdd<Q, K, Key> for NoLinkPlace {
-    fn ensure<E: DriverOps<Q = Q>>(
-        _: &mut E,
-        _: &Key,
-        _: &mut K::Start,
-    ) -> Result<Option<usize>, AddError> {
-        Ok(None)
+    fn ensure<E: DriverOps<Q = Q>>(_: &mut E, _: &Key, _: &mut K::Start) -> Option<usize> {
+        None
     }
 }
 impl<Q, K, Key, Xb, Pb, N> LinkAdd<Q, K, Key> for LinkPlace<Xb, Pb, N>
@@ -445,18 +452,18 @@ where
     N: Number,
     Pb: PlaceOps<Q, Place<Xb>>,
 {
-    fn ensure<E: DriverOps<Q = Q>>(
-        e: &mut E,
-        key: &Key,
-        start: &mut K::Start,
-    ) -> Result<Option<usize>, AddError> {
+    fn ensure<E: DriverOps<Q = Q>>(e: &mut E, key: &Key, start: &mut K::Start) -> Option<usize> {
         let root = e.root_node();
         if let Some(target) = e.find_child::<Place<Xb>, Pb>(root, key) {
-            return Ok(Some(target));
+            return Some(target);
         }
         let start = K::linked_start(start);
-        e.add_child::<Place<Xb>, Pb>(N::VALUE, root, key.clone(), start)
-            .map(Some)
+        // Invariant: the root is there while nodes are added, and no node
+        // of the place is kept under the key, found just above.
+        let target = e
+            .add_child::<Place<Xb>, Pb>(N::VALUE, root, key.clone(), start)
+            .expect("the linked node is built under the root, under a free key");
+        Some(target)
     }
 }
 
@@ -534,7 +541,7 @@ impl<Q, CK: NodeKind, S: ChildStorage> ChildEdit<Q, CK, S> for NoPlaceEdits {
         _: S::Key,
         _: CK::Start,
         _: CK::EndReason,
-    ) -> Result<(), ReplaceError> {
+    ) -> Result<(), EndError> {
         unreachable!("{NO_PLACE}")
     }
 }
@@ -548,7 +555,7 @@ impl<Q, S: ChildStorage, G: ChildStorage> GrandchildEdit<Q, S, G> for NoPlaceEdi
         _: &S::Key,
         _: &G::Key,
         _: &S::Key,
-    ) -> Result<(), MoveError> {
+    ) -> Result<(), MoveGrandchildError> {
         unreachable!("{NO_PLACE}")
     }
 }
