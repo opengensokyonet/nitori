@@ -501,6 +501,12 @@ pub type CallSlotsOf<Q> = <RootOf<Q> as SlotsUnder<PartsOf<Q>, End>>::Slots;
 /// The calls come from the parts' shares; every position is inferred by
 /// the compiler inside the impl, once. The crate that writes it enables
 /// the nightly feature `impl_trait_in_assoc_type`.
+///
+/// A kind at two places of the structure is refused by a check the
+/// compiler evaluates after it infers the positions. When a component
+/// returns a request for that kind, the inference fails first, as
+/// `E0282 type annotations needed`: on seeing E0282, read the error after
+/// it, the evaluation of that check, which names the kind.
 #[macro_export]
 macro_rules! composition {
     (impl driver for $q:ty: $r:ty, $p:ty, $clock:ty) => {

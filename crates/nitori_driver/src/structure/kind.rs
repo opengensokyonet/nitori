@@ -40,7 +40,9 @@ pub trait NodeKind: 'static + Sized {
 }
 
 /// The kind and the storage kind of the first child of an empty list of
-/// children: there is none, and neither has a value.
+/// children: there is none, and neither has a value. Only a placeholder
+/// for the empty list: a `Child<NoChild, NoChild>` written into a
+/// structure can never be added, since its key and start have no value.
 pub enum NoChild {}
 impl NodeKind for NoChild {
     type Children = HNil;

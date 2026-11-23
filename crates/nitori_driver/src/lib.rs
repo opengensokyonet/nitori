@@ -37,7 +37,7 @@ pub mod __private {
             NthPlace, ParentOf, ParentPlace, PartsOps, Place, PlaceAt, PlaceDesc, PlaceInfo,
             PlaceKey, PlaceKeyOf, PlaceNth, PlaceOps, PlacePack, PlacePositions, PlacePositionsAt,
             PlaceShape, PlacesOf, PlacesUnder, ProveChildPlaces, ProveComp, ProveLinkPlace,
-            ProveParts, ProvePlace, ProvePlaces, SelfParts, ShareOps, prove_places,
+            ProveParts, ProvePlace, ProvePlaces, SameLinkKey, SelfParts, ShareOps, prove_places,
         },
         walk::*,
     };

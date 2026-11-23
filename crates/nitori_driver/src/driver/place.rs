@@ -503,22 +503,35 @@ where
         T::Out,
     >;
 }
-/// The number of the place a node's links (`Self`, its kind's
-/// [`NodeKind::Linked`]) point to, in `Q`'s tree; `I` is inferred.
-pub trait ProveLinkPlace<Q, I> {
+/// The number of the place the links (`Self`, its kind's
+/// [`NodeKind::Linked`]) of the nodes at `X` point to, in `Q`'s tree; `I`
+/// is inferred.
+pub trait ProveLinkPlace<Q, X, I> {
     /// [`LinkPlace`] or [`NoLinkPlace`].
     type Out;
 }
-impl<Q> ProveLinkPlace<Q, ()> for HNil {
+impl<Q, X> ProveLinkPlace<Q, X, ()> for HNil {
     type Out = NoLinkPlace;
 }
 type RootChildAt<Q, L> =
     Step<L, crate::structure::HandleAt<<RootOf<Q> as NodeKind>::Children, L>, End>;
-impl<Q, B, L, N, IB> ProveLinkPlace<Q, (L, N, IB)> for HCons<crate::structure::ByOwnKey<B>, HNil>
+/// A node links by its own key (`Self`) to a node kept under the key type
+/// `K`: the two are the same.
+#[diagnostic::on_unimplemented(
+    message = "a node kept under `{Self}` links to a node kept under `{K}`",
+    label = "the key types of a link differ",
+    note = "the node linked to (`ByOwnKey`) is found by the linking node's own key: the node linked to must be kept under the same type of key as the node linking to it"
+)]
+pub trait SameLinkKey<K> {}
+impl<K> SameLinkKey<K> for K {}
+impl<Q, X, B, L, N, IB> ProveLinkPlace<Q, X, (L, N, IB)>
+    for HCons<crate::structure::ByOwnKey<B>, HNil>
 where
     Q: Composition<Root: PlacesUnder<End>>,
     B: NodeKind,
     <RootOf<Q> as NodeKind>::Children: crate::structure::ChildOfKind<B, L>,
+    X: PlaceKey<RootOf<Q>>,
+    <X as PlaceKey<RootOf<Q>>>::Key: SameLinkKey<PlaceKeyOf<Q, RootChildAt<Q, L>>>,
     PlacesOf<Q>: FindPlace<RootChildAt<Q, L>, N>,
     Place<RootChildAt<Q, L>>: ProvePlace<Q, IB>,
 {
@@ -537,12 +550,12 @@ where
     X: PathFrom<RootOf<Q>>,
     PartsOf<Q>: ProveParts<Q, X, Ip>,
     <TargetOf<Q, X> as NodeKind>::Children: ProveChildPlaces<Q, X, I0, Ic>,
-    <TargetOf<Q, X> as NodeKind>::Linked: ProveLinkPlace<Q, Il>,
+    <TargetOf<Q, X> as NodeKind>::Linked: ProveLinkPlace<Q, X, Il>,
 {
     type Pos = PlacePositions<
         <PartsOf<Q> as ProveParts<Q, X, Ip>>::Out,
         <<TargetOf<Q, X> as NodeKind>::Children as ProveChildPlaces<Q, X, I0, Ic>>::Out,
-        <<TargetOf<Q, X> as NodeKind>::Linked as ProveLinkPlace<Q, Il>>::Out,
+        <<TargetOf<Q, X> as NodeKind>::Linked as ProveLinkPlace<Q, X, Il>>::Out,
     >;
 }
 /// Every place of a list proved (`I`, one variable for the tree); the
