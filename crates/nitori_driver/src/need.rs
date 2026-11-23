@@ -9,7 +9,8 @@
 //! component, exclusive ([`Mut`]) or shared ([`Ref`]), or several
 //! components of every child by key ([`MutList`]); or, with the steps
 //! [`Here`], the instant the driver read when it was last entered
-//! ([`Now`]) or the key the node is kept under ([`OwnKey`]).
+//! ([`Now`]). The key the node is kept under is a need of its own, with no
+//! anchor or steps ([`OwnKey`]).
 //!
 //! A list of needs is proved where it is lent on a concrete structure:
 //! the shape at compile time, the presence of a node reached through an
@@ -74,11 +75,12 @@ pub struct MutList<L>(PhantomData<fn() -> L>);
 /// type `I`, which is its clock's (the composition checks it); only with
 /// the steps [`Here`]. The view has the instant.
 pub struct Now<I>(PhantomData<fn() -> I>);
-/// Take the key the node is kept under in its parent's store, of the type
-/// `K`, which is the key of the node's place (the composition checks it);
-/// only with the steps [`Here`]. The node is the one a hook or a call is
-/// lent at, or the one a `build` builds, whatever the anchor; the root has
-/// no key. The view is `&K`.
+/// The key the node is kept under in its parent's store, of the type `K`,
+/// which is the key of the node's place (the composition checks it). A
+/// need of its own, written in the list of needs as it is, not in an
+/// [`At`]: the node is the one a hook or a call is lent at, or the one a
+/// `build` builds; the keys of the nodes above it are not lent. The root
+/// has no key. The view is `&K`.
 ///
 /// ```
 /// #![feature(impl_trait_in_assoc_type)]
@@ -88,7 +90,7 @@ pub struct Now<I>(PhantomData<fn() -> I>);
 /// #     call::ShareCalls, composition,
 /// #     hooks::{ArgsOf, BuildKeyed, BuildView, Hooks, Part, PartList},
 /// #     lend::KeyedList,
-/// #     need::{At, Here, OwnKey, Up},
+/// #     need::OwnKey,
 /// #     structure::{Child, NodeKind, Share, SlotVec},
 /// # };
 /// # #[derive(Clone, Default)]
@@ -118,7 +120,7 @@ pub struct Now<I>(PhantomData<fn() -> I>);
 /// /// An item reads its key.
 /// struct Keyed;
 /// impl<L: PartList<L> + 'static> Hooks<Base, L, Item> for Keyed {
-///     type Needs = HList![At<Up<0>, Here, OwnKey<u32>>];
+///     type Needs = HList![OwnKey<u32>];
 ///     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Item>>>(
 ///         _: BuildView<'_, Self, Base, L, Item, KP>,
 ///         _: &ArgsOf<L>,
@@ -143,7 +145,7 @@ pub struct Now<I>(PhantomData<fn() -> I>);
 /// #     call::ShareCalls, composition,
 /// #     hooks::{ArgsOf, BuildKeyed, BuildView, Hooks, Part, PartList},
 /// #     lend::KeyedList,
-/// #     need::{At, Here, OwnKey, Up},
+/// #     need::OwnKey,
 /// #     structure::{Child, NodeKind, Share, SlotVec},
 /// # };
 /// # #[derive(Clone, Default)]
@@ -173,7 +175,7 @@ pub struct Now<I>(PhantomData<fn() -> I>);
 /// /// The root reads a key.
 /// struct Keyed;
 /// impl<L: PartList<L> + 'static> Hooks<Base, L, Root> for Keyed {
-///     type Needs = HList![At<Up<0>, Here, OwnKey<u32>>];
+///     type Needs = HList![OwnKey<u32>];
 ///     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Root>>>(
 ///         _: BuildView<'_, Self, Base, L, Root, KP>,
 ///         _: &ArgsOf<L>,
@@ -189,6 +191,61 @@ pub struct Now<I>(PhantomData<fn() -> I>);
 /// ```
 ///
 /// A key of another type than the place's:
+///
+/// ```compile_fail
+/// #![feature(impl_trait_in_assoc_type)]
+/// # use core::time::Duration;
+/// # use frunk_core::{HList, hlist::HNil};
+/// # use nitori_driver::{
+/// #     call::ShareCalls, composition,
+/// #     hooks::{ArgsOf, BuildKeyed, BuildView, Hooks, Part, PartList},
+/// #     lend::KeyedList,
+/// #     need::OwnKey,
+/// #     structure::{Child, NodeKind, Share, SlotVec},
+/// # };
+/// # #[derive(Clone, Default)]
+/// # struct Clock;
+/// # impl nitori_clock::MonotonicClock for Clock {
+/// #     type Instant = Duration;
+/// #     type Sleep = core::future::Pending<()>;
+/// #     fn now(&self) -> Duration { Duration::ZERO }
+/// #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+/// #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+/// #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+/// # }
+/// struct Root;
+/// struct Item;
+/// impl NodeKind for Root {
+///     type Children = HList![Child<Item, SlotVec<u32>>];
+///     type Linked = HNil;
+/// }
+/// impl NodeKind for Item {
+///     type Children = HNil;
+///     type Linked = HNil;
+/// }
+/// # struct Base;
+/// # impl<L> Part<L> for Base { type Args = (); }
+/// # impl ShareCalls<Root> for Base { type Calls = HNil; }
+/// # impl ShareCalls<Item> for Base { type Calls = HNil; }
+/// /// An item reads a key of another type.
+/// struct Keyed;
+/// impl<L: PartList<L> + 'static> Hooks<Base, L, Item> for Keyed {
+///     type Needs = HList![OwnKey<u64>];
+///     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Item>>>(
+///         _: BuildView<'_, Self, Base, L, Item, KP>,
+///         _: &ArgsOf<L>,
+///         _: &mut (),
+///     ) -> Self {
+///         Keyed
+///     }
+/// }
+/// impl Share<Root> for Base { type Data = HList![]; }
+/// impl Share<Item> for Base { type Data = HList![Keyed]; }
+/// struct Q;
+/// composition!(impl driver for Q: Root, HList![Base], Clock);
+/// ```
+///
+/// In an [`At`], with an anchor and steps:
 ///
 /// ```compile_fail
 /// #![feature(impl_trait_in_assoc_type)]
@@ -225,10 +282,10 @@ pub struct Now<I>(PhantomData<fn() -> I>);
 /// # impl<L> Part<L> for Base { type Args = (); }
 /// # impl ShareCalls<Root> for Base { type Calls = HNil; }
 /// # impl ShareCalls<Item> for Base { type Calls = HNil; }
-/// /// An item reads a key of another type.
+/// /// An item reads its key through an anchor.
 /// struct Keyed;
 /// impl<L: PartList<L> + 'static> Hooks<Base, L, Item> for Keyed {
-///     type Needs = HList![At<Up<0>, Here, OwnKey<u64>>];
+///     type Needs = HList![At<Up<0>, Here, OwnKey<u32>>];
 ///     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Item>>>(
 ///         _: BuildView<'_, Self, Base, L, Item, KP>,
 ///         _: &ArgsOf<L>,

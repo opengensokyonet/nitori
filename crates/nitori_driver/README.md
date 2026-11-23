@@ -20,8 +20,9 @@ parts and calls.
 - `need` and `lend`: what a call asks of the tree around its node, as a
   list of needs (an anchor on the way up, steps down, a component taken
   exclusive or shared, or the children of a store by key), proved where the
-  structure is concrete; with no steps, a need reads the instant (`Now`)
-  or the key the node is kept under (`OwnKey`). Needs that overlap do not
+  structure is concrete; with no steps, a need reads the instant (`Now`);
+  the need `OwnKey`, with no anchor or steps, reads the key the node is
+  kept under. Needs that overlap do not
   compile; whether a node
   reached through an at-most-one child or by key is there is an `Option`
   at run time.

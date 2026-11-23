@@ -19,7 +19,7 @@ use nitori_driver::{
     driver::Driver,
     hooks::{ArgsOf, BuildKeyed, BuildView, HookKeys, HookView, Hooks, Part, PartList},
     lend::KeyedList,
-    need::{At, Here, OwnKey, Up},
+    need::OwnKey,
     request::{Edit, Editor, NodeRequest, Request},
     structure::{ByOwnKey, Child, End, KeyAddress, LinkedStart, NodeKind, Share, SlotVec},
 };
@@ -135,8 +135,8 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Root> for Asker {
 /// when built and when it ends.
 pub struct First(Option<Token>);
 impl<L: PartList<L> + 'static> Hooks<Base, L, Item> for First {
-    type Needs = HList![At<Up<0>, Here, OwnKey<u32>>];
-    type BuildNeeds = HList![At<Up<0>, Here, OwnKey<u32>>];
+    type Needs = HList![OwnKey<u32>];
+    type BuildNeeds = HList![OwnKey<u32>];
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Item>>>(
         parents: BuildView<'_, Self, Base, L, Item, KP>,
         _: &ArgsOf<L>,
@@ -169,7 +169,7 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Item> for Second {
 /// A peer's start, and its key.
 pub struct PeerName;
 impl<L: PartList<L> + 'static> Hooks<Base, L, Peer> for PeerName {
-    type BuildNeeds = HList![At<Up<0>, Here, OwnKey<u32>>];
+    type BuildNeeds = HList![OwnKey<u32>];
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Peer>>>(
         parents: BuildView<'_, Self, Base, L, Peer, KP>,
         _: &ArgsOf<L>,
