@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(associated_type_defaults)]
+#![feature(associated_type_defaults, const_trait_impl, const_cmp)]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
@@ -33,11 +33,11 @@ pub mod __private {
         },
         place::{
             BuildAt, ChildPath, ChildPlace, ChildPlaces, CompInfo, CompLend, CompPositions, Detach,
-            FindPlace, LinkPlace, NoLinkPlace, NoPlace, NoPlacePos, NthPlace, ParentOf,
-            ParentPlace, PartsOps, Place, PlaceAt, PlaceDesc, PlaceInfo, PlaceKey, PlaceKeyOf,
-            PlaceNth, PlaceOps, PlacePack, PlacePositions, PlacePositionsAt, PlaceShape, PlacesOf,
-            PlacesUnder, ProveChildPlaces, ProveComp, ProveLinkPlace, ProveParts, ProvePlace,
-            ProvePlaces, SelfParts, ShareOps, prove_places,
+            EndBy, FindPlace, KindNotIn, KindsOnce, LinkPlace, NoLinkPlace, NoPlace, NoPlacePos,
+            NthPlace, ParentOf, ParentPlace, PartsOps, Place, PlaceAt, PlaceDesc, PlaceInfo,
+            PlaceKey, PlaceKeyOf, PlaceNth, PlaceOps, PlacePack, PlacePositions, PlacePositionsAt,
+            PlaceShape, PlacesOf, PlacesUnder, ProveChildPlaces, ProveComp, ProveLinkPlace,
+            ProveParts, ProvePlace, ProvePlaces, SelfParts, ShareOps, prove_places,
         },
         walk::*,
     };

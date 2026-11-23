@@ -1,6 +1,6 @@
 //! The driver's addresses: a string of handles from a node down, typed by
 //! the kinds alone.
-use core::fmt;
+use core::{fmt, marker::PhantomData};
 
 use frunk_core::{
     coproduct::{CNil, Coproduct},
@@ -62,53 +62,92 @@ impl<K: NodeKind> fmt::Debug for Address<K> {
     }
 }
 
-/// The address of a node at or below a node of the kind `K` by the keys
-/// its nodes are kept under, one per level: what a request names the node
-/// it is for by ([`NodeRequest`](crate::request::NodeRequest)).
-///
-/// It follows from the kinds alone, as [`Address`] does; the driver finds
-/// the node by it as the tree is now, so a node ended and built again
-/// under the same key is the same address.
-pub struct KeyAddress<K: NodeKind>(Option<<K::Children as ChildList>::KeyAddr>);
-impl<K: NodeKind> KeyAddress<K> {
-    /// The node itself.
-    pub fn here() -> Self {
-        Self(None)
-    }
-    /// The node at `below` under the child of the kind `CK` kept under
-    /// `key`; the child's position `I` is inferred from its kind.
-    pub fn below<CK: NodeKind, I>(key: KeyAt<K::Children, I>, below: KeyAddress<CK>) -> Self
-    where
-        K::Children: ChildOfKind<CK, I>,
-    {
-        Self(Some(<K::Children as ChildIndex<I>>::inject_key(key, below)))
-    }
-    /// The child of the kind `CK` kept under `key`.
-    pub fn child<CK: NodeKind, I>(key: KeyAt<K::Children, I>) -> Self
-    where
-        K::Children: ChildOfKind<CK, I>,
-    {
-        Self::below::<CK, I>(key, KeyAddress::here())
-    }
-    /// The key address below the node, or `None` for the node itself.
+/// The keys from a node of the kind `K` down to a node at or below it,
+/// one per level, without the kind it leads to: what a [`KeyAddress`]
+/// holds.
+pub struct KeyRoute<K: NodeKind>(Option<<K::Children as ChildList>::KeyAddr>);
+impl<K: NodeKind> KeyRoute<K> {
+    /// The route below the node, or `None` for the node itself.
     pub fn below_here(&self) -> Option<&<K::Children as ChildList>::KeyAddr> {
         self.0.as_ref()
     }
 }
-impl<K: NodeKind> Clone for KeyAddress<K> {
+impl<K: NodeKind> Clone for KeyRoute<K> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
-impl<K: NodeKind> PartialEq for KeyAddress<K> {
+impl<K: NodeKind> PartialEq for KeyRoute<K> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
-impl<K: NodeKind> Eq for KeyAddress<K> {}
-impl<K: NodeKind> fmt::Debug for KeyAddress<K> {
+impl<K: NodeKind> Eq for KeyRoute<K> {}
+
+/// The address of a node of the kind `T` at or below a node of the kind
+/// `K` by the keys its nodes are kept under, one per level: what a request
+/// names the node it is for by ([`NodeRequest`](crate::request::NodeRequest)).
+///
+/// It follows from the kinds alone, as [`Address`] does, and its type says
+/// the kind it leads to, so a request for another kind does not compile.
+/// The driver finds the node by it as the tree is now, so a node ended and
+/// built again under the same key is the same address.
+pub struct KeyAddress<K: NodeKind, T>(KeyRoute<K>, PhantomData<fn() -> T>);
+impl<K: NodeKind> KeyAddress<K, K> {
+    /// The node itself.
+    pub fn here() -> Self {
+        Self(KeyRoute(None), PhantomData)
+    }
+    /// The node at `below`, of the kind `T`, under the child of the kind
+    /// `CK` kept under `key`; the child's position `I` is inferred from its
+    /// kind.
+    pub fn below<CK: NodeKind, I, T>(
+        key: KeyAt<K::Children, I>,
+        below: KeyAddress<CK, T>,
+    ) -> KeyAddress<K, T>
+    where
+        K::Children: ChildOfKind<CK, I>,
+    {
+        KeyAddress(
+            KeyRoute(Some(<K::Children as ChildIndex<I>>::inject_key(
+                key, below.0,
+            ))),
+            PhantomData,
+        )
+    }
+    /// The child of the kind `CK` kept under `key`.
+    pub fn child<CK: NodeKind, I>(key: KeyAt<K::Children, I>) -> KeyAddress<K, CK>
+    where
+        K::Children: ChildOfKind<CK, I>,
+    {
+        Self::below::<CK, I, CK>(key, KeyAddress::here())
+    }
+}
+impl<K: NodeKind, T> KeyAddress<K, T> {
+    /// The keys, without the kind they lead to.
+    pub fn route(&self) -> &KeyRoute<K> {
+        &self.0
+    }
+}
+impl<K: NodeKind, T> Clone for KeyAddress<K, T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone(), PhantomData)
+    }
+}
+impl<K: NodeKind, T> PartialEq for KeyAddress<K, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<K: NodeKind, T> Eq for KeyAddress<K, T> {}
+impl<K: NodeKind, T> fmt::Debug for KeyAddress<K, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "KeyAddress<{}>", core::any::type_name::<K>())
+        write!(
+            f,
+            "KeyAddress<{}, {}>",
+            core::any::type_name::<K>(),
+            core::any::type_name::<T>()
+        )
     }
 }
 
@@ -143,7 +182,7 @@ where
 /// it is there.
 pub fn resolve_node<K: KindFor<P, Children: ChildAddresses<P>>, P>(
     n: &Node<K, P>,
-    key: &KeyAddress<K>,
+    key: &KeyRoute<K>,
 ) -> Option<Address<K>> {
     match &key.0 {
         None => Some(Address::here()),

@@ -505,6 +505,8 @@ pub type CallSlotsOf<Q> = <RootOf<Q> as SlotsUnder<PartsOf<Q>, End>>::Slots;
 macro_rules! composition {
     (impl driver for $q:ty: $r:ty, $p:ty, $clock:ty) => {
         $crate::composition!(@calls $q: $r, $p, $crate::driver::ClockInstantOf<$clock>);
+        // a kind at two places of the structure fails here, naming it
+        const _: () = <$crate::__private::PlacesOf<$q> as $crate::__private::KindsOnce<$r>>::CHECK;
         impl $crate::driver::DriverComposition for $q {
             type Clock = $clock;
             type Remains = $crate::structure::RemainsOf<$p, $r>;

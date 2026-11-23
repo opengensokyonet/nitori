@@ -147,8 +147,10 @@ impl<O: 'static, L: PartList<L, Args: StreamArgsList> + 'static, K: 'static> Hoo
             AbortCause::Panicked => "streams panicked",
         });
     }
-    fn end<KP: HookKeys<Self, O, L, K>>(_: HookView<'_, Self, O, L, K, KP>, _: &EndReasonOf<K>)
-    where
+    fn end<KP: HookKeys<Self, O, L, K>>(
+        _: HookView<'_, Self, O, L, K, KP>,
+        _: nitori_driver::hooks::EndCause<'_, EndReasonOf<K>>,
+    ) where
         K: nitori_driver::structure::NodeKind,
     {
         put("streams end");
@@ -170,7 +172,7 @@ impl<X: Default + 'static, L: PartList<L> + 'static, K: 'static> Hooks<Base, L, 
     }
     fn end<KP: HookKeys<Self, Base, L, K>>(
         _: HookView<'_, Self, Base, L, K, KP>,
-        _: &EndReasonOf<K>,
+        _: nitori_driver::hooks::EndCause<'_, EndReasonOf<K>>,
     ) where
         K: nitori_driver::structure::NodeKind,
     {
@@ -205,7 +207,7 @@ impl<X: Estimator, L: PartList<L> + 'static, K: 'static> Hooks<Base, L, K> for H
     }
     fn end<KP: HookKeys<Self, Base, L, K>>(
         view: HookView<'_, Self, Base, L, K, KP>,
-        _: &EndReasonOf<K>,
+        _: nitori_driver::hooks::EndCause<'_, EndReasonOf<K>>,
     ) where
         K: nitori_driver::structure::NodeKind,
     {

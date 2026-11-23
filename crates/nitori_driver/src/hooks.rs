@@ -181,6 +181,28 @@ pub type BuildKeyed<C, O, L, K> = <<C as Hooks<O, L, K>>::BuildNeeds as Flat>::K
 pub type BuildView<'w, C, O, L, K, KP> = ViewOf<'w, <C as Hooks<O, L, K>>::BuildNeeds, L, KP>;
 /// Why a node of the kind `K` ends.
 pub type EndReasonOf<K> = <K as NodeKind>::EndReason;
+/// Why a node ends, as its components' [`end`](Hooks::end) hooks are told;
+/// `R` is its kind's reason ([`NodeKind::EndReason`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum EndCause<'a, R> {
+    /// Ended for this reason: by a request's edit handle, by
+    /// [`Driver::remove`](crate::driver::Driver::remove) or by
+    /// [`Driver::end`](crate::driver::Driver::end).
+    Reason(&'a R),
+    /// A node above it ended, and it ends with it.
+    Above,
+    /// The last node linking to it ended.
+    Unlinked,
+    /// The driver was dropped before the root ended.
+    Dropped,
+}
+impl<R> Clone for EndCause<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<R> Copy for EndCause<'_, R> {}
+
 /// What a node of the kind `K` is given to start from.
 pub type StartOf<K> = <K as NodeKind>::Start;
 
@@ -279,15 +301,15 @@ pub trait Hooks<O, L: PartList<L>, K>: Sized + 'static {
     {
         let _ = (view, out);
     }
-    /// The node ends, for `reason`: the nodes below it ended, and it is
+    /// The node ends, for `cause`: the nodes below it ended, and it is
     /// still in the tree; the component is dropped afterwards.
     fn end<KP: HookKeys<Self, O, L, K>>(
         view: HookView<'_, Self, O, L, K, KP>,
-        reason: &EndReasonOf<K>,
+        cause: EndCause<'_, EndReasonOf<K>>,
     ) where
         K: NodeKind,
     {
-        let _ = (view, reason);
+        let _ = (view, cause);
     }
 }
 

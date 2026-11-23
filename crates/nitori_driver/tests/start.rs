@@ -146,7 +146,10 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Item> for First {
         put(format!("first {} {key}", start.name));
         First(start.token.take())
     }
-    fn end<KP: HookKeys<Self, Base, L, Item>>(view: HookView<'_, Self, Base, L, Item, KP>, _: &()) {
+    fn end<KP: HookKeys<Self, Base, L, Item>>(
+        view: HookView<'_, Self, Base, L, Item, KP>,
+        _: nitori_driver::hooks::EndCause<'_, ()>,
+    ) {
         let hlist_pat![this, key] = view;
         put(format!("end {key} {:?}", this.0));
     }

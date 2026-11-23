@@ -51,7 +51,7 @@
 //! The links of the structure ([`NodeKind::Linked`]) start and end with the
 //! nodes that link: the first node linking to a node it finds absent has
 //! it built first, under its own key; the last one to end has it ended
-//! after it, for its kind's default reason. A node others link to is not
+//! after it, told so ([`EndCause::Unlinked`]). A node others link to is not
 //! removed on its own.
 //!
 //! A driver dropped before the root ended tells every component that it
@@ -564,6 +564,62 @@
 //! let _ = Driver::<Q>::new(Clock, frunk_core::hlist![()], ());
 //! ```
 //!
+//! A kind at two places of the structure (the leaf under both `A` and `B`):
+//!
+//! ```compile_fail
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use core::time::Duration;
+//! # use frunk_core::{HList, hlist::HNil};
+//! # use nitori_driver::{
+//! #     call::ShareCalls,
+//! #     composition,
+//! #     hooks::Part,
+//! #     structure::{AtMostOne, Child, NodeKind, Share},
+//! # };
+//! # #[derive(Clone, Default)]
+//! # struct Clock;
+//! # impl nitori_clock::MonotonicClock for Clock {
+//! #     type Instant = Duration;
+//! #     type Sleep = core::future::Pending<()>;
+//! #     fn now(&self) -> Duration { Duration::ZERO }
+//! #     fn checked_add(&self, at: Duration, by: Duration) -> Option<Duration> { at.checked_add(by) }
+//! #     fn sleep_until(&self, _: Duration) -> Self::Sleep { core::future::pending() }
+//! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
+//! # }
+//! struct Root;
+//! struct A;
+//! struct B;
+//! struct Leaf;
+//! impl NodeKind for Root {
+//!     type Children = HList![Child<A, AtMostOne>, Child<B, AtMostOne>];
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for A {
+//!     type Children = HList![Child<Leaf, AtMostOne>];
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for B {
+//!     type Children = HList![Child<Leaf, AtMostOne>];
+//!     type Linked = HNil;
+//! }
+//! impl NodeKind for Leaf {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! # struct Base;
+//! # impl<L> Part<L> for Base { type Args = (); }
+//! # impl ShareCalls<Root> for Base { type Calls = HNil; }
+//! # impl ShareCalls<A> for Base { type Calls = HNil; }
+//! # impl ShareCalls<B> for Base { type Calls = HNil; }
+//! # impl ShareCalls<Leaf> for Base { type Calls = HNil; }
+//! # impl Share<Root> for Base { type Data = HNil; }
+//! # impl Share<A> for Base { type Data = HNil; }
+//! # impl Share<B> for Base { type Data = HNil; }
+//! # impl Share<Leaf> for Base { type Data = HNil; }
+//! struct Q;
+//! composition!(impl driver for Q: Root, HList![Base], Clock);
+//! ```
+//!
 //! A subscription whose anchor is not on the way up:
 //!
 //! ```compile_fail
@@ -687,7 +743,7 @@ use walk::{CallWalk, Cursor, Number, PlaceVisit, PlaceWalk, SlotInfo, SlotStore,
 use crate::{
     call::{CallStep, LendOne, OutboxOf, PartsOf, RootOf, SlotCall, SlotDesc, SlotYield},
     event::{Outbox, Scope, Triggered},
-    hooks::{AbortCause, ArgsOf, EndReasonOf, StartOf},
+    hooks::{AbortCause, ArgsOf, EndCause, EndReasonOf, StartOf},
     structure::{
         Address, Append, ChildAddresses, ChildAt, ChildList, ChildOfKind, End, FromAddress,
         HandleAt, KeyAddress, KeyAt, KindFor, LinkList, MoveError, NoParentError, NodeKind,
@@ -1004,15 +1060,16 @@ impl<Q: DriverComposition> PlaceVisit<Q> for Aborted<'_, Q> {
         Pos::aborted(self.root, self.at, self.cause, self.outbox)
     }
 }
-struct EndDefault<'r, Q: DriverComposition> {
+struct EndByAt<'r, Q: DriverComposition> {
     root: &'r mut RootNode<Q>,
     at: &'r AddressOf<Q>,
+    by: place::EndBy,
     outbox: &'r OutboxOf<Q>,
 }
-impl<Q: DriverComposition> PlaceVisit<Q> for EndDefault<'_, Q> {
+impl<Q: DriverComposition> PlaceVisit<Q> for EndByAt<'_, Q> {
     type Out = ();
     fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) {
-        Pos::end_default(self.root, self.at, self.outbox)
+        Pos::end_by(self.root, self.at, self.by, self.outbox)
     }
 }
 struct DetachAt<'r, Q: DriverComposition> {
@@ -1350,7 +1407,7 @@ where
     }
 
     /// Remove the node at `at`, for `reason`, with every node below it
-    /// (each for its kind's default reason), as a request's edit handle
+    /// (each told that a node above ended), as a request's edit handle
     /// does. The root is ended with [`end`](Driver::end). Returns whether
     /// a node was there and was removed: a node others link to is removed
     /// after the last of them, not on its own. A path is by handles, as
@@ -1979,8 +2036,8 @@ where
         self.find(&addr)
     }
     /// The node at the key address `at`.
-    fn find_key(&self, at: &KeyAddress<RootOf<Q>>) -> Option<usize> {
-        let addr = resolve_node(self.root.as_ref()?, at)?;
+    fn find_key<T>(&self, at: &KeyAddress<RootOf<Q>, T>) -> Option<usize> {
+        let addr = resolve_node(self.root.as_ref()?, at.route())?;
         self.find(&addr)
     }
     /// End the node `id` of the place `Pl`, with the nodes below it, for
@@ -1996,7 +2053,8 @@ where
         }
         self.remove_subtree(
             id,
-            |root, at, outbox| Pos::end(root, at, &reason, outbox),
+            |root, at, outbox| Pos::end(root, at, EndCause::Reason(&reason), outbox),
+            place::EndBy::Above,
             todo,
         );
     }
@@ -2030,11 +2088,12 @@ where
     /// End the node `id` with the nodes below it; `own_end` runs the end
     /// hooks of `id` itself. What it reaches goes into `todo`; ending the
     /// root ends the driver. A node that no node links to any more once
-    /// they ended ends after them, for its kind's default reason.
+    /// they ended ends after them, told it was unlinked.
     fn remove_subtree(
         &mut self,
         id: usize,
         own_end: impl FnOnce(&mut RootNode<Q>, &AddressOf<Q>, &OutboxOf<Q>),
+        others: place::EndBy,
         todo: &mut Vec<Hit>,
     ) {
         let mut order = Vec::new();
@@ -2075,9 +2134,10 @@ where
             } else {
                 let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
                     p,
-                    EndDefault::<Q> {
+                    EndByAt::<Q> {
                         root,
                         at: &addr,
+                        by: others,
                         outbox: &self.outbox,
                     },
                 );
@@ -2096,8 +2156,9 @@ where
         }
         self.end_unlinked(unlinked, todo);
     }
-    /// End each of `targets` that is there and no node links to any more,
-    /// for its kind's default reason.
+    /// End each of `targets` that is there and no node links to any more:
+    /// it is told it was unlinked, the nodes below it that one above
+    /// ended.
     fn end_unlinked(&mut self, targets: Vec<usize>, todo: &mut Vec<Hit>) {
         for target in targets {
             let Some(p) = self.live(target).map(|n| n.place) else {
@@ -2111,9 +2172,15 @@ where
                 |root, at, outbox| {
                     let _ = <Cursor<I0> as PlaceWalk<Q>>::visit(
                         p,
-                        EndDefault::<Q> { root, at, outbox },
+                        EndByAt::<Q> {
+                            root,
+                            at,
+                            by: place::EndBy::Unlinked,
+                            outbox,
+                        },
                     );
                 },
+                place::EndBy::Above,
                 todo,
             );
         }
@@ -2418,10 +2485,14 @@ where
             self.remove_subtree(
                 id,
                 |root, at, outbox| {
-                    <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::end_default(
-                        root, at, outbox,
+                    <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::end_by(
+                        root,
+                        at,
+                        place::EndBy::Dropped,
+                        outbox,
                     )
                 },
+                place::EndBy::Dropped,
                 &mut Vec::new(),
             );
         }

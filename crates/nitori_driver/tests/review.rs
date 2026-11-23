@@ -585,3 +585,84 @@ fn an_add_fails_for_its_reason() {
     d.end(());
     assert_eq!(d.add::<A, _, _, _>(End, 2, ()).err(), Some(AddError::Ended));
 }
+
+// ---------------------------------------------------------------- why a node ends
+
+mod causes {
+    use super::*;
+    use nitori_driver::hooks::{EndCause, EndReasonOf};
+
+    pub struct Root;
+    pub struct Layer;
+    impl NodeKind for Root {
+        type Children = HList![Child<Layer, AtMostOne>];
+        type Linked = HNil;
+        type EndReason = &'static str;
+    }
+    impl NodeKind for Layer {
+        type Children = HNil;
+        type Linked = HNil;
+        type EndReason = u8;
+    }
+    impl ShareCalls<Root> for Base {
+        type Calls = HNil;
+    }
+    impl ShareCalls<Layer> for Base {
+        type Calls = HNil;
+    }
+    impl Share<Root> for Base {
+        type Data = HList![Told<Root>];
+    }
+    impl Share<Layer> for Base {
+        type Data = HList![Told<Layer>];
+    }
+    thread_local! {
+        pub static TOLD: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+    /// Says why its node ended.
+    pub struct Told<K>(core::marker::PhantomData<fn() -> K>);
+    impl<L: PartList<L> + 'static, K: NodeKind<EndReason: core::fmt::Debug>> Hooks<Base, L, K>
+        for Told<K>
+    {
+        fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, K>>>(
+            _: BuildView<'_, Self, Base, L, K, KP>,
+            _: &ArgsOf<L>,
+            _: &mut nitori_driver::hooks::StartOf<K>,
+        ) -> Self
+        where
+            K: NodeKind,
+        {
+            Told(core::marker::PhantomData)
+        }
+        fn end<KP: HookKeys<Self, Base, L, K>>(
+            _: HookView<'_, Self, Base, L, K, KP>,
+            cause: EndCause<'_, EndReasonOf<K>>,
+        ) {
+            TOLD.with(|t| t.borrow_mut().push(format!("{cause:?}")));
+        }
+    }
+    pub struct Q;
+    composition!(impl driver for Q: Root, HList![Base], TestClock);
+    pub fn told() -> Vec<String> {
+        TOLD.with(|t| core::mem::take(&mut *t.borrow_mut()))
+    }
+}
+
+/// A node ends for the reason it is given, because the node above it
+/// ended, or because the driver was dropped; a linked node that its last
+/// linking node ended is told so (see the requests' tests).
+#[test]
+fn a_node_is_told_why_it_ends() {
+    use causes::*;
+    let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
+    let layer = d.add::<Layer, _, _, _>(End, (), ()).unwrap();
+    assert!(d.remove(layer, 7));
+    assert_eq!(told(), ["Reason(7)"]);
+    d.add::<Layer, _, _, _>(End, (), ()).unwrap();
+    d.end("closed");
+    assert_eq!(told(), ["Above", "Reason(\"closed\")"]);
+    let mut d = Driver::<Q>::new(TestClock::default(), frunk_core::hlist![()], ()).unwrap();
+    d.add::<Layer, _, _, _>(End, (), ()).unwrap();
+    drop(d);
+    assert_eq!(told(), ["Dropped", "Dropped"]);
+}

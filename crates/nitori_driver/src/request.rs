@@ -9,8 +9,8 @@
 //! what the structure says goes with them: building and ending the nodes
 //! others link to, the order of removal, the end hooks with the reason.
 //!
-//! A request names its node by its key address from the root
-//! ([`NodeRequest`]). What a call yields ([`CallKind::Yield`](crate::call::CallKind::Yield))
+//! A request names its node by its key address from the root, whose type
+//! says the kind it leads to ([`NodeRequest`], [`KeyAddress`]). What a call yields ([`CallKind::Yield`](crate::call::CallKind::Yield))
 //! or a hook returns ([`Hooks::Returns`](crate::hooks::Hooks::Returns)) is
 //! one request of a kind of the structure, a sum of some of them, or
 //! `Infallible`; it goes into the sum of every kind's requests the
@@ -186,6 +186,36 @@
 //! }
 //! struct Q;
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
+//! ```
+//!
+//! A request names its node by an address of the node's kind; an address
+//! that leads to another kind does not compile:
+//!
+//! ```compile_fail
+//! use frunk_core::{HList, hlist::HNil};
+//! use nitori_driver::{
+//!     request::{Edit, Editor, NodeRequest, Request},
+//!     structure::{AtMostOne, Child, KeyAddress, NodeKind},
+//! };
+//! struct Root;
+//! struct Layer;
+//! impl NodeKind for Root {
+//!     type Children = HList![Child<Layer, AtMostOne>];
+//!     type Linked = HNil;
+//!     type Request = AddLayer;
+//! }
+//! impl NodeKind for Layer {
+//!     type Children = HNil;
+//!     type Linked = HNil;
+//! }
+//! struct AddLayer;
+//! impl Request<Root> for AddLayer {
+//!     fn apply<E: Editor<Root>>(self, mut edit: Edit<'_, E, Root>) {
+//!         let _ = edit.add::<Layer, _>((), ());
+//!     }
+//! }
+//! // the root's request, at the layer's address
+//! let _ = NodeRequest::<Root, Root>::new(KeyAddress::child::<Layer, _>(()), AddLayer);
 //! ```
 //!
 //! A kind handles its requests on its own subtree; another subtree is not
@@ -529,16 +559,16 @@ pub enum ReplaceError {
 }
 
 /// A request for the node of the kind `K` at the key address `at` from the
-/// root, of the kind `R`.
+/// root, of the kind `R`; the address leads to a node of the kind `K`.
 pub struct NodeRequest<R: NodeKind, K: NodeKind> {
     /// The node it is for.
-    pub at: KeyAddress<R>,
+    pub at: KeyAddress<R, K>,
     /// What it asks.
     pub request: K::Request,
 }
 impl<R: NodeKind, K: NodeKind> NodeRequest<R, K> {
     /// The request `request` for the node at `at`.
-    pub fn new(at: KeyAddress<R>, request: K::Request) -> Self {
+    pub fn new(at: KeyAddress<R, K>, request: K::Request) -> Self {
         Self { at, request }
     }
 }

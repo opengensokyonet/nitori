@@ -27,8 +27,8 @@ use nitori_driver::{
     driver::Driver,
     event::{Hear, NodeStarted, Triggered},
     hooks::{
-        ArgsOf, BuildKeyed, BuildView, EndReasonOf, HasDeadline, HookKeys, HookView, Hooks, Part,
-        PartList, StartOf, Timed,
+        ArgsOf, BuildKeyed, BuildView, EndCause, EndReasonOf, HasDeadline, HookKeys, HookView,
+        Hooks, Part, PartList, StartOf, Timed,
     },
     lend::KeyedList,
     need::{At, Here, Kind, MyLink, Now, Ref, ToChild, Up},
@@ -226,11 +226,11 @@ pub type Sent = Coprod!(
 fn to_conn(r: ConnRequest) -> Sent {
     Coproduct::Inl(NodeRequest::new(KeyAddress::here(), r))
 }
-fn path(k: u32) -> KeyAddress<Conn> {
+fn path(k: u32) -> KeyAddress<Conn, LogicalPath> {
     KeyAddress::child::<LogicalPath, _>(PathKey(k))
 }
-fn link(k: u32, l: u32) -> KeyAddress<Conn> {
-    KeyAddress::below::<LogicalPath, _>(PathKey(k), KeyAddress::child::<LinkPath, _>(LinkId(l)))
+fn link(k: u32, l: u32) -> KeyAddress<Conn, LinkPath> {
+    KeyAddress::below::<LogicalPath, _, _>(PathKey(k), KeyAddress::child::<LinkPath, _>(LinkId(l)))
 }
 fn to_path(k: u32, r: PathRequest) -> Sent {
     Coproduct::Inr(Coproduct::Inl(NodeRequest::new(path(k), r)))
@@ -285,9 +285,15 @@ impl<L: PartList<L> + 'static, K: Name + NodeKind<EndReason: Debug>> Hooks<Base,
     }
     fn end<KP: HookKeys<Self, Base, L, K>>(
         _: HookView<'_, Self, Base, L, K, KP>,
-        reason: &EndReasonOf<K>,
+        cause: EndCause<'_, EndReasonOf<K>>,
     ) {
-        put(format!("end {} {:?}", K::NAME, reason));
+        let cause = match cause {
+            EndCause::Reason(r) => format!("{r:?}"),
+            EndCause::Above => "above".into(),
+            EndCause::Unlinked => "unlinked".into(),
+            EndCause::Dropped => "dropped".into(),
+        };
+        put(format!("end {} {cause}", K::NAME));
     }
 }
 
@@ -533,9 +539,9 @@ fn the_connection_adds_and_ends_logical_paths() {
         [
             "build Entry",
             "build LinkPath",
-            "end LinkPath ()",
+            "end LinkPath above",
             "end LogicalPath ()",
-            "end Entry ()",
+            "end Entry unlinked",
             "refused"
         ]
     );
@@ -564,7 +570,7 @@ fn a_logical_path_adds_and_ends_its_link_paths() {
     assert_eq!(recoveries(&d, 1), [(1, false), (2, false)]);
     script([to_path(1, PathRequest::EndLinkPath(LinkId(1)))]);
     let _ = run(&mut d);
-    assert_eq!(log(), ["end LinkPath ()", "end Entry ()"]);
+    assert_eq!(log(), ["end LinkPath ()", "end Entry unlinked"]);
     assert_eq!(recoveries(&d, 1), [(2, false)]);
 }
 
@@ -600,7 +606,11 @@ fn an_entry_starts_with_the_first_link_path_over_it_and_ends_with_the_last() {
     let _ = run(&mut d);
     assert_eq!(
         log(),
-        ["end LinkPath ()", "end LogicalPath ()", "end Entry ()"]
+        [
+            "end LinkPath above",
+            "end LogicalPath ()",
+            "end Entry unlinked"
+        ]
     );
     assert!(entries(&d).is_empty());
 }
@@ -745,11 +755,11 @@ fn the_connection_ends_itself() {
     assert_eq!(
         log(),
         [
-            "end Established ConnectionClosed",
-            "end Recovery ()",
-            "end LinkPath ()",
-            "end LogicalPath ()",
-            "end Entry ()",
+            "end Established above",
+            "end Recovery above",
+            "end LinkPath above",
+            "end LogicalPath above",
+            "end Entry above",
             "end Conn ()"
         ]
     );
@@ -932,7 +942,7 @@ mod http_like {
             [
                 "before the calls at 5",
                 "drained",
-                "end Body ()",
+                "end Body above",
                 "end Stream ()"
             ]
         );

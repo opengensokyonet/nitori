@@ -21,8 +21,8 @@ use crate::{
     call::{ChainAt, Composition, LendInstant, OutboxOf, PartsOf, RootOf},
     event::{NodeEnding, NodeStarted, Outbox, OwnPlace, Subscription, Subscriptions, Triggered},
     hooks::{
-        AbortCause, ArgsOf, BuildKeyed, BuildView, EndReasonOf, HookKeys, HookView, Hooks,
-        OwnNeeds, PartList, StartOf, Timing,
+        AbortCause, ArgsOf, BuildKeyed, BuildView, EndCause, EndReasonOf, HookKeys, HookView,
+        Hooks, OwnNeeds, PartList, StartOf, Timing,
     },
     lend::{Flat, FromSplit, GivenKey, KeyedList, LendAt, LendError, NeedSet, ViewOf, Writes},
     need::ChainOf,
@@ -105,6 +105,49 @@ where
 }
 /// Every place of the tree of `Q`, in tree order; the root's is first.
 pub type PlacesOf<Q> = <RootOf<Q> as PlacesUnder<End>>::Out;
+
+/// Whether `A` and `B` are one type, at compile time.
+const fn same_type<A: 'static, B: 'static>() -> bool {
+    TypeId::of::<A>() == TypeId::of::<B>()
+}
+/// Every kind of the places `Self` of a tree whose root is of the kind `R`
+/// is at one place only: a kind is not a child in two places. The
+/// composition evaluates [`CHECK`](KindsOnce::CHECK); a kind at two places
+/// fails it, and the error names the list and the kind.
+pub trait KindsOnce<R: NodeKind> {
+    /// Evaluates only when every kind is at one place.
+    const CHECK: ();
+}
+impl<R: NodeKind> KindsOnce<R> for HNil {
+    const CHECK: () = ();
+}
+impl<R: NodeKind, X: PathFrom<R>, T: KindsOnce<R> + KindNotIn<R, X::Target>> KindsOnce<R>
+    for HCons<Place<X>, T>
+{
+    const CHECK: () = {
+        let () = <T as KindNotIn<R, X::Target>>::CHECK;
+        <T as KindsOnce<R>>::CHECK
+    };
+}
+/// The kind `K` is at none of the places `Self`.
+pub trait KindNotIn<R: NodeKind, K> {
+    /// Evaluates only when `K` is at none of them.
+    const CHECK: ();
+}
+impl<R: NodeKind, K> KindNotIn<R, K> for HNil {
+    const CHECK: () = ();
+}
+impl<R: NodeKind, K: 'static, X: PathFrom<R>, T: KindNotIn<R, K>> KindNotIn<R, K>
+    for HCons<Place<X>, T>
+{
+    const CHECK: () = {
+        assert!(
+            !same_type::<K, X::Target>(),
+            "a node kind is at two places of the structure: give each place its own kind"
+        );
+        T::CHECK
+    };
+}
 
 /// A list of places as head and tail (the empty list: [`NoPlace`] and
 /// itself).
@@ -638,7 +681,12 @@ pub trait ShareOps<
         o: &OutboxOf<Q>,
     ) -> Option<Option<RequestsOf<Q>>>;
     fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>);
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>);
+    fn end(
+        root: &mut RootNode<Q>,
+        at: X,
+        cause: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
+        o: &OutboxOf<Q>,
+    );
     fn remains(
         root: &mut RootNode<Q>,
         at: X,
@@ -698,7 +746,13 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf
         None
     }
     fn aborted(_: &mut RootNode<Q>, _: X, _: AbortCause, _: &OutboxOf<Q>) {}
-    fn end(_: &mut RootNode<Q>, _: X, _: &EndReasonOf<TargetOf<Q, X>>, _: &OutboxOf<Q>) {}
+    fn end(
+        _: &mut RootNode<Q>,
+        _: X,
+        _: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
+        _: &OutboxOf<Q>,
+    ) {
+    }
     fn remains(
         _: &mut RootNode<Q>,
         _: X,
@@ -837,14 +891,19 @@ where
         ));
         SP::aborted(root, at, cause, o);
     }
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>) {
+    fn end(
+        root: &mut RootNode<Q>,
+        at: X,
+        cause: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
+        o: &OutboxOf<Q>,
+    ) {
         lent(<CP as CompLend<'_, Q, X, O, C>>::lend(
             root,
             at,
             o,
-            |view| C::end(view, reason),
+            |view| C::end(view, cause),
         ));
-        SP::end(root, at, reason, o);
+        SP::end(root, at, cause, o);
     }
     fn remains(
         root: &mut RootNode<Q>,
@@ -909,7 +968,12 @@ pub trait PartsOps<
         o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
     fn aborted(root: &mut RootNode<Q>, at: X, cause: AbortCause, o: &OutboxOf<Q>);
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>);
+    fn end(
+        root: &mut RootNode<Q>,
+        at: X,
+        cause: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
+        o: &OutboxOf<Q>,
+    );
     fn remains(
         root: &mut RootNode<Q>,
         at: X,
@@ -962,7 +1026,13 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf
         None
     }
     fn aborted(_: &mut RootNode<Q>, _: X, _: AbortCause, _: &OutboxOf<Q>) {}
-    fn end(_: &mut RootNode<Q>, _: X, _: &EndReasonOf<TargetOf<Q, X>>, _: &OutboxOf<Q>) {}
+    fn end(
+        _: &mut RootNode<Q>,
+        _: X,
+        _: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
+        _: &OutboxOf<Q>,
+    ) {
+    }
     fn remains(_: &mut RootNode<Q>, _: X, _: &mut HNil, _: &OutboxOf<Q>) {}
 }
 impl<Q, X, O, Ps, SP, PL> PartsOps<Q, X, HCons<O, Ps>> for HCons<SP, PL>
@@ -1037,9 +1107,14 @@ where
         SP::aborted(root, at, cause, o);
         PL::aborted(root, at, cause, o);
     }
-    fn end(root: &mut RootNode<Q>, at: X, reason: &EndReasonOf<TargetOf<Q, X>>, o: &OutboxOf<Q>) {
-        SP::end(root, at, reason, o);
-        PL::end(root, at, reason, o);
+    fn end(
+        root: &mut RootNode<Q>,
+        at: X,
+        cause: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
+        o: &OutboxOf<Q>,
+    ) {
+        SP::end(root, at, cause, o);
+        PL::end(root, at, cause, o);
     }
     fn remains(
         root: &mut RootNode<Q>,
@@ -1053,6 +1128,28 @@ where
 }
 
 // ---------------------------------------------------------------- a place's hooks
+
+/// Why a node ends when no reason of its kind's is given: the causes of
+/// [`EndCause`] but its reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndBy {
+    /// A node above it ended.
+    Above,
+    /// The last node linking to it ended.
+    Unlinked,
+    /// The driver was dropped.
+    Dropped,
+}
+impl EndBy {
+    /// The cause for a kind whose reason is `R`.
+    pub fn cause<'a, R>(self) -> EndCause<'a, R> {
+        match self {
+            Self::Above => EndCause::Above,
+            Self::Unlinked => EndCause::Unlinked,
+            Self::Dropped => EndCause::Dropped,
+        }
+    }
+}
 
 /// Taking the node at a path out of its parent's store; the root is not
 /// taken out this way.
@@ -1268,15 +1365,15 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         o: &OutboxOf<Q>,
     ) -> Option<RequestsOf<Q>>;
     fn aborted(root: &mut RootNode<Q>, at: &AddressOf<Q>, cause: AbortCause, o: &OutboxOf<Q>);
-    /// Every component's end, for `reason`.
+    /// Every component's end, for `cause`.
     fn end(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
-        reason: &EndReasonOf<TargetOf<Q, Pl::At>>,
+        cause: EndCause<'_, EndReasonOf<TargetOf<Q, Pl::At>>>,
         o: &OutboxOf<Q>,
     );
-    /// Every component's end, for the kind's default reason.
-    fn end_default(root: &mut RootNode<Q>, at: &AddressOf<Q>, o: &OutboxOf<Q>);
+    /// Every component's end, for a cause that carries no reason.
+    fn end_by(root: &mut RootNode<Q>, at: &AddressOf<Q>, by: EndBy, o: &OutboxOf<Q>);
     fn remains(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
@@ -1413,15 +1510,15 @@ where
     fn end(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
-        reason: &EndReasonOf<TargetOf<Q, X>>,
+        cause: EndCause<'_, EndReasonOf<TargetOf<Q, X>>>,
         o: &OutboxOf<Q>,
     ) {
         if let Some(at) = X::from_address(at) {
-            PL::end(root, at, reason, o);
+            PL::end(root, at, cause, o);
         }
     }
-    fn end_default(root: &mut RootNode<Q>, at: &AddressOf<Q>, o: &OutboxOf<Q>) {
-        Self::end(root, at, &Default::default(), o);
+    fn end_by(root: &mut RootNode<Q>, at: &AddressOf<Q>, by: EndBy, o: &OutboxOf<Q>) {
+        Self::end(root, at, by.cause(), o);
     }
     fn remains(
         root: &mut RootNode<Q>,
@@ -1529,8 +1626,14 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         None
     }
     fn aborted(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: AbortCause, _: &OutboxOf<Q>) {}
-    fn end(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &EndReasonOf<RootOf<Q>>, _: &OutboxOf<Q>) {}
-    fn end_default(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: &OutboxOf<Q>) {}
+    fn end(
+        _: &mut RootNode<Q>,
+        _: &AddressOf<Q>,
+        _: EndCause<'_, EndReasonOf<RootOf<Q>>>,
+        _: &OutboxOf<Q>,
+    ) {
+    }
+    fn end_by(_: &mut RootNode<Q>, _: &AddressOf<Q>, _: EndBy, _: &OutboxOf<Q>) {}
     fn remains(
         _: &mut RootNode<Q>,
         _: &AddressOf<Q>,

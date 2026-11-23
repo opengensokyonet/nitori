@@ -8,7 +8,7 @@ use frunk_core::{
     indices::{Here, There},
 };
 
-use super::{Address, ChildStorage, KeyAddress};
+use super::{Address, ChildStorage, KeyRoute};
 use crate::request::Request;
 
 /// A kind of node: the kinds of its children and the nodes it links to.
@@ -21,10 +21,13 @@ pub trait NodeKind: 'static + Sized {
     /// The nodes a node of this kind links to, an `HList` of [`Link`]s
     /// (`HNil` for none).
     type Linked: LinkList<Self>;
-    /// Why a node of this kind ends, as its components' end hooks are told
-    /// ([`Hooks::end`](crate::hooks::Hooks::end)); `()` by default. A node
-    /// that ends because a node above it ends is told the default.
-    type EndReason: Default + 'static = ();
+    /// Why a node of this kind is asked to end, as its components' end
+    /// hooks are told ([`Hooks::end`](crate::hooks::Hooks::end),
+    /// [`EndCause::Reason`](crate::hooks::EndCause::Reason)); `()` by
+    /// default. A node that ends because a node above it ends, because no
+    /// node links to it any more or because the driver was dropped is told
+    /// so instead.
+    type EndReason: 'static = ();
     /// What the one adding a node of this kind gives it to start from,
     /// handed to every component's [`build`](crate::hooks::Hooks::build)
     /// in turn; `()` by default. A component takes out what it keeps of
@@ -118,7 +121,7 @@ impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildList for HCons<Child<K, S>
     type HeadStorage = S;
     type Tail = T;
     type Addr = Coproduct<(S::Handle, Address<K>), T::Addr>;
-    type KeyAddr = Coproduct<(S::Key, KeyAddress<K>), T::KeyAddr>;
+    type KeyAddr = Coproduct<(S::Key, KeyRoute<K>), T::KeyAddr>;
     fn link_targets(out: &mut Vec<TypeId>) {
         K::Linked::targets(out);
         K::Children::link_targets(out);
@@ -162,7 +165,7 @@ pub trait ChildIndex<I>: ChildList {
     /// the child kept under `key`.
     fn inject_key(
         key: <Self::Storage as ChildStorage>::Key,
-        below: KeyAddress<Self::Kind>,
+        below: KeyRoute<Self::Kind>,
     ) -> Self::KeyAddr;
 }
 impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildIndex<Here> for HCons<Child<K, S>, T> {
@@ -177,7 +180,7 @@ impl<K: NodeKind, S: ChildStorage, T: ChildList> ChildIndex<Here> for HCons<Chil
             Coproduct::Inr(_) => None,
         }
     }
-    fn inject_key(key: S::Key, below: KeyAddress<K>) -> Self::KeyAddr {
+    fn inject_key(key: S::Key, below: KeyRoute<K>) -> Self::KeyAddr {
         Coproduct::Inl((key, below))
     }
 }
@@ -199,7 +202,7 @@ impl<I, K: NodeKind, S: ChildStorage, T: ChildIndex<I>> ChildIndex<There<I>>
     }
     fn inject_key(
         key: <T::Storage as ChildStorage>::Key,
-        below: KeyAddress<T::Kind>,
+        below: KeyRoute<T::Kind>,
     ) -> Self::KeyAddr {
         Coproduct::Inr(T::inject_key(key, below))
     }

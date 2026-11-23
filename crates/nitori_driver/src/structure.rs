@@ -19,7 +19,7 @@ mod node;
 mod path;
 mod storage;
 
-pub use address::{Address, ChildAddresses, KeyAddress, resolve_node};
+pub use address::{Address, ChildAddresses, KeyAddress, KeyRoute, resolve_node};
 pub use edit::{
     InsertError, LastChildren, LastKind, MoveError, NoParentError, OccupiedError, ParentChildren,
     insert, move_to, remove,

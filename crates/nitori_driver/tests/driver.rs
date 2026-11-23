@@ -115,7 +115,7 @@ macro_rules! end_logged {
     ($name:literal) => {
         fn end<KP: HookKeys<Self, Base, L, K_>>(
             _: HookView<'_, Self, Base, L, K_, KP>,
-            _: &EndReasonOf<K_>,
+            _: nitori_driver::hooks::EndCause<'_, EndReasonOf<K_>>,
         ) {
             put(concat!("end ", $name));
         }
