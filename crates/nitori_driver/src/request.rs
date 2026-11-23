@@ -67,7 +67,7 @@
 //! struct AddLayer;
 //! impl Request<Root> for AddLayer {
 //!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
-//!         edit.add::<Layer, _>(());
+//!         edit.add::<Layer, _>((), ());
 //!     }
 //! }
 //! # struct Part1;
@@ -91,7 +91,7 @@
 //! impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Starter {
 //!     const ACTS_BEFORE_CALLS: bool = true;
 //!     type Returns = NodeRequest<Root, Root>;
-//! #   fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #   fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #       Starter
 //! #   }
 //!     fn before_calls<KP: HookKeys<Self, Part1, L, Root>>(
@@ -104,7 +104,7 @@
 //! struct Q;
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
 //!
-//! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()]).unwrap();
+//! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()], ()).unwrap();
 //! let _ = Pin::new(&mut driver).poll(&mut Context::from_waker(Waker::noop()));
 //! assert!(driver.root().unwrap().children.head.is_some());
 //! ```
@@ -154,7 +154,7 @@
 //! struct AddLayer;
 //! impl Request<Root> for AddLayer {
 //!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Root>) {
-//!         edit.add::<Layer, _>(());
+//!         edit.add::<Layer, _>((), ());
 //!     }
 //! }
 //! # struct Part1;
@@ -178,7 +178,7 @@
 //! impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Starter {
 //!     const ACTS_BEFORE_CALLS: bool = true;
 //!     type Returns = NodeRequest<Root, Other>;
-//! #   fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #   fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #       Starter
 //! #   }
 //! }
@@ -215,7 +215,7 @@
 //! struct AddRight;
 //! impl Request<Left> for AddRight {
 //!     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Left>) {
-//!         edit.add::<Right, _>(());
+//!         edit.add::<Right, _>((), ());
 //!     }
 //! }
 //! ```
@@ -251,8 +251,14 @@ pub(crate) mod sealed {
     /// What the driver does for an edit handle, by node number.
     pub trait EditOps {
         /// Add the child at the position `child` of the node `node`, under
-        /// `key`; `false` when the key is taken.
-        fn add_child<KK: Clone + 'static>(&mut self, node: usize, child: usize, key: KK) -> bool;
+        /// `key`, from `start`; `false` when the key is taken.
+        fn add_child<KK: Clone + 'static>(
+            &mut self,
+            node: usize,
+            child: usize,
+            key: KK,
+            start: alloc::boxed::Box<dyn core::any::Any>,
+        ) -> bool;
         /// End the child at `child` kept under `key`, for `reason`;
         /// `false` when none is there or others link to it.
         fn end_child<KK: 'static, RR: 'static>(
@@ -269,6 +275,7 @@ pub(crate) mod sealed {
             node: usize,
             child: usize,
             key: KK,
+            start: alloc::boxed::Box<dyn core::any::Any>,
             reason: RR,
         ) -> bool;
         /// Move the grandchild at `grandchild` kept under `key` from the
@@ -320,14 +327,19 @@ impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
             _kind: PhantomData,
         }
     }
-    /// Build a child of the kind `CK` under `key`; its position `I` is
-    /// inferred from its kind. `false` when a child of the kind is kept
-    /// under the key: nothing is built.
-    pub fn add<CK: NodeKind, I: Number>(&mut self, key: KeyAt<K::Children, I>) -> bool
+    /// Build a child of the kind `CK` under `key`, starting from `start`;
+    /// its position `I` is inferred from its kind. `false` when a child of
+    /// the kind is kept under the key: nothing is built.
+    pub fn add<CK: NodeKind, I: Number>(
+        &mut self,
+        key: KeyAt<K::Children, I>,
+        start: CK::Start,
+    ) -> bool
     where
         K::Children: ChildOfKind<CK, I>,
     {
-        self.editor.add_child(self.node, I::VALUE, key)
+        self.editor
+            .add_child(self.node, I::VALUE, key, alloc::boxed::Box::new(start))
     }
     /// End the child of the kind `CK` kept under `key`, with the nodes
     /// below it, for `reason`. `false` when none is there, or when nodes
@@ -343,18 +355,25 @@ impl<'e, E: Editor, K: NodeKind> Edit<'e, E, K> {
         self.editor.end_child(self.node, I::VALUE, key, reason)
     }
     /// End the child of the kind `CK` kept under `key` for `reason` and
-    /// build a new one in its place, with nothing in between: no call is
-    /// polled and no event is handled before the new one is built. `false`
-    /// when none is there: none is built.
+    /// build a new one in its place from `start`, with nothing in between:
+    /// no call is polled and no event is handled before the new one is
+    /// built. `false` when none is there: none is built.
     pub fn replace<CK: NodeKind, I: Number>(
         &mut self,
         key: KeyAt<K::Children, I>,
+        start: CK::Start,
         reason: CK::EndReason,
     ) -> bool
     where
         K::Children: ChildOfKind<CK, I>,
     {
-        self.editor.replace_child(self.node, I::VALUE, key, reason)
+        self.editor.replace_child(
+            self.node,
+            I::VALUE,
+            key,
+            alloc::boxed::Box::new(start),
+            reason,
+        )
     }
     /// Move the grandchild of the kind `GK` kept under `key`, with the
     /// nodes below it, from the child of the kind `CK` kept under `from`

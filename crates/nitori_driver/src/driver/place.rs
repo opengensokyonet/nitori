@@ -8,7 +8,7 @@
 //! and its `build` the [`Hooks::BuildNeeds`] at the parent's place, and its
 //! subscriptions are resolved at the place. [`composition!`](crate::composition)
 //! proves them all once, into the opaque [`DriverComposition::Places`].
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{any::TypeId, marker::PhantomData, ops::Add, task::Waker};
 
 use frunk_core::{
@@ -22,15 +22,15 @@ use crate::{
     event::{NodeEnding, NodeStarted, Outbox, OwnPlace, Subscription, Subscriptions, Triggered},
     hooks::{
         AbortCause, ArgsOf, BuildKeyed, BuildView, EndReasonOf, HookKeys, HookView, Hooks,
-        OwnNeeds, PartList, Timing,
+        OwnNeeds, PartList, StartOf, Timing,
     },
-    lend::{Flat, KeyedList, LendAt, LendError, NeedSet, ViewOf, Writes},
+    lend::{Flat, FromSplit, GivenKey, KeyedList, LendAt, LendError, NeedSet, ViewOf, Writes},
     need::ChainOf,
     request::{IntoRequestSum, PlaceRequests, RequestSumOf},
     structure::{
-        Address, Append, Child, ChildAt, ChildStorage, End, FromAddress, KindFor, LastChildren,
-        MoveError, Node, NodeKind, NodePath, ParentPath, PathFrom, RemainsList, RemainsOf, Share,
-        Shares, SplitLast, Step, Store, move_to, remove,
+        Address, Append, Child, ChildAt, ChildIndex, ChildStorage, End, FromAddress, KeyAt,
+        KindFor, LastChildren, MoveError, Node, NodeKind, NodePath, ParentPath, PathFrom,
+        RemainsList, RemainsOf, Share, Shares, SplitLast, Step, Store, move_to, remove,
     },
 };
 
@@ -60,13 +60,32 @@ pub struct Place<X>(PhantomData<fn() -> X>);
 /// The end of a list of places, a filler the driver never reaches.
 pub struct NoPlace;
 
+/// The key the nodes at a path type `Self` from a root of the kind `R`
+/// are kept under; the root has none (`()`, never lent).
+pub trait PlaceKey<R: NodeKind> {
+    /// The key.
+    type Key: 'static;
+}
+impl<R: NodeKind> PlaceKey<R> for End {
+    type Key = ();
+}
+impl<R: NodeKind, I, H, Rr> PlaceKey<R> for Step<I, H, Rr>
+where
+    Self: SplitLast<Parent: PathFrom<R>>,
+    LastChildren<R, Self>: ChildIndex<<Self as SplitLast>::Index>,
+{
+    type Key = KeyAt<LastChildren<R, Self>, <Self as SplitLast>::Index>;
+}
+/// The key of the nodes at `X` of `Q`'s tree.
+pub type PlaceKeyOf<Q, X> = <X as PlaceKey<RootOf<Q>>>::Key;
+
 /// What a place of a tree whose root is of the kind `R` is: its path
 /// type.
 pub trait PlaceDesc<R: NodeKind> {
     /// The path type.
-    type At: ParentPath + PathFrom<R> + 'static;
+    type At: ParentPath + PathFrom<R> + PlaceKey<R> + 'static;
 }
-impl<R: NodeKind, X: ParentPath + PathFrom<R> + 'static> PlaceDesc<R> for Place<X> {
+impl<R: NodeKind, X: ParentPath + PathFrom<R> + PlaceKey<R> + 'static> PlaceDesc<R> for Place<X> {
     type At = X;
 }
 impl<R: NodeKind> PlaceDesc<R> for NoPlace {
@@ -199,15 +218,19 @@ pub type ParentOf<X> = <X as ParentPath>::Parent;
 // ---------------------------------------------------------------- one component
 
 /// Lending what a `build` reads at the parent of a node at the path
-/// `Self`, for the needs `N`, with the instant `T`; at the root there is
-/// no parent and `N` is empty.
-pub trait BuildAt<'a, R: KindFor<P>, P, N: NeedSet<P>, I, T = ()>: ParentPath {
+/// `Self`, for the needs `N`, with the instant `T`; the new node's key is
+/// what [`OwnKey`](crate::need::OwnKey) reads. At the root there is no
+/// parent and `N` is empty.
+pub trait BuildAt<'a, R: KindFor<P>, P, N: NeedSet<P>, I, T = ()>:
+    ParentPath + PlaceKey<R>
+{
     /// The keyed positions.
     type Positions: KeyedList<P, <N as Flat>::Keyed>;
-    /// Lend the parent at `parent` to `f`.
+    /// Lend the parent at `parent` to `f`, the new node's key `key`.
     fn lend<O>(
         root: Option<&'a mut Node<R, P>>,
         parent: &Self::Parent,
+        key: &'a Self::Key,
         outbox: &'a Outbox<T>,
         f: impl FnOnce(ViewOf<'a, N, P, Self::Positions>) -> O,
     ) -> Result<O, LendError>;
@@ -217,6 +240,7 @@ impl<'a, R: KindFor<P>, P, T> BuildAt<'a, R, P, HNil, (), T> for End {
     fn lend<O>(
         _: Option<&'a mut Node<R, P>>,
         _: &(),
+        _: &'a (),
         _: &'a Outbox<T>,
         f: impl FnOnce(HNil) -> O,
     ) -> Result<O, LendError> {
@@ -225,19 +249,27 @@ impl<'a, R: KindFor<P>, P, T> BuildAt<'a, R, P, HNil, (), T> for End {
 }
 impl<'a, R: KindFor<P>, P, N, I, J, H, Rr, T> BuildAt<'a, R, P, N, I, T> for Step<J, H, Rr>
 where
-    Step<J, H, Rr>: ParentPath,
-    N: LendAt<'a, R, P, ParentOf<Step<J, H, Rr>>, I, T>,
+    Step<J, H, Rr>: ParentPath + PlaceKey<R>,
+    N: LendAt<'a, R, P, ParentOf<Step<J, H, Rr>>, I, T, GivenKey<'a, PlaceKeyR<R, Self>>>,
 {
     type Positions = N::Positions;
     fn lend<O>(
         root: Option<&'a mut Node<R, P>>,
         parent: &ParentOf<Self>,
+        key: &'a PlaceKeyR<R, Self>,
         outbox: &'a Outbox<T>,
         f: impl FnOnce(ViewOf<'a, N, P, Self::Positions>) -> O,
     ) -> Result<O, LendError> {
-        N::lend(root.ok_or(LendError::NoNode)?, *parent, outbox, f)
+        N::lend(
+            root.ok_or(LendError::NoNode)?,
+            *parent,
+            outbox,
+            GivenKey(key),
+            f,
+        )
     }
 }
+type PlaceKeyR<R, X> = <X as PlaceKey<R>>::Key;
 
 /// The positions of one component: its own needs', its build needs' and
 /// its subscriptions'.
@@ -271,7 +303,7 @@ where
 
 /// Lending the hooks of the component `C` of the part `O` at the path
 /// type `X` of `Q`, for every lifetime of the lend.
-pub trait CompLend<'a, Q, X: PathFrom<RootOf<Q>> + ParentPath, O, C>
+pub trait CompLend<'a, Q, X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>>, O, C>
 where
     Q: Composition<Parts: SelfParts, Root: PlacesUnder<End, Out: PlaceRequests<RootOf<Q>>>>,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
@@ -288,11 +320,12 @@ where
         outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(HookView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::Positions>) -> T,
     ) -> Result<T, LendError>;
-    /// Lend the parent at `parent` to `build`.
+    /// Lend the parent at `parent` to `build`, the new node's key `key`.
     #[allow(clippy::type_complexity)]
     fn lend_parent<T>(
         root: Option<&'a mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &'a PlaceKeyOf<Q, X>,
         outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(BuildView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::BuildPositions>) -> T,
     ) -> Result<T, LendError>;
@@ -337,16 +370,17 @@ where
             X,
             In,
             LendInstant<Q>,
-        >>::lend(root, at, outbox, f)
+        >>::lend(root, at, outbox, FromSplit, f)
     }
     fn lend_parent<T>(
         root: Option<&'a mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &'a PlaceKeyOf<Q, X>,
         outbox: &'a OutboxOf<Q>,
         f: impl FnOnce(BuildView<'a, C, O, P_<Q>, TargetOf<Q, X>, Self::BuildPositions>) -> T,
     ) -> Result<T, LendError> {
         <X as BuildAt<'a, RootOf<Q>, P_<Q>, C::BuildNeeds, Ib, LendInstant<Q>>>::lend(
-            root, parent, outbox, f,
+            root, parent, key, outbox, f,
         )
     }
     fn subscriptions(out: &mut Vec<Subscription>) {
@@ -474,14 +508,22 @@ pub struct PlaceInfo {
 /// one by one; `Self` is their positions. An index `c` counts the share's
 /// components; a hook at an index past them gives `None`.
 #[allow(clippy::type_complexity, missing_docs)]
-pub trait ShareOps<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O, Cs> {
+pub trait ShareOps<
+    Q: DriverComposition,
+    X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>>,
+    O,
+    Cs,
+>
+{
     /// How many components.
     const LEN: usize;
     fn info(out: &mut Vec<CompInfo>);
     fn build(
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &PlaceKeyOf<Q, X>,
         args: &ArgsOf<P_<Q>>,
+        start: &mut StartOf<TargetOf<Q, X>>,
         outbox: &OutboxOf<Q>,
     ) -> Result<Cs, LendError>;
     fn deadline(
@@ -521,15 +563,17 @@ pub trait ShareOps<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O,
     ) where
         O: Share<TargetOf<Q, X>>;
 }
-impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O> ShareOps<Q, X, O, HNil>
-    for HNil
+impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>>, O>
+    ShareOps<Q, X, O, HNil> for HNil
 {
     const LEN: usize = 0;
     fn info(_: &mut Vec<CompInfo>) {}
     fn build(
         _: &mut Option<&mut RootNode<Q>>,
         _: &ParentOf<X>,
+        _: &PlaceKeyOf<Q, X>,
         _: &ArgsOf<P_<Q>>,
+        _: &mut StartOf<TargetOf<Q, X>>,
         _: &OutboxOf<Q>,
     ) -> Result<HNil, LendError> {
         Ok(HNil)
@@ -584,7 +628,7 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, O> ShareOps<Q, X
 impl<Q, X, O, C, Cs, CP, SP> ShareOps<Q, X, O, HCons<C, Cs>> for HCons<CP, SP>
 where
     Q: DriverComposition,
-    X: PathFrom<RootOf<Q>> + ParentPath + Copy,
+    X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>> + Copy,
     C: Hooks<O, P_<Q>, TargetOf<Q, X>>,
     C::Timing: Timing<C, O, P_<Q>, TargetOf<Q, X>, InstantOf<Q>>,
     CP: for<'a> CompLend<'a, Q, X, O, C>,
@@ -608,18 +652,21 @@ where
     fn build(
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &PlaceKeyOf<Q, X>,
         args: &ArgsOf<P_<Q>>,
+        start: &mut StartOf<TargetOf<Q, X>>,
         outbox: &OutboxOf<Q>,
     ) -> Result<HCons<C, Cs>, LendError> {
         let head = <CP as CompLend<'_, Q, X, O, C>>::lend_parent(
             root.as_deref_mut(),
             parent,
+            key,
             outbox,
-            |view| C::build::<<CP as CompLend<'_, Q, X, O, C>>::BuildPositions>(view, args),
+            |view| C::build::<<CP as CompLend<'_, Q, X, O, C>>::BuildPositions>(view, args, start),
         )?;
         Ok(HCons {
             head,
-            tail: SP::build(root, parent, args, outbox)?,
+            tail: SP::build(root, parent, key, args, start, outbox)?,
         })
     }
     fn deadline(
@@ -721,15 +768,20 @@ where
 /// `Self` is their positions. An index `c` counts the components of the
 /// place, part by part.
 #[allow(clippy::type_complexity, missing_docs)]
-pub trait PartsOps<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath, Ps>
-where
+pub trait PartsOps<
+    Q: DriverComposition,
+    X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>>,
+    Ps,
+> where
     Ps: Shares<TargetOf<Q, X>> + RemainsList<TargetOf<Q, X>>,
 {
     fn info(out: &mut Vec<CompInfo>);
     fn build(
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &PlaceKeyOf<Q, X>,
         args: &ArgsOf<P_<Q>>,
+        start: &mut StartOf<TargetOf<Q, X>>,
         outbox: &OutboxOf<Q>,
     ) -> Result<<Ps as Shares<TargetOf<Q, X>>>::Data, LendError>;
     fn deadline(root: &mut RootNode<Q>, at: X, c: usize, o: &OutboxOf<Q>) -> Option<InstantOf<Q>>;
@@ -763,12 +815,16 @@ where
         o: &OutboxOf<Q>,
     );
 }
-impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, HNil> for HNil {
+impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>>>
+    PartsOps<Q, X, HNil> for HNil
+{
     fn info(_: &mut Vec<CompInfo>) {}
     fn build(
         _: &mut Option<&mut RootNode<Q>>,
         _: &ParentOf<X>,
+        _: &PlaceKeyOf<Q, X>,
         _: &ArgsOf<P_<Q>>,
+        _: &mut StartOf<TargetOf<Q, X>>,
         _: &OutboxOf<Q>,
     ) -> Result<HNil, LendError> {
         Ok(HNil)
@@ -810,7 +866,7 @@ impl<Q: DriverComposition, X: PathFrom<RootOf<Q>> + ParentPath> PartsOps<Q, X, H
 impl<Q, X, O, Ps, SP, PL> PartsOps<Q, X, HCons<O, Ps>> for HCons<SP, PL>
 where
     Q: DriverComposition,
-    X: PathFrom<RootOf<Q>> + ParentPath + Copy,
+    X: PathFrom<RootOf<Q>> + ParentPath + PlaceKey<RootOf<Q>> + Copy,
     O: Share<TargetOf<Q, X>> + 'static,
     Ps: Shares<TargetOf<Q, X>> + RemainsList<TargetOf<Q, X>>,
     SP: ShareOps<Q, X, O, O::Data>,
@@ -823,12 +879,14 @@ where
     fn build(
         root: &mut Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &PlaceKeyOf<Q, X>,
         args: &ArgsOf<P_<Q>>,
+        start: &mut StartOf<TargetOf<Q, X>>,
         outbox: &OutboxOf<Q>,
     ) -> Result<HCons<O::Data, <Ps as Shares<TargetOf<Q, X>>>::Data>, LendError> {
         Ok(HCons {
-            head: SP::build(root, parent, args, outbox)?,
-            tail: PL::build(root, parent, args, outbox)?,
+            head: SP::build(root, parent, key, args, start, outbox)?,
+            tail: PL::build(root, parent, key, args, start, outbox)?,
         })
     }
     fn deadline(root: &mut RootNode<Q>, at: X, c: usize, o: &OutboxOf<Q>) -> Option<InstantOf<Q>> {
@@ -952,15 +1010,15 @@ where
 /// parent by a key, found by their key, moved under another parent. The
 /// root is none of these.
 #[allow(clippy::type_complexity)]
-pub trait ChildPath<R: KindFor<P>, P>: PathFrom<R> + ParentPath {
+pub trait ChildPath<R: KindFor<P>, P>: PathFrom<R> + ParentPath + PlaceKey<R> {
     /// The parent's path, from its address.
     fn parent_path(parent: &Address<R>) -> Option<ParentOf<Self>>;
     /// Keep `node` under the parent at `parent`, under `key` (a key of
     /// this path's store); `None` when the key is taken.
-    fn attach<KK: 'static>(
+    fn attach(
         root: &mut Node<R, P>,
         parent: &Address<R>,
-        key: KK,
+        key: <Self as PlaceKey<R>>::Key,
         node: Node<Self::Target, P>,
     ) -> Option<Address<R>>
     where
@@ -982,12 +1040,7 @@ impl<R: KindFor<P>, P> ChildPath<R, P> for End {
     fn parent_path(_: &Address<R>) -> Option<()> {
         None
     }
-    fn attach<KK: 'static>(
-        _: &mut Node<R, P>,
-        _: &Address<R>,
-        _: KK,
-        _: Node<R, P>,
-    ) -> Option<Address<R>>
+    fn attach(_: &mut Node<R, P>, _: &Address<R>, _: (), _: Node<R, P>) -> Option<Address<R>>
     where
         R: KindFor<P>,
     {
@@ -1010,6 +1063,7 @@ type HandleOf<X> = <X as SplitLast>::Handle;
 impl<R, P, I, H, Rr> ChildPath<R, P> for Step<I, H, Rr>
 where
     R: KindFor<P>,
+    Self: PlaceKey<R, Key = KeyAt<LastChildren<R, Self>, IndexOf<Self>>>,
     Self: PathFrom<R> + FromAddress<R> + SplitLast + ParentPath<Parent = ParentPathOf<Self>>,
     ParentPathOf<Self>:
         NodePath<R, P> + FromAddress<R> + Append<IndexOf<Self>, HandleOf<Self>, Out = Self> + Copy,
@@ -1023,10 +1077,10 @@ where
     fn parent_path(parent: &Address<R>) -> Option<ParentPathOf<Self>> {
         ParentPathOf::<Self>::from_address(parent)
     }
-    fn attach<KK: 'static>(
+    fn attach(
         root: &mut Node<R, P>,
         parent: &Address<R>,
-        key: KK,
+        key: <Self as PlaceKey<R>>::Key,
         node: Node<Self::Target, P>,
     ) -> Option<Address<R>>
     where
@@ -1034,10 +1088,6 @@ where
     {
         let pp = ParentPathOf::<Self>::from_address(parent)?;
         let parent = pp.node_mut(root)?;
-        // a link's key is the linking node's own: the same type when the
-        // structure's links are well formed, which a lend at the linking
-        // node proves; otherwise nothing is kept
-        let key = cast(key)?;
         let store =
             <LastChildren<R, Self> as ChildAt<IndexOf<Self>, P>>::store_mut(&mut parent.children);
         let h = store.insert(key, node).ok()?;
@@ -1076,11 +1126,16 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
     fn build(
         root: Option<&mut RootNode<Q>>,
         parent: &ParentOf<Pl::At>,
+        key: &PlaceKeyOf<Q, Pl::At>,
         args: &ArgsOf<P_<Q>>,
+        start: &mut StartOf<TargetOf<Q, Pl::At>>,
         outbox: &OutboxOf<Q>,
     ) -> Result<Node<TargetOf<Q, Pl::At>, P_<Q>>, LendError>
     where
         TargetOf<Q, Pl::At>: KindFor<P_<Q>>;
+    /// The start of the node the place's nodes link to, from a node's
+    /// start; `None` when its kind links to none.
+    fn linked_start(start: &mut Box<dyn core::any::Any>) -> Option<Box<dyn core::any::Any>>;
     fn deadline(
         root: &mut RootNode<Q>,
         at: &AddressOf<Q>,
@@ -1134,6 +1189,7 @@ pub trait PlaceOps<Q: DriverComposition, Pl: PlaceDesc<RootOf<Q>>> {
         root: &mut RootNode<Q>,
         parent: &AddressOf<Q>,
         key: KK,
+        start: Box<dyn core::any::Any>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>>;
@@ -1170,6 +1226,7 @@ where
         + ParentPlace
         + Detach<RootOf<Q>, P_<Q>>
         + ChildPath<RootOf<Q>, P_<Q>>
+        + PlaceKey<RootOf<Q>>
         + Copy
         + 'static,
     <TargetOf<Q, X> as NodeKind>::Children: crate::structure::ChildStores<P_<Q>>,
@@ -1202,11 +1259,21 @@ where
     fn build(
         root: Option<&mut RootNode<Q>>,
         parent: &ParentOf<X>,
+        key: &PlaceKeyOf<Q, X>,
         args: &ArgsOf<P_<Q>>,
+        start: &mut StartOf<TargetOf<Q, X>>,
         outbox: &OutboxOf<Q>,
     ) -> Result<Node<TargetOf<Q, X>, P_<Q>>, LendError> {
         let mut root = root;
-        Ok(Node::new(PL::build(&mut root, parent, args, outbox)?))
+        Ok(Node::new(PL::build(
+            &mut root, parent, key, args, start, outbox,
+        )?))
+    }
+    fn linked_start(start: &mut Box<dyn core::any::Any>) -> Option<Box<dyn core::any::Any>> {
+        let start = start.downcast_mut::<StartOf<TargetOf<Q, X>>>()?;
+        <<TargetOf<Q, X> as NodeKind>::Linked as crate::structure::LinkList<
+            TargetOf<Q, X>,
+        >>::linked_start(start)
     }
     fn deadline(
         root: &mut RootNode<Q>,
@@ -1280,6 +1347,7 @@ where
         root: &mut RootNode<Q>,
         parent: &AddressOf<Q>,
         key: KK,
+        start: Box<dyn core::any::Any>,
         args: &ArgsOf<P_<Q>>,
         o: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>> {
@@ -1287,7 +1355,9 @@ where
             return None;
         }
         let pp = X::parent_path(parent)?;
-        let node = Self::build(Some(root), &pp, args, o).ok()?;
+        let key: PlaceKeyOf<Q, X> = cast(key)?;
+        let mut start = *start.downcast::<StartOf<TargetOf<Q, X>>>().ok()?;
+        let node = Self::build(Some(root), &pp, &key, args, &mut start, o).ok()?;
         X::attach(root, parent, key, node)
     }
     fn find_child<KK: 'static>(
@@ -1325,10 +1395,15 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
     fn build(
         _: Option<&mut RootNode<Q>>,
         _: &(),
+        _: &(),
         _: &ArgsOf<P_<Q>>,
+        _: &mut StartOf<RootOf<Q>>,
         _: &OutboxOf<Q>,
     ) -> Result<RootNode<Q>, LendError> {
         unreachable!("{NO_PLACE}")
+    }
+    fn linked_start(_: &mut Box<dyn core::any::Any>) -> Option<Box<dyn core::any::Any>> {
+        None
     }
     fn deadline(
         _: &mut RootNode<Q>,
@@ -1384,6 +1459,7 @@ impl<Q: DriverComposition> PlaceOps<Q, NoPlace> for NoPlacePos {
         _: &mut RootNode<Q>,
         _: &AddressOf<Q>,
         _: KK,
+        _: Box<dyn core::any::Any>,
         _: &ArgsOf<P_<Q>>,
         _: &OutboxOf<Q>,
     ) -> Option<AddressOf<Q>> {

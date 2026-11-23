@@ -1,5 +1,5 @@
 //! Node kinds, their children and their links.
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{any::TypeId, convert::Infallible, marker::PhantomData};
 
 use frunk_core::{
@@ -25,6 +25,11 @@ pub trait NodeKind: 'static + Sized {
     /// ([`Hooks::end`](crate::hooks::Hooks::end)); `()` by default. A node
     /// that ends because a node above it ends is told the default.
     type EndReason: Default + 'static = ();
+    /// What the one adding a node of this kind gives it to start from,
+    /// handed to every component's [`build`](crate::hooks::Hooks::build)
+    /// in turn; `()` by default. A component takes out what it keeps of
+    /// it, such as a value that moves once.
+    type Start: 'static = ();
     /// What a node of this kind is asked to change in its own subtree, and
     /// how it does it ([`Request`]); `Infallible` for a kind that is asked
     /// nothing.
@@ -171,15 +176,33 @@ pub type HandleAt<L, I> = <StorageAt<L, I> as ChildStorage>::Handle;
 pub trait LinkList<K: NodeKind> {
     /// The kinds the links point to, pushed onto `out`.
     fn targets(out: &mut Vec<TypeId>);
+    /// The start of the node the first link points to, from the linking
+    /// node's; `None` for no link.
+    fn linked_start(start: &mut K::Start) -> Option<Box<dyn core::any::Any>>;
 }
 impl<K: NodeKind> LinkList<K> for HNil {
     fn targets(_: &mut Vec<TypeId>) {}
+    fn linked_start(_: &mut K::Start) -> Option<Box<dyn core::any::Any>> {
+        None
+    }
 }
 impl<K: NodeKind, L: Link<K>, T: LinkList<K>> LinkList<K> for HCons<L, T> {
     fn targets(out: &mut Vec<TypeId>) {
         out.push(TypeId::of::<L::Target>());
         T::targets(out);
     }
+    fn linked_start(start: &mut K::Start) -> Option<Box<dyn core::any::Any>> {
+        Some(Box::new(L::linked_start(start)))
+    }
+}
+
+/// The start a node of the kind `Self` gives the node of the kind `CK` it
+/// links to, when that node is not there yet and is built first; not
+/// called when it is there.
+pub trait LinkedStart<CK: NodeKind>: NodeKind {
+    /// The linked node's start, from the linking node's own; a part of it
+    /// may be taken out.
+    fn linked_start(start: &mut Self::Start) -> CK::Start;
 }
 
 /// A link of a node of the kind `K` to a node that is not above it.
@@ -190,12 +213,18 @@ impl<K: NodeKind, L: Link<K>, T: LinkList<K>> LinkList<K> for HCons<L, T> {
 pub trait Link<K: NodeKind> {
     /// The kind of the linked node.
     type Target: NodeKind;
+    /// The linked node's start, when the node linking to it builds it.
+    fn linked_start(start: &mut K::Start) -> <Self::Target as NodeKind>::Start;
 }
 
 /// A link to the root's child of the kind `CK` kept under the linking
 /// node's own key, the key it has under its own parent. Its position among
-/// the root's children is inferred where the root is known.
+/// the root's children is inferred where the root is known; the linking
+/// kind says what start the linked node gets ([`LinkedStart`]).
 pub struct ByOwnKey<CK>(PhantomData<fn() -> CK>);
-impl<K: NodeKind, CK: NodeKind> Link<K> for ByOwnKey<CK> {
+impl<K: LinkedStart<CK>, CK: NodeKind> Link<K> for ByOwnKey<CK> {
     type Target = CK;
+    fn linked_start(start: &mut K::Start) -> CK::Start {
+        K::linked_start(start)
+    }
 }

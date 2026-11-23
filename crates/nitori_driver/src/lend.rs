@@ -535,6 +535,7 @@ mod cells;
 mod check;
 mod keyed;
 mod now;
+mod own_key;
 mod pass;
 mod view;
 mod writes;
@@ -543,9 +544,10 @@ use core::fmt;
 
 pub(crate) use cells::linked;
 pub use cells::{
-    All, Cell, ChainAtPos, ChainCells, ChildrenCells, False, IndexEq, LinkAtPos, LinkSpec, LinkTo,
-    NoChain, NoLink, OffChain, OnChain, OptChildren, OptNodeCells, OptStoreCells, Others,
-    RoleCells, RoleChain, RoleLink, RoleOf, RoleOther, SplitError, True, Wrap, WrapOpt,
+    All, Cell, ChainAtPos, ChainCells, ChildrenCells, False, FromSplit, GivenKey, IndexEq,
+    LinkAtPos, LinkSpec, LinkTo, NoChain, NoLink, OffChain, OnChain, OptChildren, OptNodeCells,
+    OptStoreCells, Others, OwnKeyCell, OwnKeyPlace, OwnKeyRef, OwnKeySource, RoleCells, RoleChain,
+    RoleLink, RoleOf, RoleOther, SplitError, SplitKey, True, Wrap, WrapOpt,
 };
 pub use check::{
     Distinct, FindAll, FindCell, FindOthers, Locate, LocateIn, NoneAt, Pairwise, Places,
@@ -554,6 +556,7 @@ pub use keyed::{
     Keyed, KeyedCell, KeyedDesc, KeyedItem, KeyedList, KeyedMany, KeyedManyP, KeyedP, KeyedPos,
     KeyedRef, KeyedRefItem, KeyedShape, NoKeyed, NoKeyedPos, Refs, SharedKeyed,
 };
+pub use own_key::FindOwnKey;
 pub use pass::{
     CellOf, Cx, Freeze, FreezeOne, KeyedPositions, Pass1, Pass2, RefShape, Shape, WrapManyPosition,
     WrapPosition,
@@ -593,35 +596,37 @@ pub type LinkedOf<R, X> = <<X as PathFrom<R>>::Target as NodeKind>::Linked;
 pub type LinkOf<R, P, X, IL> = <LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::Lk;
 /// Where the needs of the node at `X` from `R` are lent.
 pub type CxOf<R, P, X> = Cx<<X as ChainOf<R, HNil>>::Chain, P>;
-/// Every cell lent around the node at `X` from `R`.
+/// Every cell lent around the node at `X` from `R`, the key read from
+/// `Kc`.
 ///
 /// The outbox comes first; the cells of the tree follow.
-pub type CellsOf<'a, R, P, X, IL, T = ()> =
-    HCons<OutboxCell<'a, T>, <X as ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>>>::Out>;
+pub type CellsOf<'a, R, P, X, IL, T = (), Kc = FromSplit> =
+    HCons<OutboxCell<'a, T>, <X as ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>, Kc>>::Out>;
 /// The keyed positions of the needs `N` at `X`.
 pub type PositionsOf<N, R, P, X, IK> = <N as KeyedPositions<CxOf<R, P, X>, IK>>::KP;
 /// Pass 1's result for the needs `N` at `X`.
-pub type Raw1Of<'a, N, R, P, X, IL, I1, T = ()> =
-    <N as Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T>, I1>>::Raw;
+pub type Raw1Of<'a, N, R, P, X, IL, I1, T = (), Kc = FromSplit> =
+    <N as Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, I1>>::Raw;
 /// What pass 1 leaves for the needs `N` at `X`.
-pub type Rem1Of<'a, N, R, P, X, IL, I1, T = ()> =
-    <N as Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T>, I1>>::Rem;
+pub type Rem1Of<'a, N, R, P, X, IL, I1, T = (), Kc = FromSplit> =
+    <N as Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, I1>>::Rem;
 /// What pass 1 leaves, frozen.
-pub type FrozenOf<'a, N, R, P, X, IL, I1, T = ()> =
-    <Rem1Of<'a, N, R, P, X, IL, I1, T> as Freeze>::Out;
+pub type FrozenOf<'a, N, R, P, X, IL, I1, T = (), Kc = FromSplit> =
+    <Rem1Of<'a, N, R, P, X, IL, I1, T, Kc> as Freeze>::Out;
 /// Pass 2's result for the needs `N` at `X`.
-pub type Raw2Of<'a, N, R, P, X, IL, I1, I2, T = ()> =
-    <N as Pass2<'a, CxOf<R, P, X>, FrozenOf<'a, N, R, P, X, IL, I1, T>, I2>>::Raw;
+pub type Raw2Of<'a, N, R, P, X, IL, I1, I2, T = (), Kc = FromSplit> =
+    <N as Pass2<'a, CxOf<R, P, X>, FrozenOf<'a, N, R, P, X, IL, I1, T, Kc>, I2>>::Raw;
 
 /// The list of needs `Self` lent at the path `X` from the root `R`, for
 /// the parts `P`, with the instant `T` ([`Now`](crate::need::Now)); `I` is
-/// every position, inferred here once.
+/// every position, inferred here once. The key [`OwnKey`](crate::need::OwnKey)
+/// reads comes from `Kc` ([`OwnKeySource`]).
 #[diagnostic::on_unimplemented(
     message = "the needs `{Self}` cannot be lent at `{X}`",
     label = "a need is not met",
-    note = "a need's anchor, steps or component is not on this structure, two needs take the same place and one is exclusive, or a keyed need uses the word that does not fit its store (`ByKey` off the chain, `ByKeyOthers` on it), or a `Now<I>` has another instant than the clock's; `explain::<Needs, Root, Parts, Path, _, _, _, _>()` names the need"
+    note = "a need's anchor, steps or component is not on this structure, two needs take the same place and one is exclusive, or a keyed need uses the word that does not fit its store (`ByKey` off the chain, `ByKeyOthers` on it), or a `Now<I>` has another instant than the clock's, or an `OwnKey<K>` is at the root or has another key than its place's; `explain::<Needs, Root, Parts, Path, _, _, _, _>()` names the need"
 )]
-pub trait LendAt<'a, R: KindFor<P>, P, X, I, T = ()>: NeedSet<P> {
+pub trait LendAt<'a, R: KindFor<P>, P, X, I, T = (), Kc = FromSplit>: NeedSet<P> {
     /// The keyed positions.
     type Positions: KeyedList<P, Self::Keyed>;
     /// Lend the node at `at` and the tree around it to `f`; what the view
@@ -630,32 +635,33 @@ pub trait LendAt<'a, R: KindFor<P>, P, X, I, T = ()>: NeedSet<P> {
         root: &'a mut Node<R, P>,
         at: X,
         outbox: &'a Outbox<T>,
+        own: Kc,
         f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> O,
     ) -> Result<O, LendError>;
 }
-impl<'a, N, R, P, X, T: 'a, IL, IC, IP, IK, I1, I2> LendAt<'a, R, P, X, (IL, IC, IP, IK, I1, I2), T>
-    for N
+impl<'a, N, R, P, X, T: 'a, Kc, IL, IC, IP, IK, I1, I2>
+    LendAt<'a, R, P, X, (IL, IC, IP, IK, I1, I2), T, Kc> for N
 where
     R: KindFor<P>,
     X: PathFrom<R> + ChainOf<R, HNil>,
     LinkedOf<R, X>: LinkSpec<R, P, X, IL>,
-    X: ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>>,
+    X: ChainCells<'a, R, P, HNil, LinkOf<R, P, X, IL>, Kc>,
     N: NeedSet<P>,
-    N: Locate<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T>, IC>,
-    N: Places<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T>, IP>,
-    <N as Places<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T>, IP>>::Out: Pairwise,
+    N: Locate<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, IC>,
+    N: Places<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, IP>,
+    <N as Places<CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, IP>>::Out: Pairwise,
     N: KeyedPositions<CxOf<R, P, X>, IK>,
     PositionsOf<N, R, P, X, IK>: KeyedList<P, N::Keyed>,
-    N: Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T>, I1>,
-    Rem1Of<'a, N, R, P, X, IL, I1, T>: Freeze,
-    N: Pass2<'a, CxOf<R, P, X>, FrozenOf<'a, N, R, P, X, IL, I1, T>, I2>,
+    N: Pass1<'a, CxOf<R, P, X>, CellsOf<'a, R, P, X, IL, T, Kc>, I1>,
+    Rem1Of<'a, N, R, P, X, IL, I1, T, Kc>: Freeze,
+    N: Pass2<'a, CxOf<R, P, X>, FrozenOf<'a, N, R, P, X, IL, I1, T, Kc>, I2>,
     N: Build<
             'a,
             P,
             N::Keyed,
             PositionsOf<N, R, P, X, IK>,
-            Raw1Of<'a, N, R, P, X, IL, I1, T>,
-            Raw2Of<'a, N, R, P, X, IL, I1, I2, T>,
+            Raw1Of<'a, N, R, P, X, IL, I1, T, Kc>,
+            Raw2Of<'a, N, R, P, X, IL, I1, I2, T, Kc>,
         >,
 {
     type Positions = PositionsOf<N, R, P, X, IK>;
@@ -663,12 +669,13 @@ where
         root: &'a mut Node<R, P>,
         at: X,
         outbox: &'a Outbox<T>,
+        own: Kc,
         f: impl FnOnce(ViewOf<'a, Self, P, Self::Positions>) -> O,
     ) -> Result<O, LendError> {
         let link = linked(<LinkedOf<R, X> as LinkSpec<R, P, X, IL>>::find(root, &at))?;
         let cells = HCons {
             head: Cell::new(outbox),
-            tail: linked(at.cells(root, link))?,
+            tail: linked(at.cells(root, link, own))?,
         };
         let (raw1, rem) = <N as Pass1<'a, CxOf<R, P, X>, _, I1>>::take(cells);
         let frozen = rem.freeze();
@@ -696,7 +703,7 @@ where
     R: KindFor<P>,
     N: LendAt<'a, R, P, X, I>,
 {
-    N::lend(root, at, outbox, f)
+    N::lend(root, at, outbox, FromSplit, f)
 }
 
 /// The item-by-item check of the needs `N` at the path `X` from `R`, each

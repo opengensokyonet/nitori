@@ -1006,7 +1006,7 @@ where
         >>::find(root, &at))?;
         let cells = HCons {
             head: Cell::new(outbox),
-            tail: linked(at.cells(root, link))?,
+            tail: linked(at.cells(root, link, crate::lend::FromSplit))?,
         };
         let (raw1, rem) =
             <Needs<Q, C> as Pass1<'a, CxOf<RootOf<Q>, PartsOf<Q>, X>, _, I1>>::take(cells);

@@ -67,6 +67,9 @@ impl NodeKind for Route {
     type Children = HList![Child<Timer, AtMostOne>];
     type Linked = HList![ByOwnKey<Peer>];
 }
+impl nitori_driver::structure::LinkedStart<Peer> for Route {
+    fn linked_start(_: &mut ()) {}
+}
 impl NodeKind for Timer {
     type Children = HNil;
     type Linked = HNil;

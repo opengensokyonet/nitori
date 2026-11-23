@@ -112,7 +112,7 @@
 //! # #[derive(Default)]
 //! # struct Count(u64);
 //! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
-//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #         Count(0)
 //! #     }
 //! # }
@@ -131,6 +131,7 @@
 //!     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Layer>>>(
 //!         parents: BuildView<'_, Self, Part1, L, Layer, KP>,
 //!         _: &ArgsOf<L>,
+//!         _: &mut (),
 //!     ) -> Self {
 //!         let hlist_pat![count] = parents;
 //!         assert_eq!(count.0, 0);
@@ -165,8 +166,8 @@
 //! struct Q;
 //! composition!(impl driver for Q: Root, HList![Part1], Clock);
 //!
-//! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()]).unwrap();
-//! let layer = driver.add::<Layer, _, _>(End, ()).unwrap();
+//! let mut driver = Driver::<Q>::new(Clock, frunk_core::hlist![()], ()).unwrap();
+//! let layer = driver.add::<Layer, _, _>(End, (), ()).unwrap();
 //! assert!(Pin::new(&mut driver).poll(&mut Context::from_waker(Waker::noop())).is_pending());
 //! use nitori_driver::structure::NodePath;
 //! assert_eq!(layer.node(driver.root().unwrap()).unwrap().data.head.head.started, Some(Duration::ZERO));
@@ -231,7 +232,7 @@
 //! # #[derive(Default)]
 //! # struct Count(u64);
 //! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
-//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #         Count(0)
 //! #     }
 //! # }
@@ -245,6 +246,7 @@
 //!     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Layer>>>(
 //!         _: BuildView<'_, Self, Part1, L, Layer, KP>,
 //!         _: &ArgsOf<L>,
+//!         _: &mut (),
 //!     ) -> Self {
 //!         Due
 //!     }
@@ -325,7 +327,7 @@
 //! # #[derive(Default)]
 //! # struct Count(u64);
 //! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
-//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #         Count(0)
 //! #     }
 //! # }
@@ -339,6 +341,7 @@
 //!     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Layer>>>(
 //!         _: BuildView<'_, Self, Part1, L, Layer, KP>,
 //!         _: &ArgsOf<L>,
+//!         _: &mut (),
 //!     ) -> Self {
 //!         Reads
 //!     }
@@ -405,7 +408,7 @@
 //! # #[derive(Default)]
 //! # struct Count(u64);
 //! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
-//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #         Count(0)
 //! #     }
 //! # }
@@ -419,6 +422,7 @@
 //!     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Layer>>>(
 //!         _: BuildView<'_, Self, Part1, L, Layer, KP>,
 //!         _: &ArgsOf<L>,
+//!         _: &mut (),
 //!     ) -> Self {
 //!         Reads
 //!     }
@@ -486,7 +490,7 @@
 //! # struct Count(u64);
 //! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
 //! #     type BuildNeeds = HList![At<Up<0>, Here, Ref<Count>>];
-//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #         Count(0)
 //! #     }
 //! # }
@@ -555,7 +559,7 @@
 //! # #[derive(Default)]
 //! # struct Count(u64);
 //! # impl<L: PartList<L> + 'static> Hooks<Part1, L, Root> for Count {
-//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>) -> Self {
+//! #     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Root>>>(_: BuildView<'_, Self, Part1, L, Root, KP>, _: &ArgsOf<L>, _: &mut ()) -> Self {
 //! #         Count(0)
 //! #     }
 //! # }
@@ -569,6 +573,7 @@
 //!     fn build<KP: KeyedList<L, BuildKeyed<Self, Part1, L, Layer>>>(
 //!         _: BuildView<'_, Self, Part1, L, Layer, KP>,
 //!         _: &ArgsOf<L>,
+//!         _: &mut (),
 //!     ) -> Self {
 //!         Hears
 //!     }
@@ -619,7 +624,7 @@ use walk::{CallWalk, Cursor, Number, PlaceVisit, PlaceWalk, SlotInfo, SlotStore,
 use crate::{
     call::{CallStep, LendOne, OutboxOf, PartsOf, RootOf, SlotCall, SlotDesc, SlotYield},
     event::{Outbox, Scope, Triggered},
-    hooks::{AbortCause, ArgsOf, EndReasonOf},
+    hooks::{AbortCause, ArgsOf, EndReasonOf, StartOf},
     request::{
         RequestSum,
         sealed::{EditOps, FindNode},
@@ -936,13 +941,30 @@ struct AddAt<'r, Q: DriverComposition, KK> {
     root: &'r mut RootNode<Q>,
     parent: &'r AddressOf<Q>,
     key: KK,
+    start: Box<dyn core::any::Any>,
     args: &'r ArgsOf<PartsOf<Q>>,
     outbox: &'r OutboxOf<Q>,
 }
 impl<Q: DriverComposition, KK: 'static> PlaceVisit<Q> for AddAt<'_, Q, KK> {
     type Out = Option<AddressOf<Q>>;
     fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) -> Self::Out {
-        Pos::add(self.root, self.parent, self.key, self.args, self.outbox)
+        Pos::add(
+            self.root,
+            self.parent,
+            self.key,
+            self.start,
+            self.args,
+            self.outbox,
+        )
+    }
+}
+struct LinkedStartAt<'r> {
+    start: &'r mut Box<dyn core::any::Any>,
+}
+impl<Q: DriverComposition> PlaceVisit<Q> for LinkedStartAt<'_> {
+    type Out = Option<Box<dyn core::any::Any>>;
+    fn visit<Pl: PlaceDesc<RootOf<Q>>, Pos: PlaceOps<Q, Pl>>(self) -> Self::Out {
+        Pos::linked_start(self.start)
     }
 }
 struct FindChild<'r, Q: DriverComposition, KK> {
@@ -1069,9 +1091,13 @@ where
     PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
     <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
 {
-    /// A driver whose root is built from `args`; it reads and sleeps on
-    /// `clock`. The root's calls start woken.
-    pub fn new(clock: ClockOf<Q>, args: ArgsOf<PartsOf<Q>>) -> Result<Self, CompositionError> {
+    /// A driver whose root is built from `args` and `start`; it reads and
+    /// sleeps on `clock`. The root's calls start woken.
+    pub fn new(
+        clock: ClockOf<Q>,
+        args: ArgsOf<PartsOf<Q>>,
+        mut start: StartOf<RootOf<Q>>,
+    ) -> Result<Self, CompositionError> {
         let mut infos = Vec::new();
         <Cursor<I0> as PlaceWalk<Q>>::info(&mut infos);
         let mut slots = Vec::new();
@@ -1177,9 +1203,15 @@ where
         let outbox = Outbox::at(now);
         // Invariant: the root's components have no needs at a parent
         // (`BuildAt` for `End`), so building it lends nothing.
-        let root =
-            <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::build(None, &(), &args, &outbox)
-                .expect("building the root lends nothing");
+        let root = <PlacePositionsAt<Q, I0> as PlaceOps<Q, Place<End>>>::build(
+            None,
+            &(),
+            &(),
+            &args,
+            &mut start,
+            &outbox,
+        )
+        .expect("building the root lends nothing");
         let mut driver = Self {
             root: Some(root),
             args,
@@ -1226,15 +1258,16 @@ where
     }
 
     /// Add a node of the kind `CK` under the node at `parent`, under
-    /// `key`, as a request's edit handle does: it is built from the view
-    /// of its parent, its calls start woken, its deadlines are read and
-    /// [`NodeStarted`](crate::event::NodeStarted) is published at it.
-    /// Returns its path.
+    /// `key`, starting from `start`, as a request's edit handle does: it is
+    /// built from the view of its parent, its calls start woken, its
+    /// deadlines are read and [`NodeStarted`](crate::event::NodeStarted) is
+    /// published at it. Returns its path.
     #[allow(clippy::type_complexity)]
     pub fn add<CK, X, I>(
         &mut self,
         parent: X,
         key: KeyAt<ParentChildren<RootOf<Q>, X>, I>,
+        start: StartOf<CK>,
     ) -> Result<<X as Append<I, HandleAt<ParentChildren<RootOf<Q>, X>, I>>>::Out, AddError>
     where
         CK: KindFor<PartsOf<Q>>,
@@ -1251,7 +1284,7 @@ where
         };
         self.outbox.set_now(self.clock.now());
         let mut todo = Vec::new();
-        let added = self.add_node(parent_id, I::VALUE, key, &mut todo);
+        let added = self.add_node(parent_id, I::VALUE, key, Box::new(start), &mut todo);
         self.settle(todo);
         let id = added.ok_or(AddError::Occupied)?;
         let addr = self.live(id).map(|n| n.addr).ok_or(AddError::Ended)?;
@@ -1475,6 +1508,7 @@ where
         parent: usize,
         child: usize,
         key: KK,
+        mut start: Box<dyn core::any::Any>,
         todo: &mut Vec<Hit>,
     ) -> Option<usize> {
         let n = self.live(parent)?;
@@ -1490,7 +1524,14 @@ where
                 let i = self.places[t].info.index?;
                 match self.find_child(root, i, &key) {
                     Some(target) => Some(target),
-                    None => Some(self.add_node(root, i, key.clone(), todo)?),
+                    None => {
+                        let linked = <Cursor<I0> as PlaceWalk<Q>>::visit(
+                            p,
+                            LinkedStartAt { start: &mut start },
+                        )
+                        .flatten()?;
+                        Some(self.add_node(root, i, key.clone(), linked, todo)?)
+                    }
                 }
             }
         };
@@ -1501,6 +1542,7 @@ where
                 root,
                 parent: &parent_addr,
                 key,
+                start,
                 args: &self.args,
                 outbox: &self.outbox,
             },
@@ -2293,8 +2335,14 @@ where
     PartsOf<Q>: crate::structure::RemainsList<RootOf<Q>>,
     <RootOf<Q> as NodeKind>::Children: ChildAddresses<PartsOf<Q>>,
 {
-    fn add_child<KK: Clone + 'static>(&mut self, node: usize, child: usize, key: KK) -> bool {
-        self.editing(|d, todo| d.add_node(node, child, key, todo).is_some())
+    fn add_child<KK: Clone + 'static>(
+        &mut self,
+        node: usize,
+        child: usize,
+        key: KK,
+        start: Box<dyn core::any::Any>,
+    ) -> bool {
+        self.editing(|d, todo| d.add_node(node, child, key, start, todo).is_some())
     }
     fn end_child<KK: 'static, RR: 'static>(
         &mut self,
@@ -2317,6 +2365,7 @@ where
         node: usize,
         child: usize,
         key: KK,
+        start: Box<dyn core::any::Any>,
         reason: RR,
     ) -> bool {
         let Some(id) = self.find_child(node, child, &key) else {
@@ -2324,7 +2373,7 @@ where
         };
         self.editing(|d, todo| {
             d.end_with(id, &reason, todo);
-            d.add_node(node, child, key, todo).is_some()
+            d.add_node(node, child, key, start, todo).is_some()
         })
     }
     fn move_grandchild<KF: 'static, KG: 'static>(

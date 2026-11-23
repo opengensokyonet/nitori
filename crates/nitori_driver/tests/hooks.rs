@@ -7,6 +7,7 @@
 mod common;
 
 use core::{pin::Pin, task::Poll};
+use nitori_driver::structure::NodeKind;
 use std::{
     cell::RefCell,
     task::{Context, Waker},
@@ -26,7 +27,7 @@ use nitori_driver::{
     event::{Event, Hear, HearAt, NodeStarted, Publish, Triggered},
     hooks::{
         AbortCause, ArgsOf, BuildKeyed, BuildView, EndReasonOf, Held, HookKeys, HookView, Hooks,
-        Part, PartList,
+        Part, PartList, StartOf,
     },
     lend::KeyedList,
     need::{At, ByKey, Here, Kind, Mut, Ref, ToChild, Up},
@@ -123,7 +124,11 @@ impl<O: 'static, L: PartList<L, Args: StreamArgsList> + 'static, K: 'static> Hoo
     fn build<KP: KeyedList<L, BuildKeyed<Self, O, L, K>>>(
         _: BuildView<'_, Self, O, L, K, KP>,
         args: &ArgsOf<L>,
-    ) -> Self {
+        _: &mut StartOf<K>,
+    ) -> Self
+    where
+        K: NodeKind,
+    {
         Streams {
             window: args.window().expect("the base part gives the window"),
             reliable: args.reliable(),
@@ -156,7 +161,11 @@ impl<X: Default + 'static, L: PartList<L> + 'static, K: 'static> Hooks<Base, L, 
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, K>>>(
         _: BuildView<'_, Self, Base, L, K, KP>,
         _: &ArgsOf<L>,
-    ) -> Self {
+        _: &mut StartOf<K>,
+    ) -> Self
+    where
+        K: NodeKind,
+    {
         vec![X::default()]
     }
     fn end<KP: HookKeys<Self, Base, L, K>>(
@@ -187,7 +196,11 @@ impl<X: Estimator, L: PartList<L> + 'static, K: 'static> Hooks<Base, L, K> for H
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, K>>>(
         _: BuildView<'_, Self, Base, L, K, KP>,
         _: &ArgsOf<L>,
-    ) -> Self {
+        _: &mut StartOf<K>,
+    ) -> Self
+    where
+        K: NodeKind,
+    {
         Held(X::new())
     }
     fn end<KP: HookKeys<Self, Base, L, K>>(
@@ -207,7 +220,11 @@ impl<L: PartList<L> + 'static, K: 'static> Hooks<Reset, L, K> for ResetFlag {
     fn build<KP: KeyedList<L, BuildKeyed<Self, Reset, L, K>>>(
         _: BuildView<'_, Self, Reset, L, K, KP>,
         _: &ArgsOf<L>,
-    ) -> Self {
+        _: &mut StartOf<K>,
+    ) -> Self
+    where
+        K: NodeKind,
+    {
         ResetFlag(true)
     }
 }
@@ -222,6 +239,7 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Control> for ControlSeen {
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Control>>>(
         _: BuildView<'_, Self, Base, L, Control, KP>,
         _: &ArgsOf<L>,
+        _: &mut (),
     ) -> Self {
         ControlSeen(0)
     }
@@ -243,6 +261,7 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Stream> for StreamHeaders {
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Stream>>>(
         parents: BuildView<'_, Self, Base, L, Stream, KP>,
         _: &ArgsOf<L>,
+        _: &mut (),
     ) -> Self {
         let hlist_pat![streams] = parents;
         StreamHeaders(vec![streams.window])
@@ -257,6 +276,7 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Body> for BodyReceived {
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Body>>>(
         _: BuildView<'_, Self, Base, L, Body, KP>,
         _: &ArgsOf<L>,
+        _: &mut (),
     ) -> Self {
         BodyReceived(0)
     }
@@ -342,7 +362,7 @@ fn poll(d: &mut Driver<H>) -> Poll<()> {
 
 #[test]
 fn the_root_from_every_part_s_arguments() {
-    let d = Driver::<H>::new(TestClock::default(), args()).unwrap();
+    let d = Driver::<H>::new(TestClock::default(), args(), ()).unwrap();
     let hlist_pat![hlist_pat![streams, v, held], hlist_pat![flag]] = &d.root().unwrap().data;
     assert_eq!(
         streams,
@@ -359,6 +379,7 @@ fn the_root_from_every_part_s_arguments() {
     let alone = Driver::<HAlone>::new(
         TestClock::default(),
         frunk_core::hlist![BaseArgs { window: 5 }],
+        (),
     )
     .unwrap();
     assert_eq!(
@@ -373,7 +394,7 @@ fn the_root_from_every_part_s_arguments() {
 #[test]
 fn hooks_of_every_share_part_by_part() {
     log();
-    let mut d = Driver::<H>::new(TestClock::default(), args()).unwrap();
+    let mut d = Driver::<H>::new(TestClock::default(), args(), ()).unwrap();
     let _ = poll(&mut d);
     assert_eq!(log(), ["streams before calls"]);
     drop(d);
@@ -386,11 +407,11 @@ fn hooks_of_every_share_part_by_part() {
 #[test]
 fn streams_built_from_the_parent_events_from_beside_and_above() {
     log();
-    let mut d = Driver::<H>::new(TestClock::default(), args()).unwrap();
-    let control = d.add::<Control, _, _>(End, ()).unwrap();
-    let s1 = d.add::<Stream, _, _>(End, StreamId(1)).unwrap();
-    let s2 = d.add::<Stream, _, _>(End, StreamId(2)).unwrap();
-    let b1 = d.add::<Body, _, _>(s1, ()).unwrap();
+    let mut d = Driver::<H>::new(TestClock::default(), args(), ()).unwrap();
+    let control = d.add::<Control, _, _>(End, (), ()).unwrap();
+    let s1 = d.add::<Stream, _, _>(End, StreamId(1), ()).unwrap();
+    let s2 = d.add::<Stream, _, _>(End, StreamId(2), ()).unwrap();
+    let b1 = d.add::<Body, _, _>(s1, (), ()).unwrap();
     let root = d.root().unwrap();
     assert_eq!(
         s1.node(root).unwrap().data.head.head,
@@ -412,7 +433,7 @@ fn streams_built_from_the_parent_events_from_beside_and_above() {
     // second stream's data does not reach it
     assert_eq!(b1.node(root).unwrap().data.head.head, BodyReceived(1));
     // a body added later hears what arrives from then on only
-    let b2 = d.add::<Body, _, _>(s2, ()).unwrap();
+    let b2 = d.add::<Body, _, _>(s2, (), ()).unwrap();
     assert_eq!(
         b2.node(d.root().unwrap()).unwrap().data.head.head,
         BodyReceived(0)

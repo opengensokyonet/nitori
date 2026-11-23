@@ -33,7 +33,7 @@
 //! ```
 //! use frunk_core::{HList, hlist::{HCons, HNil}};
 //! use nitori_driver::{
-//!     hooks::{ArgsOf, Hooks, Part, PartList},
+//!     hooks::{ArgsOf, Hooks, Part, PartList, StartOf},
 //!     lend::KeyedList,
 //!     structure::NodeKind,
 //! };
@@ -85,7 +85,11 @@
 //!     fn build<KP: KeyedList<L, <HNil as nitori_driver::lend::Flat>::Keyed>>(
 //!         _: HNil,
 //!         args: &ArgsOf<L>,
-//!     ) -> Self {
+//!         _: &mut StartOf<K>,
+//!     ) -> Self
+//!     where
+//!         K: NodeKind,
+//!     {
 //!         Streams { window: args.window().unwrap_or(0) }
 //!     }
 //! }
@@ -95,13 +99,13 @@
 //!
 //! ```compile_fail
 //! use frunk_core::hlist::HNil;
-//! use nitori_driver::{hooks::{ArgsOf, Hooks, PartList}, lend::{Flat, KeyedList}};
+//! use nitori_driver::{hooks::{ArgsOf, Hooks, PartList, StartOf}, lend::{Flat, KeyedList}, structure::NodeKind};
 //! trait Estimator {
 //!     fn new() -> Self;
 //! }
 //! struct Base;
 //! impl<X: Estimator + 'static, L: PartList<L> + 'static, K> Hooks<Base, L, K> for X {
-//!     fn build<KP: KeyedList<L, <HNil as Flat>::Keyed>>(_: HNil, _: &ArgsOf<L>) -> Self {
+//!     fn build<KP: KeyedList<L, <HNil as Flat>::Keyed>>(_: HNil, _: &ArgsOf<L>, _: &mut StartOf<K>) -> Self where K: NodeKind {
 //!         X::new()
 //!     }
 //! }
@@ -109,13 +113,13 @@
 //!
 //! ```
 //! use frunk_core::hlist::HNil;
-//! use nitori_driver::{hooks::{ArgsOf, Held, Hooks, PartList}, lend::{Flat, KeyedList}};
+//! use nitori_driver::{hooks::{ArgsOf, Held, Hooks, PartList, StartOf}, lend::{Flat, KeyedList}, structure::NodeKind};
 //! trait Estimator {
 //!     fn new() -> Self;
 //! }
 //! struct Base;
 //! impl<X: Estimator + 'static, L: PartList<L> + 'static, K> Hooks<Base, L, K> for Held<X> {
-//!     fn build<KP: KeyedList<L, <HNil as Flat>::Keyed>>(_: HNil, _: &ArgsOf<L>) -> Self {
+//!     fn build<KP: KeyedList<L, <HNil as Flat>::Keyed>>(_: HNil, _: &ArgsOf<L>, _: &mut StartOf<K>) -> Self where K: NodeKind {
 //!         Held(X::new())
 //!     }
 //! }
@@ -177,6 +181,8 @@ pub type BuildKeyed<C, O, L, K> = <<C as Hooks<O, L, K>>::BuildNeeds as Flat>::K
 pub type BuildView<'w, C, O, L, K, KP> = ViewOf<'w, <C as Hooks<O, L, K>>::BuildNeeds, L, KP>;
 /// Why a node of the kind `K` ends.
 pub type EndReasonOf<K> = <K as NodeKind>::EndReason;
+/// What a node of the kind `K` is given to start from.
+pub type StartOf<K> = <K as NodeKind>::Start;
 
 /// The positions of the keyed needs of a hook of `C`; a hook reaches them
 /// through this bound only.
@@ -224,12 +230,17 @@ pub trait Hooks<O, L: PartList<L>, K>: Sized + 'static {
     type Returns: 'static = core::convert::Infallible;
     /// Whether [`before_calls`](Hooks::before_calls) does anything.
     const ACTS_BEFORE_CALLS: bool = false;
-    /// The component of a new node, from the view of the parent and the
-    /// arguments of every part.
+    /// The component of a new node, from the view of the parent, the
+    /// arguments of every part, and what the one adding the node gave it
+    /// to start from; the node's components are built in order, each
+    /// handed the same `start`, and may take out what they keep of it.
     fn build<KP: KeyedList<L, BuildKeyed<Self, O, L, K>>>(
         parents: BuildView<'_, Self, O, L, K, KP>,
         args: &ArgsOf<L>,
-    ) -> Self;
+        start: &mut StartOf<K>,
+    ) -> Self
+    where
+        K: NodeKind;
     /// Before any call at the start of a poll: in the first poll after the
     /// node is built and after `waker` was woken; nodes above first. The
     /// waker is the component's own.

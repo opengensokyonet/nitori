@@ -28,7 +28,7 @@ use nitori_driver::{
     event::{Hear, NodeStarted, Triggered},
     hooks::{
         ArgsOf, BuildKeyed, BuildView, EndReasonOf, HasDeadline, HookKeys, HookView, Hooks, Part,
-        PartList, Timed,
+        PartList, StartOf, Timed,
     },
     lend::KeyedList,
     need::{At, Here, Kind, MyLink, Now, Ref, ToChild, Up},
@@ -138,6 +138,9 @@ impl NodeKind for LinkPath {
     type Linked = HList![ByOwnKey<Entry>];
     type Request = LinkRequest;
 }
+impl nitori_driver::structure::LinkedStart<Entry> for LinkPath {
+    fn linked_start(_: &mut ()) {}
+}
 impl NodeKind for Recovery {
     type Children = HNil;
     type Linked = HNil;
@@ -157,14 +160,14 @@ pub enum ConnRequest {
 impl Request<Conn> for ConnRequest {
     fn apply<E: Editor>(self, mut edit: Edit<'_, E, Conn>) {
         let done = match self {
-            Self::AddLogicalPath(k) => edit.add::<LogicalPath, _>(k),
+            Self::AddLogicalPath(k) => edit.add::<LogicalPath, _>(k, ()),
             Self::EndLogicalPath(k) => edit.end::<LogicalPath, _>(&k, ()),
-            Self::AddEstablished => edit.add::<Established, _>(()),
+            Self::AddEstablished => edit.add::<Established, _>((), ()),
             Self::EndEstablished => {
                 edit.end::<Established, _>(&(), EstablishedEnd::ConnectionClosed)
             }
             Self::RebuildEstablished => {
-                edit.replace::<Established, _>((), EstablishedEnd::ZeroRttRejected)
+                edit.replace::<Established, _>((), (), EstablishedEnd::ZeroRttRejected)
             }
             Self::EndConnection => {
                 edit.end_self(());
@@ -185,7 +188,7 @@ pub enum PathRequest {
 impl Request<LogicalPath> for PathRequest {
     fn apply<E: Editor>(self, mut edit: Edit<'_, E, LogicalPath>) {
         let done = match self {
-            Self::AddLinkPath(l) => edit.add::<LinkPath, _>(l),
+            Self::AddLinkPath(l) => edit.add::<LinkPath, _>(l, ()),
             Self::EndLinkPath(l) => edit.end::<LinkPath, _>(&l, ()),
             Self::MoveRecovery { from, to } => edit
                 .move_grandchild::<LinkPath, _, Recovery, _>(&from, &(), &to)
@@ -205,7 +208,7 @@ pub enum LinkRequest {
 impl Request<LinkPath> for LinkRequest {
     fn apply<E: Editor>(self, mut edit: Edit<'_, E, LinkPath>) {
         let done = match self {
-            Self::AddRecovery => edit.add::<Recovery, _>(()),
+            Self::AddRecovery => edit.add::<Recovery, _>((), ()),
             Self::EndRecovery => edit.end::<Recovery, _>(&(), ()),
         };
         if !done {
@@ -272,7 +275,11 @@ impl<L: PartList<L> + 'static, K: Name + NodeKind<EndReason: Debug>> Hooks<Base,
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, K>>>(
         _: BuildView<'_, Self, Base, L, K, KP>,
         _: &ArgsOf<L>,
-    ) -> Self {
+        _: &mut StartOf<K>,
+    ) -> Self
+    where
+        K: NodeKind,
+    {
         put(format!("build {}", K::NAME));
         Logged(PhantomData)
     }
@@ -300,6 +307,7 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, Recovery> for Timeout {
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, Recovery>>>(
         _: BuildView<'_, Self, Base, L, Recovery, KP>,
         _: &ArgsOf<L>,
+        _: &mut (),
     ) -> Self {
         Timeout {
             at: TIMEOUT.with(|t| t.borrow_mut().take()),
@@ -332,6 +340,7 @@ impl<L: PartList<L> + 'static> Hooks<Base, L, LinkPath> for SeesEntry {
     fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, LinkPath>>>(
         _: BuildView<'_, Self, Base, L, LinkPath, KP>,
         _: &ArgsOf<L>,
+        _: &mut (),
     ) -> Self {
         SeesEntry
     }
@@ -461,7 +470,7 @@ pub struct Q;
 composition!(impl driver for Q: Conn, HList![Base], TestClock);
 
 fn driver(clock: TestClock) -> Driver<Q> {
-    let d = Driver::<Q>::new(clock, frunk_core::hlist![()]).unwrap();
+    let d = Driver::<Q>::new(clock, frunk_core::hlist![()], ()).unwrap();
     assert_eq!(log(), ["build Conn"]);
     d
 }
@@ -837,6 +846,7 @@ mod http_like {
         fn build<KP: KeyedList<L, BuildKeyed<Self, Base, L, H>>>(
             _: BuildView<'_, Self, Base, L, H, KP>,
             _: &ArgsOf<L>,
+            _: &mut (),
         ) -> Self {
             Seen
         }
@@ -897,12 +907,12 @@ mod http_like {
     fn a_body_asks_the_connection_to_close_its_stream() {
         reset();
         let clock = TestClock::default();
-        let mut d = Driver::<QH>::new(clock.clone(), frunk_core::hlist![()]).unwrap();
+        let mut d = Driver::<QH>::new(clock.clone(), frunk_core::hlist![()], ()).unwrap();
         clock.set(Duration::from_secs(2));
         let stream = d
-            .add::<Stream, _, _>(nitori_driver::structure::End, StreamId(4))
+            .add::<Stream, _, _>(nitori_driver::structure::End, StreamId(4), ())
             .unwrap();
-        d.add::<Body, _, _>(stream, ()).unwrap();
+        d.add::<Body, _, _>(stream, (), ()).unwrap();
         // the hooks read the instant the driver read when it was entered
         assert_eq!(
             log(),

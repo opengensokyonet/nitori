@@ -28,7 +28,7 @@ pub use edit::{
 };
 pub use kind::{
     ByOwnKey, Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, Link,
-    LinkList, NodeKind, StorageAt,
+    LinkList, LinkedStart, NodeKind, StorageAt,
 };
 pub use node::{
     ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, RemainsList, RemainsOf, Share, Shares,

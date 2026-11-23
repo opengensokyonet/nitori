@@ -13,7 +13,7 @@ use frunk_core::{
     indices::{Here as I0, There},
 };
 
-use super::{KeyedCell, LendError};
+use super::{FreezeOne, KeyedCell, LendError};
 use crate::{
     need::LinkPos,
     structure::{
@@ -206,17 +206,17 @@ impl<'a, CK: KindFor<P>, P: 'a, Path, K: Clone + Eq + 'static> OffChain<'a, CK, 
 pub trait OnChain<'a, CK: KindFor<P>, P, Path>: ChildStorage {
     /// The cells of the other children.
     type Others;
-    /// Split off the node at `at`.
+    /// Split off the node at `at`, with the key it is kept under.
     #[allow(clippy::type_complexity)]
     fn split(
         s: &'a mut StoreOf<Self, Node<CK, P>>,
         at: Self::Handle,
-    ) -> Option<(&'a mut Node<CK, P>, Self::Others)>;
+    ) -> Option<(&'a Self::Key, &'a mut Node<CK, P>, Self::Others)>;
 }
 impl<'a, CK: KindFor<P>, P: 'a, Path> OnChain<'a, CK, P, Path> for AtMostOne {
     type Others = HNil;
-    fn split(s: &'a mut Option<Node<CK, P>>, _: ()) -> Option<(&'a mut Node<CK, P>, HNil)> {
-        Some((s.as_mut()?, HNil))
+    fn split(s: &'a mut Option<Node<CK, P>>, _: ()) -> Option<(&'a (), &'a mut Node<CK, P>, HNil)> {
+        Some((&(), s.as_mut()?, HNil))
     }
 }
 impl<'a, CK: KindFor<P>, P: 'a, Path, K: Clone + Eq + 'static> OnChain<'a, CK, P, Path>
@@ -226,14 +226,15 @@ impl<'a, CK: KindFor<P>, P: 'a, Path, K: Clone + Eq + 'static> OnChain<'a, CK, P
     fn split(
         s: &'a mut SlotVecStore<K, Node<CK, P>>,
         at: usize,
-    ) -> Option<(&'a mut Node<CK, P>, Self::Others)> {
+    ) -> Option<(&'a K, &'a mut Node<CK, P>, Self::Others)> {
         if at >= s.slots.len() {
             return None;
         }
         let (before, rest) = s.slots.split_at_mut(at);
         let (own, after) = rest.split_first_mut()?;
-        let (_, own) = own.as_mut()?;
+        let (key, own) = own.as_mut()?;
         Some((
+            key,
             own,
             HCons {
                 head: Cell::new(KeyedCell::new(before, after)),
@@ -323,15 +324,21 @@ impl RoleOf for (False, True) {
 }
 type RoleAt<Ch, Lk, Pos> =
     <(<Ch as ChainAtPos<Pos>>::Out, <Lk as LinkAtPos<Pos>>::Out) as RoleOf>::Role;
-type RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk> =
-    <RoleAt<Ch, Lk, Pos> as RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk>>::Out;
+type RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> =
+    <RoleAt<Ch, Lk, Pos> as RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc>>::Out;
 
-/// What gets the cells of the store at one position, by the store's role.
-pub trait RoleCells<'a, CK: KindFor<P>, S: ChildStorage, P, Pre, Pos, Ch, Lk> {
+/// What gets the cells of the store at one position, by the store's role;
+/// `Kc` says whose key is lent ([`OwnKeySource`]).
+pub trait RoleCells<'a, CK: KindFor<P>, S: ChildStorage, P, Pre, Pos, Ch, Lk, Kc> {
     /// The cells.
     type Out;
     /// Split the store.
-    fn cells(s: &'a mut StoreOf<S, Node<CK, P>>, ch: Ch, lk: Lk) -> Result<Self::Out, SplitError>;
+    fn cells(
+        s: &'a mut StoreOf<S, Node<CK, P>>,
+        ch: Ch,
+        lk: Lk,
+        kc: Kc,
+    ) -> Result<Self::Out, SplitError>;
 }
 /// Why splitting the tree around a node failed.
 #[derive(Debug, PartialEq, Eq)]
@@ -350,22 +357,28 @@ impl core::fmt::Display for SplitError {
     }
 }
 impl core::error::Error for SplitError {}
-impl<'a, CK, S, P, Pre, Pos, Ch, Lk> RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk> for RoleOther
+impl<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> for RoleOther
 where
     CK: KindFor<P>,
     S: OffChain<'a, CK, P, HCons<Pos, Pre>>,
 {
     type Out = S::Out;
-    fn cells(s: &'a mut StoreOf<S, Node<CK, P>>, _: Ch, _: Lk) -> Result<S::Out, SplitError> {
+    fn cells(
+        s: &'a mut StoreOf<S, Node<CK, P>>,
+        _: Ch,
+        _: Lk,
+        _: Kc,
+    ) -> Result<S::Out, SplitError> {
         Ok(S::cells(s))
     }
 }
-impl<'a, CK, S, P: 'a, Pre, Pos, H, R, Lk> RoleCells<'a, CK, S, P, Pre, Pos, Step<Pos, H, R>, Lk>
-    for RoleChain
+impl<'a, CK, S, P: 'a, Pre, Pos, H, R, Lk, Kc>
+    RoleCells<'a, CK, S, P, Pre, Pos, Step<Pos, H, R>, Lk, Kc> for RoleChain
 where
     CK: KindFor<P>,
     S: OnChain<'a, CK, P, HCons<Pos, Pre>, Handle = H>,
-    R: ChainCells<'a, CK, P, HCons<Pos, Pre>, NoLink>,
+    Kc: OwnKeySource<'a>,
+    R: ChainCells<'a, CK, P, HCons<Pos, Pre>, NoLink, Kc::Pick<S::Key>>,
     R::Out: Add<S::Others>,
 {
     type Out = <R::Out as Add<S::Others>>::Output;
@@ -373,107 +386,207 @@ where
         s: &'a mut StoreOf<S, Node<CK, P>>,
         ch: Step<Pos, H, R>,
         _: Lk,
+        kc: Kc,
     ) -> Result<Self::Out, SplitError> {
-        let (n, others) = S::split(s, ch.handle).ok_or(SplitError::NoNode)?;
-        Ok(ch.rest.cells(n, NoLink)? + others)
+        let (key, n, others) = S::split(s, ch.handle).ok_or(SplitError::NoNode)?;
+        Ok(ch.rest.cells(n, NoLink, kc.pick(key))? + others)
     }
 }
-/// The linked node only; the rest of its store is not lent.
-impl<'a, CK, S, P: 'a, Pre, Pos, H, Ch> RoleCells<'a, CK, S, P, Pre, Pos, Ch, LinkTo<Pos, H>>
-    for RoleLink
+/// The linked node only; the rest of its store is not lent, nor its key.
+impl<'a, CK, S, P: 'a, Pre, Pos, H, Ch, Kc>
+    RoleCells<'a, CK, S, P, Pre, Pos, Ch, LinkTo<Pos, H>, Kc> for RoleLink
 where
     CK: KindFor<P>,
     S: ChildStorage<Handle = H>,
-    End: ChainCells<'a, CK, P, HCons<LinkPos<Pos>, Pre>, NoLink>,
+    End: ChainCells<'a, CK, P, HCons<LinkPos<Pos>, Pre>, NoLink, FromSplit>,
 {
-    type Out = <End as ChainCells<'a, CK, P, HCons<LinkPos<Pos>, Pre>, NoLink>>::Out;
+    type Out = <End as ChainCells<'a, CK, P, HCons<LinkPos<Pos>, Pre>, NoLink, FromSplit>>::Out;
     fn cells(
         s: &'a mut StoreOf<S, Node<CK, P>>,
         _: Ch,
         lk: LinkTo<Pos, H>,
+        _: Kc,
     ) -> Result<Self::Out, SplitError> {
         let n = s.get_mut(lk.0).ok_or(SplitError::NoLinked)?;
-        End.cells(n, NoLink)
+        End.cells(n, NoLink, FromSplit)
     }
 }
 
 /// The cells of all the children of a node lent, from the position `Pos`
 /// on.
-pub trait ChildrenCells<'a, P, Pre, Pos, Ch, Lk>: ChildStores<P> {
+pub trait ChildrenCells<'a, P, Pre, Pos, Ch, Lk, Kc>: ChildStores<P> {
     /// The cells.
     type Out;
     /// Split the stores.
-    fn cells(stores: &'a mut Self::Stores, ch: Ch, lk: Lk) -> Result<Self::Out, SplitError>;
+    fn cells(stores: &'a mut Self::Stores, ch: Ch, lk: Lk, kc: Kc)
+    -> Result<Self::Out, SplitError>;
 }
-impl<'a, P, Pre, Pos, Ch, Lk> ChildrenCells<'a, P, Pre, Pos, Ch, Lk> for HNil {
+impl<'a, P, Pre, Pos, Ch, Lk, Kc> ChildrenCells<'a, P, Pre, Pos, Ch, Lk, Kc> for HNil {
     type Out = HNil;
-    fn cells(_: &'a mut HNil, _: Ch, _: Lk) -> Result<HNil, SplitError> {
+    fn cells(_: &'a mut HNil, _: Ch, _: Lk, _: Kc) -> Result<HNil, SplitError> {
         Ok(HNil)
     }
 }
-impl<'a, P: 'a, Pre, Pos, Ch: Copy, Lk: Copy, CK, S, T> ChildrenCells<'a, P, Pre, Pos, Ch, Lk>
-    for HCons<Child<CK, S>, T>
+impl<'a, P: 'a, Pre, Pos, Ch: Copy, Lk: Copy, Kc: Copy, CK, S, T>
+    ChildrenCells<'a, P, Pre, Pos, Ch, Lk, Kc> for HCons<Child<CK, S>, T>
 where
     CK: KindFor<P>,
     S: ChildStorage,
-    T: ChildrenCells<'a, P, Pre, There<Pos>, Ch, Lk>,
+    T: ChildrenCells<'a, P, Pre, There<Pos>, Ch, Lk, Kc>,
     Ch: ChainAtPos<Pos>,
     Lk: LinkAtPos<Pos>,
     (Ch::Out, Lk::Out): RoleOf,
-    RoleAt<Ch, Lk, Pos>: RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk>,
-    RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk>: Add<T::Out>,
+    RoleAt<Ch, Lk, Pos>: RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc>,
+    RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc>: Add<T::Out>,
 {
-    type Out = <RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk> as Add<T::Out>>::Output;
-    fn cells(stores: &'a mut Self::Stores, ch: Ch, lk: Lk) -> Result<Self::Out, SplitError> {
+    type Out = <RoleOut<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc> as Add<T::Out>>::Output;
+    fn cells(
+        stores: &'a mut Self::Stores,
+        ch: Ch,
+        lk: Lk,
+        kc: Kc,
+    ) -> Result<Self::Out, SplitError> {
         let HCons { head, tail } = stores;
-        let here = <RoleAt<Ch, Lk, Pos> as RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk>>::cells(
-            head, ch, lk,
+        let here = <RoleAt<Ch, Lk, Pos> as RoleCells<'a, CK, S, P, Pre, Pos, Ch, Lk, Kc>>::cells(
+            head, ch, lk, kc,
         )?;
-        Ok(here + T::cells(tail, ch, lk)?)
+        Ok(here + T::cells(tail, ch, lk, kc)?)
     }
 }
 
+/// Where the key a lend's [`OwnKey`](crate::need::OwnKey) reads comes
+/// from: the split of the chain ([`FromSplit`], for a node lent itself), or
+/// a key given ([`GivenKey`], for the node a `build` builds). The node
+/// lent last on the chain gets its cells ([`Cells`](OwnKeySource::Cells)).
+pub trait OwnKeySource<'a>: Copy {
+    /// The cell of the key, or none.
+    type Cells;
+    /// The source one level down, past a node kept under a key `K`.
+    type Pick<K: 'a>: OwnKeySource<'a>;
+    /// The cell.
+    fn cells(self) -> Self::Cells;
+    /// One level down, past a node kept under `key`.
+    fn pick<K: 'a>(self, key: &'a K) -> Self::Pick<K>;
+}
+/// The key comes from the split: the root's is none.
+#[derive(Clone, Copy)]
+pub struct FromSplit;
+/// The key of a node on the way down, from the split.
+pub struct SplitKey<'a, K>(&'a K);
+impl<K> Clone for SplitKey<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K> Copy for SplitKey<'_, K> {}
+/// The key given, whatever the split finds.
+pub struct GivenKey<'a, K>(pub &'a K);
+impl<K> Clone for GivenKey<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K> Copy for GivenKey<'_, K> {}
+/// The key a lend reads, as a cell.
+pub struct OwnKeyRef<'a, K>(pub &'a K);
+impl<K> Clone for OwnKeyRef<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K> Copy for OwnKeyRef<'_, K> {}
+impl<'a, K> FreezeOne for OwnKeyRef<'a, K> {
+    type Out = Self;
+    fn freeze(self) -> Self {
+        self
+    }
+}
+/// The place the key's cell is tagged with.
+pub struct OwnKeyPlace;
+/// The cell of the key a lend reads.
+pub type OwnKeyCell<'a, K> = Cell<OwnKeyPlace, OwnKeyRef<'a, K>>;
+impl<'a> OwnKeySource<'a> for FromSplit {
+    type Cells = HNil;
+    type Pick<K: 'a> = SplitKey<'a, K>;
+    fn cells(self) -> HNil {
+        HNil
+    }
+    fn pick<K: 'a>(self, key: &'a K) -> SplitKey<'a, K> {
+        SplitKey(key)
+    }
+}
+impl<'a, J: 'a> OwnKeySource<'a> for SplitKey<'a, J> {
+    type Cells = HCons<OwnKeyCell<'a, J>, HNil>;
+    type Pick<K: 'a> = SplitKey<'a, K>;
+    fn cells(self) -> Self::Cells {
+        HCons {
+            head: Cell::new(OwnKeyRef(self.0)),
+            tail: HNil,
+        }
+    }
+    fn pick<K: 'a>(self, key: &'a K) -> SplitKey<'a, K> {
+        SplitKey(key)
+    }
+}
+impl<'a, J: 'a> OwnKeySource<'a> for GivenKey<'a, J> {
+    type Cells = HCons<OwnKeyCell<'a, J>, HNil>;
+    type Pick<K: 'a> = Self;
+    fn cells(self) -> Self::Cells {
+        HCons {
+            head: Cell::new(OwnKeyRef(self.0)),
+            tail: HNil,
+        }
+    }
+    fn pick<K: 'a>(self, _: &'a K) -> Self {
+        self
+    }
+}
+
+type OwnCells<'a, Kc> = <Kc as OwnKeySource<'a>>::Cells;
+type NodeCells<'a, K, P, Pre, Ch, Lk, Kc> = <<FlatOf<'a, K, P> as Wrap<Pre>>::Out as Add<
+    <<K as NodeKind>::Children as ChildrenCells<'a, P, Pre, I0, Ch, Lk, Kc>>::Out,
+>>::Output;
+
 /// The cells of a node on the chain and of everything lent below it;
-/// `self` is the rest of the path.
-pub trait ChainCells<'a, K: KindFor<P>, P, Pre, Lk>: Copy {
+/// `self` is the rest of the path. `Kc` says whose key is lent: the node
+/// lent last gets its cell.
+pub trait ChainCells<'a, K: KindFor<P>, P, Pre, Lk, Kc = FromSplit>: Copy {
     /// The cells.
     type Out;
     /// Split the node.
-    fn cells(self, n: &'a mut Node<K, P>, lk: Lk) -> Result<Self::Out, SplitError>;
+    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, SplitError>;
 }
-impl<'a, K, P: 'a, Pre, Lk: Copy> ChainCells<'a, K, P, Pre, Lk> for End
+impl<'a, K, P: 'a, Pre, Lk: Copy, Kc> ChainCells<'a, K, P, Pre, Lk, Kc> for End
 where
     K: KindFor<P>,
     K::Data: FlatMut<'a>,
     FlatOf<'a, K, P>: Wrap<Pre>,
-    K::Children: ChildrenCells<'a, P, Pre, I0, NoChain, Lk>,
+    Kc: OwnKeySource<'a>,
+    K::Children: ChildrenCells<'a, P, Pre, I0, NoChain, Lk, Kc>,
     <FlatOf<'a, K, P> as Wrap<Pre>>::Out:
-        Add<<K::Children as ChildrenCells<'a, P, Pre, I0, NoChain, Lk>>::Out>,
+        Add<<K::Children as ChildrenCells<'a, P, Pre, I0, NoChain, Lk, Kc>>::Out>,
+    OwnCells<'a, Kc>: Add<NodeCells<'a, K, P, Pre, NoChain, Lk, Kc>>,
 {
-    type Out = <<FlatOf<'a, K, P> as Wrap<Pre>>::Out as Add<
-        <K::Children as ChildrenCells<'a, P, Pre, I0, NoChain, Lk>>::Out,
-    >>::Output;
-    fn cells(self, n: &'a mut Node<K, P>, lk: Lk) -> Result<Self::Out, SplitError> {
+    type Out = <OwnCells<'a, Kc> as Add<NodeCells<'a, K, P, Pre, NoChain, Lk, Kc>>>::Output;
+    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, SplitError> {
         let Node { data, children, .. } = n;
-        Ok(data.flat_mut().wrap() + K::Children::cells(children, NoChain, lk)?)
+        Ok(kc.cells() + (data.flat_mut().wrap() + K::Children::cells(children, NoChain, lk, kc)?))
     }
 }
-impl<'a, K, P: 'a, Pre, Lk: Copy, I, H: Copy, R: Copy> ChainCells<'a, K, P, Pre, Lk>
+impl<'a, K, P: 'a, Pre, Lk: Copy, Kc: Copy, I, H: Copy, R: Copy> ChainCells<'a, K, P, Pre, Lk, Kc>
     for Step<I, H, R>
 where
     K: KindFor<P>,
     K::Data: FlatMut<'a>,
     FlatOf<'a, K, P>: Wrap<Pre>,
-    K::Children: ChildrenCells<'a, P, Pre, I0, Step<I, H, R>, Lk>,
+    K::Children: ChildrenCells<'a, P, Pre, I0, Step<I, H, R>, Lk, Kc>,
     <FlatOf<'a, K, P> as Wrap<Pre>>::Out:
-        Add<<K::Children as ChildrenCells<'a, P, Pre, I0, Step<I, H, R>, Lk>>::Out>,
+        Add<<K::Children as ChildrenCells<'a, P, Pre, I0, Step<I, H, R>, Lk, Kc>>::Out>,
 {
-    type Out = <<FlatOf<'a, K, P> as Wrap<Pre>>::Out as Add<
-        <K::Children as ChildrenCells<'a, P, Pre, I0, Step<I, H, R>, Lk>>::Out,
-    >>::Output;
-    fn cells(self, n: &'a mut Node<K, P>, lk: Lk) -> Result<Self::Out, SplitError> {
+    type Out = NodeCells<'a, K, P, Pre, Step<I, H, R>, Lk, Kc>;
+    fn cells(self, n: &'a mut Node<K, P>, lk: Lk, kc: Kc) -> Result<Self::Out, SplitError> {
         let Node { data, children, .. } = n;
-        Ok(data.flat_mut().wrap() + K::Children::cells(children, self, lk)?)
+        Ok(data.flat_mut().wrap() + K::Children::cells(children, self, lk, kc)?)
     }
 }
 
