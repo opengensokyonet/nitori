@@ -6,15 +6,17 @@
 //! it at: [`set(at, &waker, p)`](TimerTable::set). One waker has at most
 //! one instant, and setting it again replaces it; a component that waits
 //! for several instants sets the earliest. An instant wakes once: when it
-//! has been reached, its entry is gone. [`clear(&waker)`](TimerTable::clear)
-//! forgets it before.
+//! has come, its entry is gone. [`clear(&waker)`](TimerTable::clear)
+//! forgets it before, and a component that sets instants clears its entry
+//! when its node ends.
 //!
 //! The table is an ordinary component. A call next to it, at the root,
 //! sleeps on the composition's clock until the earliest instant, wakes
-//! every component whose instant has been reached at the priority it was
-//! set with, and sleeps again; a `set` that moves the earliest instant
-//! earlier wakes the call to sleep anew. The driver knows nothing of
-//! timers.
+//! every component whose instant has come at the priority it was set
+//! with, and sleeps again; a `set` that moves the earliest instant earlier
+//! wakes the call to sleep anew, at the priority the composition's
+//! priority type gives it ([`TimerCallPriority`]). The driver knows
+//! nothing of timers.
 //!
 //! [`Part<Q>`](Part) keeps the table and the call at the root of the
 //! composition `Q`, with its clock and its priority; it is written in the
@@ -45,6 +47,12 @@
 //! #     fn timer_granularity(&self) -> Duration { Duration::ZERO }
 //! # }
 //!
+//! #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+//! struct Level(u8);
+//! impl nitori_driver_timer::TimerCallPriority for Level {
+//!     const TIMER_CALL: Self = Level(2);
+//! }
+//!
 //! #[derive(Numbered)]
 //! struct Conn;
 //! impl NodeKind for Conn {
@@ -67,15 +75,16 @@
 //! }
 //!
 //! struct Q;
-//! composition!(impl for Q: Conn, HList![Base, nitori_driver_timer::Part<Q>], Stopped, u8);
+//! composition!(impl for Q: Conn, HList![Base, nitori_driver_timer::Part<Q>], Stopped, Level);
 //!
-//! let mut driver = Driver::<Q>::new(Stopped, (), hlist![(), ()], 0);
+//! type Table = TimerTable<Stopped, Level>;
+//! let mut driver = Driver::<Q>::new(Stopped, (), hlist![(), ()], Level(0));
 //! driver
-//!     .operate::<Conn, HList![Mut<TimerTable<Stopped, u8>>, Clock<Stopped>, WakerOf<Idle>], _, _, _>(
+//!     .operate::<Conn, HList![Mut<Table>, Clock<Stopped>, WakerOf<Idle>], _, _, _>(
 //!         &KeyAddress::here(),
 //!         |hlist_pat![table, clock, waker]| {
 //!             let at = clock.checked_add(clock.now(), Duration::from_secs(30)).unwrap();
-//!             table.set(at, &waker, 1);
+//!             table.set(at, &waker, Level(1));
 //!         },
 //!     )
 //!     .unwrap()
@@ -92,7 +101,7 @@ mod fire;
 mod part;
 mod table;
 
-pub use fire::FireTimers;
+pub use fire::{FireTimers, TimerCallPriority};
 #[doc(hidden)]
 pub use part::AtRoot;
 pub use part::Part;

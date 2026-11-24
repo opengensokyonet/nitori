@@ -44,7 +44,7 @@ jobs:
           cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Check the packages without the standard library
         run: |
-          for package in nitori_id nitori_clock nitori_crypto nitori_call nitori_driver nitori_io nitori_sync; do
+          for package in nitori_id nitori_clock nitori_crypto nitori_call nitori_driver nitori_driver_timer nitori_io nitori_sync; do
             cargo clippy --locked -p "$package" --target x86_64-unknown-none --no-default-features -- -D warnings
           done
           cargo clippy --locked -p nitori_call --target x86_64-unknown-none --no-default-features --features bytes -- -D warnings

@@ -2,21 +2,25 @@
 
 use core::marker::PhantomData;
 
-use frunk_core::hlist::{HList as HListTrait, HNil};
 use nitori_clock::MonotonicClock;
 use nitori_driver::{
     call::{ClockOf, Composition, PriorityOf, RootOf},
-    frunk_core::{self, HList},
+    frunk_core::{
+        HList,
+        hlist::{HList as HListTrait, HNil},
+    },
     id::{False, NumberEq, Numbered, True},
     structure::Share,
 };
 
-use crate::{FireTimers, TimerTable};
+use crate::{FireTimers, TimerCallPriority, TimerTable};
 
 /// The part that keeps the timer table, and the call that wakes what is
 /// due, at the root of the composition `Q`, with its clock and its
 /// priority. It is written in `Q`'s own list of parts, and has no
-/// arguments; on every other kind it keeps nothing.
+/// arguments; on every other kind it keeps nothing. The composition's
+/// priority type gives the priority the call is woken at
+/// ([`TimerCallPriority`]).
 pub struct Part<Q>(PhantomData<fn() -> Q>);
 
 impl<L, Q> nitori_driver::component::Part<L> for Part<Q> {
@@ -45,7 +49,7 @@ pub trait AtRoot<C, P> {
     /// The calls.
     type Calls: HListTrait + 'static;
 }
-impl<C: MonotonicClock + 'static, P: Ord + Copy + 'static> AtRoot<C, P> for True {
+impl<C: MonotonicClock + 'static, P: TimerCallPriority> AtRoot<C, P> for True {
     type Data = HList![TimerTable<C, P>];
     type Calls = HList![FireTimers<C, P>];
 }

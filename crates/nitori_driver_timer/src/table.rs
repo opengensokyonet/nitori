@@ -15,9 +15,22 @@ use nitori_driver::{
 /// The timer component: for each component waker at most one instant, and
 /// the priority to wake it at.
 ///
-/// `C` is the composition's clock and `P` its priority; [`Part`](crate::Part)
-/// keeps one table at the root. Components take it as
+/// `C` is the composition's clock and `P` its priority, and no others:
+/// [`Part`](crate::Part) keeps one table at the root, and a need with
+/// another clock or priority does not compile. Components take it as
 /// `Mut<TimerTable<C, P>>`, which reaches the root from any node.
+///
+/// A component is woken when the clock's timer for its instant ends; a
+/// clock's timer may end before its reading gets there, so the instant
+/// the component's lending reads may still be earlier than the one it
+/// set. Being woken is the instant having come: setting the same instant
+/// again because the reading is earlier wakes it again at once.
+///
+/// An entry stays until its instant even when its node ends; the driver
+/// then drops the wake, since the waker is of a node that is gone. A
+/// component that sets instants clears its entry in its
+/// [`end`](nitori_driver::component::Component::end), so that the table
+/// does not keep entries of nodes that are gone.
 pub struct TimerTable<C: MonotonicClock, P> {
     entries: Vec<(C::Instant, ComponentWaker, P)>,
     arm: Arm<C::Instant>,
@@ -60,10 +73,10 @@ impl<C: MonotonicClock, P: Ord + Copy> TimerTable<C, P> {
     /// what was set for `waker` before.
     ///
     /// When `at` is earlier than what the timer call sleeps until, the call
-    /// is woken to sleep until `at`. It is woken at the priority it set
-    /// for itself, the highest of the entries it last saw; an entry of a
-    /// priority higher than all of those waits for the call's turn at that
-    /// priority before the call wakes it at its own.
+    /// is woken to sleep until `at`, at the priority
+    /// [`TimerCallPriority::TIMER_CALL`](crate::TimerCallPriority::TIMER_CALL)
+    /// gives; an entry of a priority above that waits for the call's turn
+    /// at it before the call wakes the entry's component at its own.
     pub fn set(&mut self, at: C::Instant, waker: &ComponentWaker, p: P) {
         match self.entries.iter_mut().find(|(_, w, _)| w == waker) {
             Some(entry) => *entry = (at, *waker, p),
@@ -107,18 +120,14 @@ impl<C: MonotonicClock, P: Ord + Copy> TimerTable<C, P> {
             !due
         });
     }
-    /// Arm for the earliest instant: it, and the highest priority of all
-    /// the entries, for the call to be woken at; `None` when the table is
-    /// empty.
-    pub(crate) fn arm(&mut self) -> Option<(C::Instant, P)> {
+    /// Arm for the earliest instant, `None` when the table is empty.
+    pub(crate) fn arm(&mut self) -> Option<C::Instant> {
         let at = self.entries.iter().map(|(at, _, _)| *at).min();
-        let p = self.entries.iter().map(|(_, _, p)| *p).max();
-        let next = at.zip(p);
-        self.arm = match next {
-            Some((at, _)) => Arm::Until(at),
+        self.arm = match at {
+            Some(at) => Arm::Until(at),
             None => Arm::Idle,
         };
-        next
+        at
     }
     /// Keep the call's waker; whether a `set` moved the earliest instant
     /// since the call armed.
@@ -136,9 +145,9 @@ impl<C: MonotonicClock, P: Ord + Copy> Default for TimerTable<C, P> {
     }
 }
 
-/// The table is built empty, by whichever part keeps it, at whichever
-/// kind.
-impl<O, L, K, C, P> Component<O, L, K> for TimerTable<C, P>
+/// The table is built empty, by the timer part, at whichever kind it keeps
+/// it at.
+impl<Q, L, K, C, P> Component<crate::Part<Q>, L, K> for TimerTable<C, P>
 where
     L: PartList<L>,
     K: NodeKind,

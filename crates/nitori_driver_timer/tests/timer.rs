@@ -172,19 +172,17 @@ fn a_timer_ended_before_the_reading_wakes_what_it_was_for() {
 }
 
 #[test]
-fn the_call_is_woken_at_the_highest_priority_of_all_entries() {
+fn a_higher_instant_set_into_a_low_table_goes_before_mid_work() {
     let clock = FakeClock::default();
-    let (mut d, w) = driver(&clock, &[1, 2, 3, 4]);
-    // the earliest is low, a later one high: the call sets high for itself
-    set(&mut d, 1, s(5), Level::Low);
-    set(&mut d, 2, s(10), Level::High);
+    let (mut d, w) = driver(&clock, &[1, 2, 4]);
+    set(&mut d, 1, s(10), Level::Low);
     poll(&mut d, &w);
-    // leaf 4 is woken at mid; leaf 3 is set already due at high, which
-    // wakes the call at the priority it set
+    // leaf 4 is woken at mid; leaf 2 is set already due at high: the call
+    // is woken at its own priority, high, and wakes leaf 2 at high
     wake(&mut d, 4, Level::Mid);
-    set(&mut d, 3, s(0), Level::High);
+    set(&mut d, 2, s(0), Level::High);
     poll(&mut d, &w);
-    assert_eq!(woken(), [3, 4]);
+    assert_eq!(woken(), [2, 4]);
 }
 
 #[test]

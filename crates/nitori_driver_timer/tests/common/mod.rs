@@ -13,11 +13,11 @@ use std::{
 };
 
 use nitori_driver::{
-    component::{ArgsOf, Component, PartList},
+    component::{ArgsOf, Component, EndCause, PartList},
     driver::{Edit, HandlerFor},
     frunk_core::{HList, hlist_pat},
     id::Numbered,
-    need::{OwnKey, Pos, View},
+    need::{Mut, OwnKey, Pos, View, WakerOf},
     request::HandleRequest,
     structure::{Child, NodeKind, Share, SlotVec},
 };
@@ -30,11 +30,29 @@ pub fn woken() -> Vec<u32> {
     LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
+std::thread_local! {
+    static CLEAR_ON_END: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NEXT: RefCell<Vec<Duration>> = const { RefCell::new(Vec::new()) };
+}
+/// Whether an alarm clears its own instant when its leaf ends (off at the
+/// start of every test).
+pub fn clear_on_end(on: bool) {
+    CLEAR_ON_END.with(|c| c.set(on));
+}
+/// The instants an alarm sets for itself, one in each of its wakes, in
+/// order.
+pub fn next_instants(list: &[Duration]) {
+    NEXT.with(|n| *n.borrow_mut() = list.to_vec());
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Level {
     Low,
     Mid,
     High,
+}
+impl nitori_driver_timer::TimerCallPriority for Level {
+    const TIMER_CALL: Self = Level::High;
 }
 
 /// A clock that moves only when told to.
@@ -139,7 +157,11 @@ pub struct Adding;
 impl HandleRequest<Top, Level> for Adding {
     type Needs = HList![];
     fn handle<P: HandlerFor<Top, Self, Level>>(mut edit: Edit<'_, Top, P>, key: u32) {
-        let _ = edit.add::<Leaf, _>(key, (), Level::Low);
+        if key >= 1000 {
+            let _ = edit.end::<Leaf, _>(&(key - 1000), ());
+        } else {
+            let _ = edit.add::<Leaf, _>(key, (), Level::Low);
+        }
     }
 }
 
@@ -152,9 +174,29 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
         let hlist_pat![key] = view;
         Alarm(key)
     }
+    type Needs = HList![
+        Mut<nitori_driver_timer::TimerTable<FakeClock, Level>>,
+        WakerOf<Alarm>
+    ];
     fn wake<P: Pos>(view: nitori_driver::component::ComponentView<'_, Self, Self::Needs, P>) {
-        let hlist_pat![me] = view;
+        let hlist_pat![me, table, waker] = view;
         LOG.with(|l| l.borrow_mut().push(me.0));
+        let next = NEXT.with(|n| {
+            let mut n = n.borrow_mut();
+            (!n.is_empty()).then(|| n.remove(0))
+        });
+        if let Some(at) = next {
+            table.set(at, &waker, Level::Low);
+        }
+    }
+    fn end<P: Pos>(
+        view: nitori_driver::component::ComponentView<'_, Self, Self::Needs, P>,
+        _: EndCause<'_, ()>,
+    ) {
+        let hlist_pat![_, table, waker] = view;
+        if CLEAR_ON_END.with(|c| c.get()) {
+            table.clear(&waker);
+        }
     }
 }
 
