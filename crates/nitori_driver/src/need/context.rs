@@ -44,6 +44,11 @@ impl<C: MonotonicClock> LentClock<C> {
     pub fn checked_add(&self, at: C::Instant, by: Duration) -> Option<C::Instant> {
         self.clock.checked_add(at, by)
     }
+    /// A timer of the clock that ends at `at`
+    /// ([`MonotonicClock::sleep_until`]).
+    pub fn sleep_until(&self, at: C::Instant) -> C::Sleep {
+        self.clock.sleep_until(at)
+    }
 }
 
 /// Putting requests `R` in the box the lending's context holds for them;

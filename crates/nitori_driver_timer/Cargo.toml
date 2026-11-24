@@ -1,0 +1,18 @@
+[package]
+name = "nitori_driver_timer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+description = "The timer component of nitori_driver, and the part that keeps it at the root"
+
+[features]
+default = ["std"]
+# A driver with the timer part that is `Send`, through nitori_driver's
+# feature of the same name.
+std = ["nitori_driver/std"]
+
+[dependencies]
+nitori_call.workspace = true
+nitori_clock.workspace = true
+nitori_driver.workspace = true

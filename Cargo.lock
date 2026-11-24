@@ -273,6 +273,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitori_driver_timer"
+version = "0.0.0"
+dependencies = [
+ "nitori_call",
+ "nitori_clock",
+ "nitori_driver",
+]
+
+[[package]]
 name = "nitori_id"
 version = "0.0.0"
 

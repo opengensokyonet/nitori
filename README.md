@@ -4,7 +4,7 @@ Foundational Rust tools for Open Gensokyo Network, administratively supported by
 
 Source: [opengensokyonet/nitori](https://github.com/opengensokyonet/nitori).
 
-This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, `nitori_driver` a driver for the state of one connection and its calls, `nitori_clock` a monotonic clock, and a DATA frame codec prototype. The TLS 1.3 handshake package has moved to the kasen repository as `kasen_handshake`. The current APIs are experimental and are not stable production APIs.
+This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, `nitori_driver` a driver for the state of one connection and its calls, `nitori_driver_timer` its timer component, `nitori_clock` a monotonic clock, and a DATA frame codec prototype. The TLS 1.3 handshake package has moved to the kasen repository as `kasen_handshake`. The current APIs are experimental and are not stable production APIs.
 
 ## Layout
 
@@ -15,6 +15,7 @@ Each package documents itself in its own README or crate documentation. Dependen
 - [`crates/nitori_call`](crates/nitori_call/README.md): operations written as ordinary async functions that run on a resource their caller lends one poll at a time; depends on `nitori_call_macros`.
 - `crates/nitori_call_macros`: the `#[call]` and `#[capability]` procedural macros of `nitori_call`.
 - [`crates/nitori_driver`](crates/nitori_driver/README.md): a driver for the state of one connection: the structure of nodes, the needs lent to calls and components, capabilities, reaction points, requests and their handlers, and the driver that runs the calls by priority; depends on `nitori_call` and `nitori_clock`.
+- [`crates/nitori_driver_timer`](crates/nitori_driver_timer/README.md): the timer component of `nitori_driver`, which wakes components at the instants they set, and the part that keeps it at the root; depends on `nitori_driver`, `nitori_call` and `nitori_clock`.
 
 ### IO
 
@@ -46,7 +47,7 @@ Each package documents itself in its own README or crate documentation. Dependen
 
 ## Development
 
-Install [rustup](https://rustup.rs/) and Python 3; `nitori_crypto_aws_lc` also needs a C compiler and CMake. The repository pins `nightly-2026-11-03` with rustfmt, Clippy and the `x86_64-unknown-none` target in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`). `nitori_id`, `nitori_clock`, `nitori_crypto`, `nitori_call`, `nitori_driver`, `nitori_io` and `nitori_sync` build without the standard library, with `alloc`; the parts of `nitori_call`, `nitori_io` and `nitori_sync` that need it are behind their default `std` feature, and `nitori_driver`'s default `std` feature turns on `nitori_call`'s, so that a driver can be `Send`. They are checked on `x86_64-unknown-none`, a target without the standard library that has 64-bit atomics, one package at a time, since a workspace build unifies the `std` features of all packages.
+Install [rustup](https://rustup.rs/) and Python 3; `nitori_crypto_aws_lc` also needs a C compiler and CMake. The repository pins `nightly-2026-11-03` with rustfmt, Clippy and the `x86_64-unknown-none` target in `rust-toolchain.toml` (rustc 1.101.0-nightly, 1c3a65069). Run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`). `nitori_id`, `nitori_clock`, `nitori_crypto`, `nitori_call`, `nitori_driver`, `nitori_driver_timer`, `nitori_io` and `nitori_sync` build without the standard library, with `alloc`; the parts of `nitori_call`, `nitori_io` and `nitori_sync` that need it are behind their default `std` feature, and `nitori_driver`'s default `std` feature turns on `nitori_call`'s, so that a driver can be `Send`. They are checked on `x86_64-unknown-none`, a target without the standard library that has 64-bit atomics, one package at a time, since a workspace build unifies the `std` features of all packages.
 
 SNAFU is pinned to commit `03cb8d2e52a3b0b33a39cc3d4ce8a7075fa4ab58` in the public [Open Gensokyo Network fork](https://github.com/opengensokyonet/snafu), pending [upstream PR #565](https://github.com/shepmaster/snafu/pull/565). Its conditional diagnostic trait implementations and decoupled error construction are required. Cargo fetches this source automatically; no sibling checkout is needed.
 
@@ -62,7 +63,7 @@ From the repository root:
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-for package in nitori_id nitori_clock nitori_crypto nitori_call nitori_driver nitori_io nitori_sync; do
+for package in nitori_id nitori_clock nitori_crypto nitori_call nitori_driver nitori_driver_timer nitori_io nitori_sync; do
   cargo clippy --locked -p "$package" --target x86_64-unknown-none --no-default-features -- -D warnings
 done
 cargo clippy --locked -p nitori_call --target x86_64-unknown-none --no-default-features --features bytes -- -D warnings
