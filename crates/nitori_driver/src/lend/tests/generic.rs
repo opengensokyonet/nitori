@@ -9,7 +9,7 @@ use frunk_core::{HList, hlist, hlist_pat};
 use super::fixtures::{lend, *};
 use crate::{
     lend::{Visit, lend_visit},
-    need::{Clock, Members, Mut, Pos, Ref, Under, View, WakerOf},
+    need::{At, Clock, Members, Mut, OwnKey, Pos, Ref, Requests, Under, View, WakerOf},
 };
 
 /// The results of one call on structure one and on structure two are the
@@ -225,5 +225,94 @@ fn pto_expired() {
             Some((second, Some((1, Some(Duration::from_secs(8)), true)))),
             Some((second, None)),
         ],
+    );
+}
+
+type CloseNeeds = HList![
+    Under<
+        ConnCore,
+        At<
+            LinkCore,
+            HList![
+                Mut<LinkCore>,
+                WakerOf<LinkCore>,
+                OwnKey<LinkId>,
+                Requests<Ping>,
+            ],
+        >,
+    >,
+    Requests<Close>,
+];
+
+/// The connection closes: every link, lent all at once, counts one more
+/// datagram and puts in a last ping for itself, and the connection puts in
+/// its close after them.
+struct CloseAll;
+impl Visit<CloseNeeds> for CloseAll {
+    type Out = (usize, bool);
+    fn visit<'v, P: Pos>(self, view: View<'v, CloseNeeds, P>) -> Self::Out {
+        let hlist_pat![mut links, closes] = view;
+        let mut wakers = true;
+        for (_, hlist_pat![link, waker, own, pings]) in links.iter_mut() {
+            link.rx += 1;
+            pings.push(Ping(*own));
+            wakers &= *waker == waker.clone();
+        }
+        closes.push(Close);
+        (links.len(), wakers)
+    }
+}
+
+/// What a close did: its result, the requests put in and every link's
+/// count.
+type Closed = (
+    Option<(usize, bool)>,
+    (alloc::vec::Vec<(u64, Ping)>, alloc::vec::Vec<(u64, Close)>),
+    Option<alloc::vec::Vec<u32>>,
+);
+
+#[test]
+fn closed_fan_out() {
+    let mut cx = test_cx();
+    let mut root = tree_one_as_two();
+    let out =
+        lend_visit::<_, _, Conn1, _, CloseNeeds, _, _, _>(&mut root, &hlist![], &mut cx, CloseAll);
+    let one: Closed = (
+        out,
+        requests(&mut cx),
+        lend!(
+            &mut root,
+            Conn1,
+            HList![Under<ConnCore, Ref<LinkCore>>],
+            hlist![],
+            |hlist_pat![v]| v.iter().map(|(_, l)| l.rx).collect()
+        ),
+    );
+    let mut cx = test_cx();
+    let mut root = tree_two();
+    let out =
+        lend_visit::<_, _, Conn2, _, CloseNeeds, _, _, _>(&mut root, &hlist![], &mut cx, CloseAll);
+    let two: Closed = (
+        out,
+        requests(&mut cx),
+        lend!(
+            &mut root,
+            Conn2,
+            HList![Under<ConnCore, Ref<LinkCore>>],
+            hlist![],
+            |hlist_pat![v]| v.iter().map(|(_, l)| l.rx).collect()
+        ),
+    );
+    same_on_both(
+        one,
+        two,
+        (
+            Some((2, true)),
+            (
+                alloc::vec![(0, Ping(LinkId(1))), (1, Ping(LinkId(2)))],
+                alloc::vec![(2, Close)],
+            ),
+            Some(alloc::vec![1, 1]),
+        ),
     );
 }

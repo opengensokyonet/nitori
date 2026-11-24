@@ -285,22 +285,31 @@ pub struct Close;
 
 /// The context the tests lend with: a clock read at one second, and boxes
 /// for pings and closes.
-pub type TestCx = HList![
-    crate::need::LentClock<TestClock>,
-    crate::need::RequestBox<Ping>,
-    crate::need::RequestBox<Close>,
-];
+pub type TestCx = crate::lend::context::Context<
+    HList![
+        crate::need::LentClock<TestClock>,
+        crate::lend::context::RequestList<Ping>,
+        crate::lend::context::RequestList<Close>,
+    ],
+>;
 
 /// The context, read at one second, with empty boxes.
 pub fn test_cx() -> TestCx {
-    hlist![
+    crate::lend::context::Context::new(hlist![
         crate::need::LentClock::new(
             TestClock {
                 last: core::time::Duration::from_secs(10)
             },
             core::time::Duration::from_secs(1)
         ),
-        crate::need::RequestBox::new(),
-        crate::need::RequestBox::new(),
-    ]
+        crate::lend::context::RequestList::new(),
+        crate::lend::context::RequestList::new(),
+    ])
+}
+
+/// The pings and the closes put in the boxes of `cx`, each with its place
+/// in the order, leaving the boxes empty.
+pub fn requests(cx: &mut TestCx) -> (alloc::vec::Vec<(u64, Ping)>, alloc::vec::Vec<(u64, Close)>) {
+    let frunk_core::hlist_pat![_, pings, closes] = cx.pieces_mut();
+    (pings.take(), closes.take())
 }

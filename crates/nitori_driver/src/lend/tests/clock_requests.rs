@@ -25,7 +25,7 @@ fn clock_and_requests() {
         &mut cx,
         |hlist_pat![planner, clock, pings, own]| {
             let _: &LentClock<TestClock> = clock;
-            let _: &mut RequestBox<Ping> = pings;
+            let _: RequestBox<'_, Ping> = pings;
             pings.push(Ping(own));
             planner.next_pn += 1;
             (
@@ -52,9 +52,12 @@ fn clock_and_requests() {
         }
     );
     assert_eq!(got, Some(Duration::from_secs(1)));
-    let hlist_pat![_, pings, closes] = &mut cx;
-    assert_eq!(pings.take(), alloc::vec![Ping(LinkId(2)), Ping(LinkId(1))]);
-    assert!(closes.take().is_empty());
+    let (pings, closes) = requests(&mut cx);
+    assert_eq!(
+        pings,
+        alloc::vec![(0, Ping(LinkId(2))), (1, Ping(LinkId(1)))]
+    );
+    assert!(closes.is_empty());
 }
 
 /// Every link reads the clock; one at a time, each sends a ping.
@@ -97,17 +100,17 @@ fn in_members() {
         read.len()
     });
     assert_eq!(got, Some(2));
-    let hlist_pat![_, pings, closes] = &mut cx;
+    let (pings, closes) = requests(&mut cx);
     assert_eq!(
-        pings.take(),
+        pings,
         alloc::vec![
-            Ping(LinkId(1)),
-            Ping(LinkId(2)),
-            Ping(LinkId(3)),
-            Ping(LinkId(20))
+            (0, Ping(LinkId(1))),
+            (1, Ping(LinkId(2))),
+            (2, Ping(LinkId(3))),
+            (4, Ping(LinkId(20)))
         ]
     );
-    assert_eq!(closes.take(), alloc::vec![Close]);
+    assert_eq!(closes, alloc::vec![(3, Close)]);
 }
 
 /// Both branches of a `+` put pings in; one also reads the clock.
@@ -153,10 +156,50 @@ fn in_branches() {
         }
     );
     assert_eq!(got, Some(()));
-    let hlist_pat![_, pings, closes] = &mut cx;
+    let (pings, closes) = requests(&mut cx);
     assert_eq!(
-        pings.take(),
-        alloc::vec![Ping(LinkId(1)), Ping(LinkId(300)), Ping(LinkId(200))]
+        pings,
+        alloc::vec![
+            (0, Ping(LinkId(1))),
+            (1, Ping(LinkId(300))),
+            (3, Ping(LinkId(200)))
+        ]
     );
-    assert_eq!(closes.take(), alloc::vec![Close]);
+    assert_eq!(closes, alloc::vec![(2, Close)]);
+}
+
+/// Every link, lent all at once, puts a ping in, beside a second
+/// `Requests<Ping>` and the closes: one box each, in the order put in.
+type AllLinks = HList![
+    Under<ConnCore, At<LinkCore, HList![Ref<LinkCore>, Requests<Ping>]>>,
+    Requests<Close>,
+    Requests<Ping>,
+];
+
+#[test]
+fn shared_by_members_at_once() {
+    let mut cx = test_cx();
+    let mut root = tree_one();
+    let got = lend_in!(&mut root, Conn1, AllLinks, hlist![], &mut cx, |hlist_pat![
+        links, closes, pings
+    ]| {
+        pings.push(Ping(LinkId(0)));
+        for (k, hlist_pat![_, each]) in links.iter() {
+            each.push(Ping(k.1));
+            closes.push(Close);
+        }
+        links.len()
+    });
+    assert_eq!(got, Some(3));
+    let (pings, closes) = requests(&mut cx);
+    assert_eq!(
+        pings,
+        alloc::vec![
+            (0, Ping(LinkId(0))),
+            (1, Ping(LinkId(1))),
+            (3, Ping(LinkId(2))),
+            (5, Ping(LinkId(3)))
+        ]
+    );
+    assert_eq!(closes, alloc::vec![(2, Close), (4, Close), (6, Close)]);
 }

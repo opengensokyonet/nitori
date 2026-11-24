@@ -1,7 +1,7 @@
 //! The needs that read the lending itself: the clock the driver read for
 //! it and the boxes requests are put in.
 use alloc::vec::Vec;
-use core::{marker::PhantomData, time::Duration};
+use core::{cell::Cell, marker::PhantomData, time::Duration};
 
 use nitori_clock::MonotonicClock;
 
@@ -43,76 +43,65 @@ impl<C: MonotonicClock> LentClock<C> {
 }
 
 /// Putting requests `R` in the box the lending's context holds for them;
-/// the driver handles them in the order they were put in.
+/// the driver handles the requests of one lending in the order they were
+/// put in, whatever their types.
 ///
-/// Putting in only adds, so it does not overlap any other need; a list
-/// takes one `Requests<R>` for each type of request. Members of an
-/// [`Under`](super::Under) lent all at once would share the one box, so
-/// there it is taken [`OneAtATime`](super::OneAtATime).
+/// Putting in only adds, so it overlaps no other need: a list may take
+/// `Requests<R>` more than once, and every member of an
+/// [`Under`](super::Under) may take it, all putting in the one box.
 ///
 /// ```
 /// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends_in!(
-///     HList![RequestBox<Ping>, RequestBox<Close>],
+///     HList![RequestList<Ping>, RequestList<Close>],
 ///     LinkPath,
-///     HList![Mut<LinkCore>, Requests<Ping>, Requests<Close>]
+///     HList![Mut<LinkCore>, Requests<Ping>, Requests<Close>, At<SentRecords, HList![Requests<Ping>]>]
 /// );
 /// lends_in!(
-///     HList![RequestBox<Ping>],
+///     HList![RequestList<Ping>],
 ///     Conn,
-///     HList![Under<ConnCore, OneAtATime<At<LinkCore, HList![Mut<LinkCore>, Requests<Ping>]>>>]
+///     HList![Under<ConnCore, At<LinkCore, HList![Mut<LinkCore>, Requests<Ping>]>>, Requests<Ping>]
 /// );
 /// ```
 ///
-/// The same type of request twice in one list does not compile, nor does
-/// a context without its box:
+/// A context without its box does not compile:
 ///
 /// ```compile_fail,E0277
 /// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
-/// lends_in!(
-///     HList![RequestBox<Ping>],
-///     LinkPath,
-///     HList![Requests<Ping>, At<SentRecords, HList![Requests<Ping>]>]
-/// );
-/// ```
-///
-/// ```compile_fail,E0277
-/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
-/// lends_in!(HList![RequestBox<Close>], LinkPath, HList![Requests<Ping>]);
-/// ```
-///
-/// and neither do members lent all at once that each put requests in:
-///
-/// ```compile_fail,E0277
-/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
-/// lends_in!(
-///     HList![RequestBox<Ping>],
-///     Conn,
-///     HList![Under<ConnCore, At<LinkCore, HList![Mut<LinkCore>, Requests<Ping>]>>]
-/// );
+/// lends_in!(HList![RequestList<Close>], LinkPath, HList![Requests<Ping>]);
 /// ```
 pub struct Requests<R>(PhantomData<fn() -> R>);
 impl<R: 'static> Need for Requests<R> {
-    type View<'t, P: Pos> = &'t mut RequestBox<R>;
+    type View<'t, P: Pos> = RequestBox<'t, R>;
 }
 
 /// What [`Requests`]`<R>` is lent as: the box the requests are put in.
-pub struct RequestBox<R> {
-    requests: Vec<R>,
+///
+/// A handle, copied to every need that takes it; each request put in is
+/// numbered from the one order of the lending, so the requests of all
+/// types keep the order they were put in.
+pub struct RequestBox<'t, R> {
+    requests: &'t Cell<Vec<(u64, R)>>,
+    order: &'t Cell<u64>,
 }
-impl<R> RequestBox<R> {
-    /// An empty box.
-    pub(crate) fn new() -> Self {
-        Self {
-            requests: Vec::new(),
-        }
+impl<R> Clone for RequestBox<'_, R> {
+    fn clone(&self) -> Self {
+        *self
     }
-    /// Put `request` in, after those put in before it.
-    pub fn push(&mut self, request: R) {
-        self.requests.push(request);
+}
+impl<R> Copy for RequestBox<'_, R> {}
+impl<'t, R> RequestBox<'t, R> {
+    /// The box of `requests`, numbered from `order`.
+    pub(crate) fn new(requests: &'t Cell<Vec<(u64, R)>>, order: &'t Cell<u64>) -> Self {
+        Self { requests, order }
     }
-    /// The requests put in, in order, leaving the box empty.
-    pub(crate) fn take(&mut self) -> Vec<R> {
-        core::mem::take(&mut self.requests)
+    /// Put `request` in, after every request put in before it in this
+    /// lending.
+    pub fn push(&self, request: R) {
+        let at = self.order.get();
+        self.order.set(at + 1);
+        let mut requests = self.requests.take();
+        requests.push((at, request));
+        self.requests.set(requests);
     }
 }

@@ -1,13 +1,14 @@
 //! The context of a lending, and the needs that read it: the clock the
 //! driver read and the boxes requests are put in.
 //!
-//! The context is a list of pieces ([`Piece`]); a lending lays it out as
-//! one row, a slot per piece, and each context need takes its piece from
-//! the row in the first pass, as an exclusive column is taken from the
-//! rows of the tables. The clock is shared and stays in its slot; a
-//! request box is taken out of it, once, which the check of overlaps
-//! ([`Asks`]) makes sure of.
-use core::marker::PhantomData;
+//! The context ([`Context`]) is a list of pieces ([`Piece`]) and the
+//! order requests are put in; a lending lays it out as one row, a slot per
+//! piece, and each context need copies its piece from the row in the first
+//! pass. Every piece is shared: the clock is read, and a request box only
+//! adds, numbering each request from the one order of the context, so no
+//! context need overlaps another.
+use alloc::vec::Vec;
+use core::{cell::Cell, marker::PhantomData};
 
 use frunk_core::{
     hlist::{HCons, HNil},
@@ -17,10 +18,10 @@ use nitori_clock::MonotonicClock;
 
 use super::{
     Lend,
-    check::{Check, Clash, Deep, DeepEnoughAll, DisjointFrom, Takes, TakesExclusive, Touch},
-    list::{IndexEq, Z},
+    check::{Check, Takes, TakesExclusive},
+    list::IndexEq,
     plan::{ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol},
-    plus::{IndexOf, Item, Merge, MergeTaking, Norm, Pick, SameItem, SameTaking, Union},
+    plus::{IndexOf, Item, Merge, Norm, Pick, SameItem, Union},
     table::KindTab,
     tree::Ctx,
 };
@@ -31,7 +32,24 @@ use crate::{
 
 // ------------------------------------------------------------------ the context
 
-/// The context of a lending: a list of pieces, or `()` for none.
+/// The context of a lending: the pieces `L`, a list, and the order every
+/// request of the lending is put in.
+pub struct Context<L> {
+    order: u64,
+    pieces: L,
+}
+impl<L> Context<L> {
+    /// The pieces `pieces`, with no request put in yet.
+    pub(crate) fn new(pieces: L) -> Self {
+        Self { order: 0, pieces }
+    }
+    /// The pieces.
+    pub(crate) fn pieces_mut(&mut self) -> &mut L {
+        &mut self.pieces
+    }
+}
+
+/// The context of a lending: a [`Context`], or `()` for none.
 pub trait LendContext: 'static {
     /// One slot per piece, borrowed for `'a`.
     type Row<'a>;
@@ -42,67 +60,82 @@ impl LendContext for () {
     type Row<'a> = ();
     fn row(&mut self) {}
 }
-impl LendContext for HNil {
+impl<L: Pieces> LendContext for Context<L> {
+    type Row<'a> = L::Row<'a>;
+    fn row<'a>(&'a mut self) -> L::Row<'a> {
+        let Context { order, pieces } = self;
+        pieces.row(Cell::from_mut(order))
+    }
+}
+
+/// The pieces of a context, a list.
+pub trait Pieces: 'static {
+    /// One slot per piece, borrowed for `'a`.
+    type Row<'a>;
+    /// Every piece in its slot; `order` numbers the requests.
+    fn row<'a>(&'a mut self, order: &'a Cell<u64>) -> Self::Row<'a>;
+}
+impl Pieces for HNil {
     type Row<'a> = HNil;
-    fn row(&mut self) -> HNil {
+    fn row(&mut self, _: &Cell<u64>) -> HNil {
         HNil
     }
 }
-impl<H: Piece, T: LendContext> LendContext for HCons<H, T> {
-    type Row<'a> = HCons<Option<H::Hs<'a>>, T::Row<'a>>;
-    fn row<'a>(&'a mut self) -> Self::Row<'a> {
+impl<H: Piece, T: Pieces> Pieces for HCons<H, T> {
+    type Row<'a> = HCons<H::Hs<'a>, T::Row<'a>>;
+    fn row<'a>(&'a mut self, order: &'a Cell<u64>) -> Self::Row<'a> {
         let HCons { head, tail } = self;
         HCons {
-            head: Some(head.lend()),
-            tail: tail.row(),
+            head: head.lend(order),
+            tail: tail.row(order),
         }
     }
 }
 
-/// A piece of the context, and what a need that reads it is given.
+/// A piece of the context, and what a need that reads it is given: a
+/// handle every need that reads it copies.
 pub trait Piece: 'static {
     /// What the need is given, borrowed for `'a`.
-    type Hs<'a>;
-    /// The piece, as it is put in its slot.
-    fn lend<'a>(&'a mut self) -> Self::Hs<'a>;
-    /// What a need is given of the piece in `slot`.
-    fn take<'a>(slot: &mut Option<Self::Hs<'a>>) -> Self::Hs<'a>;
-    /// What is given, lent again for a shorter time.
-    fn rebor<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>) -> Self::Hs<'b>;
+    type Hs<'a>: Copy;
+    /// The piece, as it is put in its slot; `order` numbers the requests.
+    fn lend<'a>(&'a mut self, order: &'a Cell<u64>) -> Self::Hs<'a>;
     /// What is given, for a shorter time.
     fn shorten<'a: 'c, 'c>(hs: Self::Hs<'a>) -> Self::Hs<'c>;
 }
 impl<C: MonotonicClock + 'static> Piece for LentClock<C> {
     type Hs<'a> = &'a LentClock<C>;
-    fn lend(&mut self) -> &LentClock<C> {
+    fn lend<'a>(&'a mut self, _: &'a Cell<u64>) -> &'a LentClock<C> {
         self
-    }
-    fn take<'a>(slot: &mut Option<Self::Hs<'a>>) -> Self::Hs<'a> {
-        // Invariant: the clock is shared; no need takes it out of its slot.
-        (*slot).expect("the clock stays in its slot")
-    }
-    fn rebor<'b, 'c: 'b>(hs: &'b mut &'c LentClock<C>) -> &'b LentClock<C> {
-        hs
     }
     fn shorten<'a: 'c, 'c>(hs: &'a LentClock<C>) -> &'c LentClock<C> {
         hs
     }
 }
-impl<R: 'static> Piece for RequestBox<R> {
-    type Hs<'a> = &'a mut RequestBox<R>;
-    fn lend(&mut self) -> &mut RequestBox<R> {
-        self
+
+/// The requests `R` put in during a lending, each with its place in the
+/// order of the context.
+pub struct RequestList<R> {
+    requests: Vec<(u64, R)>,
+}
+impl<R> RequestList<R> {
+    /// No requests.
+    pub(crate) fn new() -> Self {
+        Self {
+            requests: Vec::new(),
+        }
     }
-    fn take<'a>(slot: &mut Option<Self::Hs<'a>>) -> Self::Hs<'a> {
-        // Invariant: the check of overlaps refuses a list that takes the
-        // box of one type of request twice.
-        slot.take()
-            .expect("a request box is taken once in a lending")
+    /// The requests put in, each with its place in the order, leaving the
+    /// list empty.
+    pub(crate) fn take(&mut self) -> Vec<(u64, R)> {
+        core::mem::take(&mut self.requests)
     }
-    fn rebor<'b, 'c: 'b>(hs: &'b mut &'c mut RequestBox<R>) -> &'b mut RequestBox<R> {
-        hs
+}
+impl<R: 'static> Piece for RequestList<R> {
+    type Hs<'a> = RequestBox<'a, R>;
+    fn lend<'a>(&'a mut self, order: &'a Cell<u64>) -> RequestBox<'a, R> {
+        RequestBox::new(Cell::from_mut(&mut self.requests), order)
     }
-    fn shorten<'a: 'c, 'c>(hs: &'a mut RequestBox<R>) -> &'c mut RequestBox<R> {
+    fn shorten<'a: 'c, 'c>(hs: RequestBox<'a, R>) -> RequestBox<'c, R> {
         hs
     }
 }
@@ -111,20 +144,35 @@ impl<R: 'static> Piece for RequestBox<R> {
 #[diagnostic::on_unimplemented(
     message = "the context of the lending has no `{Pc}`",
     label = "a context need reads a piece this context does not hold",
-    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestBox<R>`; the driver's context holds its own clock and a box for each type of request"
+    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestList<R>`; the driver's context holds its own clock and a list for each type of request"
 )]
 pub trait HasPiece<Pc: Piece, I>: LendContext {
-    /// The piece's slot.
-    fn slot<'r, 'a>(row: &'r mut Self::Row<'a>) -> &'r mut Option<Pc::Hs<'a>>;
+    /// The piece, from its slot.
+    fn piece<'a>(row: &Self::Row<'a>) -> Pc::Hs<'a>;
 }
-impl<Pc: Piece, T: LendContext> HasPiece<Pc, Here> for HCons<Pc, T> {
-    fn slot<'r, 'a>(row: &'r mut Self::Row<'a>) -> &'r mut Option<Pc::Hs<'a>> {
-        &mut row.head
+impl<Pc: Piece, L: PieceIn<Pc, I>, I> HasPiece<Pc, I> for Context<L> {
+    fn piece<'a>(row: &L::Row<'a>) -> Pc::Hs<'a> {
+        L::piece(row)
     }
 }
-impl<Pc: Piece, H: Piece, T: HasPiece<Pc, I>, I> HasPiece<Pc, There<I>> for HCons<H, T> {
-    fn slot<'r, 'a>(row: &'r mut Self::Row<'a>) -> &'r mut Option<Pc::Hs<'a>> {
-        T::slot(&mut row.tail)
+/// The pieces `Self` hold the piece `Pc`, at `I` (inferred).
+#[diagnostic::on_unimplemented(
+    message = "the context of the lending has no `{Pc}`",
+    label = "a context need reads a piece this context does not hold",
+    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestList<R>`; the driver's context holds its own clock and a list for each type of request"
+)]
+pub trait PieceIn<Pc: Piece, I>: Pieces {
+    /// The piece, from its slot.
+    fn piece<'a>(row: &Self::Row<'a>) -> Pc::Hs<'a>;
+}
+impl<Pc: Piece, T: Pieces> PieceIn<Pc, Here> for HCons<Pc, T> {
+    fn piece<'a>(row: &Self::Row<'a>) -> Pc::Hs<'a> {
+        row.head
+    }
+}
+impl<Pc: Piece, H: Piece, T: PieceIn<Pc, I>, I> PieceIn<Pc, There<I>> for HCons<H, T> {
+    fn piece<'a>(row: &Self::Row<'a>) -> Pc::Hs<'a> {
+        T::piece(&row.tail)
     }
 }
 
@@ -147,7 +195,7 @@ where
     where
         Self: 'a,
     {
-        Pc::take(X::slot(cx))
+        X::piece(cx)
     }
     fn gather<'a: 'b, 'b>(_: &'b R::Table<'a>) -> Self::Store<'b>
     where
@@ -161,18 +209,18 @@ where
         Pc::shorten(ex)
     }
 }
-/// The clock is shared: every member of an `Under` reads it.
-impl<M, I: 'static, C: MonotonicClock + 'static> PartPlan<M> for CxCol<I, LentClock<C>> {
-    fn part<'a>(hs: &mut &'a LentClock<C>, _: &M) -> &'a LentClock<C>
+/// A piece is shared: every member of an `Under` copies it.
+impl<M, I: 'static, Pc: Piece> PartPlan<M> for CxCol<I, Pc> {
+    fn part<'a>(hs: &mut Pc::Hs<'a>, _: &M) -> Pc::Hs<'a>
     where
         Self: 'a,
     {
-        hs
+        *hs
     }
 }
 impl<I: 'static, Pc: Piece> Rebor for CxCol<I, Pc> {
     fn rebor<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>) -> Pc::Hs<'b> {
-        Pc::rebor(hs)
+        Pc::shorten(*hs)
     }
 }
 
@@ -207,17 +255,17 @@ impl<I, Pc, Rt, F> SameItem<CxCol<I, Pc>> for NodeSet<Rt, F> {
 }
 impl<I: 'static, Pc: Piece> Item for CxCol<I, Pc> {
     type Slot<'b, 'c>
-        = Option<Pc::Hs<'b>>
+        = Pc::Hs<'b>
     where
         'c: 'b;
     type Seen<'b, 'c>
         = ()
     where
         'c: 'b;
-    fn slot<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>) -> Option<Pc::Hs<'b>> {
-        Some(Pc::rebor(hs))
+    fn slot<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>) -> Pc::Hs<'b> {
+        Pc::shorten(*hs)
     }
-    fn seen<'b, 'c: 'b>(_: Option<Pc::Hs<'b>>) {}
+    fn seen<'b, 'c: 'b>(_: Pc::Hs<'b>) {}
 }
 
 /// The piece `Pc` is in the union at `I`.
@@ -230,7 +278,7 @@ pub trait CxAt<I>: Union {
 impl<J: 'static, Pc: Piece, T: Union> CxAt<Here> for HCons<CxCol<J, Pc>, T> {
     type Pc = Pc;
     fn cx<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> Pc::Hs<'b> {
-        Pc::take(&mut slots.head)
+        slots.head
     }
 }
 impl<H: Item, T: CxAt<I>, I> CxAt<There<I>> for HCons<H, T> {
@@ -280,89 +328,31 @@ impl<C, K, I> Takes<C, CxPos<I>> for Clock<K> {
 
 impl<C: Ctx, R: 'static, I: 'static> Lend<C, CxPos<I>> for Requests<R>
 where
-    C::Context: HasPiece<RequestBox<R>, I>,
+    C::Context: HasPiece<RequestList<R>, I>,
 {
-    type Cols = CxCol<I, RequestBox<R>>;
-    fn build<'a>(hs: &'a mut RequestBox<R>, _: &C::Fk) -> &'a mut RequestBox<R>
+    type Cols = CxCol<I, RequestList<R>>;
+    fn build<'a>(hs: RequestBox<'a, R>, _: &C::Fk) -> RequestBox<'a, R>
     where
         Self: 'a,
     {
         hs
     }
 }
-impl<C: Ctx, R: 'static, I> Check<C, CxPos<I>> for Requests<R>
-where
-    C::Context: HasPiece<RequestBox<R>, I>,
-    C::Depth: OutsideMembers<R>,
+impl<C: Ctx, R: 'static, I> Check<C, CxPos<I>> for Requests<R> where
+    C::Context: HasPiece<RequestList<R>, I>
 {
 }
+/// Putting in only adds: it takes nothing another need could overlap.
 impl<C, R, I> Takes<C, CxPos<I>> for Requests<R> {
-    type Touches = HCons<Asks<I, R>, HNil>;
+    type Touches = HNil;
 }
 
-/// The lend point is not a member of an `Under` lent all at once, which
-/// would each be given the one box of requests `R`.
-#[diagnostic::on_unimplemented(
-    message = "`Requests<{R}>` inside `Under` would be lent to every member at once, which share its box",
-    label = "every member would borrow the same request box",
-    note = "inside `Under<A, ..>`, `Requests<R>` is taken with the members `OneAtATime`, or outside the `Under`"
-)]
-pub trait OutsideMembers<R> {}
-impl<R> OutsideMembers<R> for Z {}
+// ------------------------------------------------------------------ exclusive
 
-// ------------------------------------------------------------------ overlap
-
-/// What `Requests<R>` takes: the box of the context at `I`, exclusive.
-pub struct Asks<I, R>(PhantomData<fn() -> (I, R)>);
-
-/// Two takings of one box: the same requests twice.
-#[diagnostic::on_unimplemented(
-    message = "`Requests<{R}>` is taken twice in one lending",
-    label = "these needs take the same request box",
-    note = "a list takes one `Requests<R>` for each type of request; the branches of a `Plus`, taken one at a time, may each take it"
-)]
-pub trait AskedOnce<R> {}
-impl<R> AskedOnce<R> for False {}
-
-impl<R1, X1, E1, I, R> Clash<Asks<I, R>> for Touch<R1, X1, E1> {
-    type Out = False;
-}
-impl<I, R, R2, X2, E2> Clash<Touch<R2, X2, E2>> for Asks<I, R> {
-    type Out = False;
-}
-impl<I: IndexEq<J>, R, J, R2> Clash<Asks<J, R2>> for Asks<I, R> {
-    type Out = I::Out;
-}
-impl<I, R, H, T> DisjointFrom<Asks<I, R>> for HCons<H, T>
-where
-    Asks<I, R>: Clash<H>,
-    <Asks<I, R> as Clash<H>>::Out: AskedOnce<R>,
-    T: DisjointFrom<Asks<I, R>>,
-{
-}
-
-impl<I: IndexEq<J>, R, J, R2> SameTaking<Asks<J, R2>> for Asks<I, R> {
-    type Out = I::Out;
-}
-impl<I, R, R2, X2, E2> SameTaking<Touch<R2, X2, E2>> for Asks<I, R> {
-    type Out = False;
-}
-impl<R1, X1, E1, I, R> SameTaking<Asks<I, R>> for Touch<R1, X1, E1> {
-    type Out = False;
-}
-impl<I, R, B> MergeTaking<B> for Asks<I, R> {
-    type Out = Self;
-}
-impl<T: DeepEnoughAll, I, R> DeepEnoughAll for HCons<Asks<I, R>, T> {}
-impl<I, R, J, Sd, W> Clash<Deep<J, Sd, W>> for Asks<I, R> {
-    type Out = False;
-}
-impl<I, R, J, Sd, W> SameTaking<Deep<J, Sd, W>> for Asks<I, R> {
-    type Out = False;
-}
+/// Neither context need takes anything exclusive.
 impl<C> TakesExclusive for Clock<C> {
     type Out = False;
 }
 impl<R> TakesExclusive for Requests<R> {
-    type Out = crate::id::True;
+    type Out = False;
 }

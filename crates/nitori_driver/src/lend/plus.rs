@@ -628,8 +628,7 @@ where
     type Touches = <Bs::Touches as OneEach>::Out;
 }
 
-/// Whether two takings are of the same thing: one component of one kind,
-/// or one request box.
+/// Whether two takings are of the same thing: one component of one kind.
 pub trait SameTaking<B> {
     /// [`True`] or [`False`].
     type Out;

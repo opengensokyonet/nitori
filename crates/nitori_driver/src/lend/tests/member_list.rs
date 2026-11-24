@@ -121,10 +121,13 @@ fn a_list_one_member_at_a_time() {
         nows.len()
     });
     assert_eq!(got, Some(3));
-    let hlist_pat![_, pings, _] = &mut cx;
     assert_eq!(
-        pings.take(),
-        vec![Ping(LinkId(1)), Ping(LinkId(2)), Ping(LinkId(3))]
+        requests(&mut cx).0,
+        vec![
+            (0, Ping(LinkId(1))),
+            (1, Ping(LinkId(2))),
+            (2, Ping(LinkId(3)))
+        ]
     );
     let acked = lend!(
         &mut root,

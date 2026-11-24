@@ -10,7 +10,6 @@ use super::{
         Check, CountChain, CountTree, Deep, DeepIf, ExactlyOneBelow, ExactlyOneUp, Spell, Takes,
         TakesExclusive, Touch, UpCount,
     },
-    context::Asks,
     list::{Append, Len, Prefix},
     plan::{NodeSet, Plan},
     tree::{Collect, Ctx, Cx, FindBelow, FindUp, ToShape},
@@ -18,7 +17,7 @@ use super::{
     up::{UpFk, UpKind, UpPre},
 };
 use crate::{
-    id::{False, True},
+    id::False,
     need::{At, Count, ExactlyOne, Locator, Members, OneOrNone, Pos, Shape, Under},
 };
 
@@ -179,15 +178,11 @@ pub trait OnlyReads {}
 impl OnlyReads for HNil {}
 impl<Rt, X, E: InputReads<X>, T: OnlyReads> OnlyReads for HCons<Touch<Rt, X, E>, T> {}
 impl<I, Sd, W, T: OnlyReads> OnlyReads for HCons<Deep<I, Sd, W>, T> {}
-impl<I, R, T: OnlyReads> OnlyReads for HCons<Asks<I, R>, T> where
-    True: InputReads<crate::need::RequestBox<R>>
-{
-}
 /// A taking by the input of a locator of `X` that only reads.
 #[diagnostic::on_unimplemented(
     message = "the input of a locator takes `{X}` exclusive; it may only read",
     label = "the input takes exclusive",
-    note = "`Locator::Input` is lent to pick the node, beside what is taken there; it takes `Ref`, never `Mut` or `Requests`"
+    note = "`Locator::Input` is lent to pick the node, beside what is taken there; it takes `Ref` and the context, never `Mut`"
 )]
 pub trait InputReads<X> {}
 impl<X> InputReads<X> for False {}

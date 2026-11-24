@@ -303,8 +303,8 @@ where
 {
 }
 
-/// Whether the need `Self` takes anything exclusive: a component, or a
-/// request box. It follows from the need alone, wherever it is lent.
+/// Whether the need `Self` takes anything exclusive: a component. It
+/// follows from the need alone, wherever it is lent.
 pub trait TakesExclusive {
     /// [`True`] or [`False`].
     type Out;

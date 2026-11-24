@@ -92,8 +92,8 @@ macro_rules! __doc_lends {
         >()
     };
 }
-/// Prove the needs `$n` at the kind `$l` of [`Conn`], lent with the
-/// context `$x`.
+/// Prove the needs `$n` at the kind `$l` of [`Conn`], lent with a
+/// context of the pieces `$x`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __doc_lends_in {
@@ -101,7 +101,7 @@ macro_rules! __doc_lends_in {
         $crate::__private::assert_lends_in::<
             $crate::__private::doc::Conn,
             $crate::__private::doc::Parts,
-            $x,
+            $crate::__private::doc::Context<$x>,
             $l,
             $n,
             _,
@@ -109,4 +109,7 @@ macro_rules! __doc_lends_in {
         >()
     };
 }
-pub use crate::{__doc_lends as lends, __doc_lends_in as lends_in};
+pub use crate::{
+    __doc_lends as lends, __doc_lends_in as lends_in,
+    lend::context::{Context, RequestList},
+};
