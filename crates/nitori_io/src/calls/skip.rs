@@ -46,6 +46,8 @@ pub enum SkipExactError<E, C> {
     /// The source reached EOF before the requested count was skipped.
     #[snafu(display("source ended with {remaining} bytes left to skip"))]
     Incomplete { remaining: C },
+    /// The host failed while skipping; `remaining` is the count still to be
+    /// skipped when it did.
     #[snafu(display("skip failed with {remaining} bytes left"))]
     Receiver { source: E, remaining: C },
 }

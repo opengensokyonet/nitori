@@ -9,7 +9,9 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use nitori_call::{Call, CallPoll, ComposedReceiver, Lend, Receiver, ReceiverAccess, call};
+use nitori_call::{
+    Call, CallPoll, Composed, ComposedReceiver, Lend, Receiver, ReceiverAccess, call,
+};
 use nitori_io::{
     Infinite,
     adapters::{Chunked, Limited, ReadChunkSkip, ReadLimit, ReadSkip, Skippable},
@@ -217,6 +219,30 @@ impl Read for Delayed<'_> {
     }
 }
 
+impl ReadChunk for Delayed<'_> {
+    type Chunk = Bytes;
+    fn poll_read_chunk<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<Bytes>, Infallible>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        if !this.waiting {
+            this.waiting = true;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        this.waiting = false;
+        let count = Ord::min(Ord::min(maximum.get(), this.bytes.len()), 1);
+        let chunk = Bytes::copy_from_slice(&this.bytes[..count]);
+        this.bytes = &this.bytes[count..];
+        Poll::Ready(Ok((count != 0).then_some(chunk)))
+    }
+}
+
 type Framed<'data> = Limited<Skippable<Delayed<'data>, ReadSkip>, ReadLimit>;
 
 #[test]
@@ -263,6 +289,109 @@ fn a_cancelled_skip_by_reading_leaves_a_budget_above_it_in_step() {
         (inner.get_ref().0.bytes, budget),
         (&b"f"[..], &ReadLimit(0))
     );
+}
+
+type ChunkFramed<'data> = Limited<Skippable<Delayed<'data>, ReadChunkSkip>, ReadLimit>;
+
+#[test]
+fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
+    let mut framed = ComposedReceiver::new(
+        ComposedReceiver::new(
+            Delayed {
+                bytes: b"abcdef",
+                waiting: false,
+            },
+            ReadChunkSkip,
+        ),
+        ReadLimit(5usize),
+    );
+    let mut call = Box::pin(Call::<ChunkFramed<'_>, _>::new(SkipExact::new(4)));
+    let mut cx = Context::from_waker(Waker::noop());
+    // The second poll skips the first byte, then waits for the second.
+    for _ in 0..2 {
+        let poll = call.as_mut().poll_with(
+            Some(Lend::Fixed(pin!(Pin::new(&mut framed).view()))),
+            &mut cx,
+        );
+        assert!(matches!(poll, CallPoll::Pending));
+    }
+    drop(call);
+    let (inner, budget) = framed.get_ref();
+    assert_eq!(inner.get_ref().0.bytes, b"bcdef");
+    assert_eq!(budget, &ReadLimit(4));
+    let mut call = pin!(Call::<ChunkFramed<'_>, _>::new(SkipExact::new(4)));
+    let result = loop {
+        let poll = call.as_mut().poll_with(
+            Some(Lend::Fixed(pin!(Pin::new(&mut framed).view()))),
+            &mut cx,
+        );
+        match poll {
+            CallPoll::Pending => continue,
+            CallPoll::Ready(ControlFlow::Break(result)) => break result,
+            _ => panic!("the call neither waits nor finishes"),
+        }
+    };
+    assert!(result.is_ok());
+    let (inner, budget) = framed.get_ref();
+    assert_eq!(
+        (inner.get_ref().0.bytes, budget),
+        (&b"f"[..], &ReadLimit(0))
+    );
+}
+
+/// Skips by reading on an access composed by value in a budget of five,
+/// composes the state again on that, then reads one byte and returns what is
+/// left of the budget.
+#[call(sync)]
+async fn skip_by_reading_on_composed<F: Read>(
+    io: &mut impl ReceiverAccess<Family = F>,
+    length: usize,
+) -> (
+    Result<(), SkipExactError<F::Error, usize>>,
+    Result<[u8; 1], nitori_io::calls::ReadArrayError<F::Error>>,
+    usize,
+) {
+    let mut budget = Composed::new(io, ReadLimit(5usize));
+    let mut skipping = budget.compose(ReadSkip);
+    let skipped = skipping.skip_exact(length).await;
+    let read = skipping.read_array::<1>().await;
+    (skipped, read, budget.into_state().0)
+}
+
+/// As above, by chunks.
+#[call(sync)]
+async fn skip_by_chunks_on_composed<F: ReadChunk>(
+    io: &mut impl ReceiverAccess<Family = F>,
+    length: usize,
+) -> (
+    Result<(), SkipExactError<F::Error, usize>>,
+    Result<[u8; 1], nitori_io::calls::ReadArrayError<F::Error>>,
+    usize,
+) {
+    let mut budget = Composed::new(io, ReadLimit(5usize));
+    let mut skipping = budget.compose(ReadChunkSkip);
+    let skipped = skipping.skip_exact(length).await;
+    let read = skipping.read_array::<1>().await;
+    (skipped, read, budget.into_state().0)
+}
+
+#[test]
+fn skipping_composes_on_an_access_composed_by_value() {
+    let mut input = reader(b"abcdefgh");
+    let (skipped, read, left) = input.sync_skip_by_reading_on_composed_unpin(3);
+    assert!(skipped.is_ok());
+    assert_eq!(read.unwrap(), *b"d");
+    assert_eq!(left, 1);
+    assert_eq!(input.get_ref().position(), 4);
+    let mut input = Chunks {
+        bytes: b"abcdefgh".to_vec(),
+        chunk_requests: 0,
+    };
+    let (skipped, read, left) = input.sync_skip_by_chunks_on_composed_unpin(3);
+    assert!(skipped.is_ok());
+    assert_eq!(read.unwrap(), *b"d");
+    assert_eq!(left, 1);
+    assert_eq!(input.bytes, b"efgh");
 }
 
 /// Every read fails.

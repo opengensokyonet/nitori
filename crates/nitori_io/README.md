@@ -296,8 +296,8 @@ on an access with `io.compose(..)` or on a receiver with
 `ComposedReceiver::new(..)`. `adapters::ReadSkip` reads at most 8 KiB into a
 stack buffer on each poll and drops it; `adapters::ReadChunkSkip` takes one
 chunk of at most the maximum and drops it, without copying. Both skip with
-`Count = usize`, hold no state, and forward `Read`, `ReadChunk` and
-`ExactLen` of the parent. There is no blanket implementation for readers, so
+`Count = usize`, hold no state, and forward `Read`, `ReadChunk`,
+`ExactLen` and `Write` of the parent. There is no blanket implementation for readers, so
 a source that can skip natively implements `Skip` itself.
 
 `calls::skip_exact(io, length)` skips exactly `length`, asking for at most

@@ -13,6 +13,7 @@ use nitori_call::{Call, CallPoll, ComposedReceiver, Lend, Receiver, ReceiverAcce
 use nitori_io::{
     Infinite, Min,
     adapters::{Chunked, Limited, ReadLimit},
+    calls::SkipExactError,
     prelude::*,
 };
 use std::{collections::VecDeque, io::Cursor};
@@ -92,6 +93,22 @@ fn the_boundary_answers_without_polling_the_parent() {
     // Within the budget, even an empty request reaches the parent.
     let mut framed = ComposedReceiver::new(Failing, ReadLimit(1usize));
     assert_eq!(framed.sync_skip_unpin(0usize), Err(Broken));
+}
+
+#[test]
+fn a_zero_maximum_at_a_zero_budget_answers_none_without_polling_the_parent() {
+    let mut framed = ComposedReceiver::new(Failing, ReadLimit(0usize));
+    assert_eq!(framed.sync_skip_unpin(0usize), Ok(None));
+    assert_eq!(framed.get_ref().1, &ReadLimit(0));
+}
+
+#[test]
+fn a_host_failure_displays_the_count_left() {
+    let error = SkipExactError::Receiver {
+        source: Broken,
+        remaining: 3usize,
+    };
+    assert_eq!(error.to_string(), "skip failed with 3 bytes left");
 }
 
 /// Skips up to `maximum` within a budget of `budget` composed on the access,
@@ -233,6 +250,53 @@ fn a_cancelled_skip_leaves_the_source_and_the_budget_in_step() {
     assert_eq!(result, Ok(()));
     let (source, budget) = framed.get_ref();
     assert_eq!((source.bytes, budget), (&b"f"[..], &ReadLimit(0)));
+}
+
+#[test]
+fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
+    type Framed<'data> = Limited<nitori_call::Direct<Chunked<Delayed<'data>>>, ReadLimit>;
+    let mut framed = ComposedReceiver::new(
+        Chunked::new(
+            Delayed {
+                bytes: b"abcdef",
+                waiting: false,
+            },
+            NonZeroUsize::MIN,
+        ),
+        ReadLimit(5usize),
+    );
+    let mut call = Box::pin(Call::<Framed<'_>, _>::new(SkipAll::new(4)));
+    let mut cx = Context::from_waker(Waker::noop());
+    // The second poll skips the first byte, then waits for the second.
+    for _ in 0..2 {
+        let poll = call.as_mut().poll_with(
+            Some(Lend::Fixed(pin!(Pin::new(&mut framed).view()))),
+            &mut cx,
+        );
+        assert!(matches!(poll, CallPoll::Pending));
+    }
+    drop(call);
+    let (chunked, budget) = framed.get_ref();
+    assert_eq!(chunked.get_ref().bytes, b"bcdef");
+    assert_eq!(budget, &ReadLimit(4));
+    let mut call = pin!(Call::<Framed<'_>, _>::new(SkipAll::new(4)));
+    let result = loop {
+        let poll = call.as_mut().poll_with(
+            Some(Lend::Fixed(pin!(Pin::new(&mut framed).view()))),
+            &mut cx,
+        );
+        match poll {
+            CallPoll::Pending => continue,
+            CallPoll::Ready(ControlFlow::Break(result)) => break result,
+            _ => panic!("the call neither waits nor finishes"),
+        }
+    };
+    assert_eq!(result, Ok(()));
+    let (chunked, budget) = framed.get_ref();
+    assert_eq!(
+        (chunked.get_ref().bytes, budget),
+        (&b"f"[..], &ReadLimit(0))
+    );
 }
 
 /// Every capability fails.
