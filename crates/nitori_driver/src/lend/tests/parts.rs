@@ -211,6 +211,13 @@ pub struct Probe;
 impl ReactionPoint for Probe {
     type Payload<'a> = u32;
 }
+/// A point the loss part reacts to at a link path with the link paths of
+/// the connection, a kind on the route to the lend point too.
+#[derive(Numbered)]
+pub struct Survey;
+impl ReactionPoint for Survey {
+    type Payload<'a> = u32;
+}
 /// A point whose reaction, at a link path, puts in a ping for it.
 #[derive(Numbered)]
 pub struct Pinged;
@@ -312,6 +319,26 @@ probe_reaction!(LossAtConn, "loss@conn", Mut<ConnCore>, |c| {
     c.rx
 });
 probe_reaction!(LossAtLink, "loss@link", Ref<LinkCore>, |l| l.rx);
+
+/// The loss part, at a link path, to a survey: every link path of the
+/// connection, the one on the route and the others, its planner read and
+/// its core counted.
+pub struct SurveyAtLink;
+impl Reaction<Survey> for SurveyAtLink {
+    type Needs = HList![Under<ConnCore, Ref<Planner>>, Under<ConnCore, Mut<LinkCore>>];
+    fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, payload: u32) {
+        let hlist_pat![planners, mut cores] = view;
+        let pns: u64 = Members::iter(&planners).map(|(_, p)| p.next_pn).sum();
+        for (_, c) in cores.iter_mut() {
+            c.rx += 1;
+        }
+        log(format!(
+            "survey@link {payload} {} {pns} {}",
+            Members::len(&planners),
+            Members::len(&cores)
+        ));
+    }
+}
 
 /// The core, at the connection, to a link path added: the connection
 /// counts it.

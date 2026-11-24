@@ -1,6 +1,6 @@
 //! Reaction points lent: the reactions to a point gathered from the shares
-//! of the kinds around the lend point, taken as the branches of one `+`,
-//! and run in turn.
+//! of the kinds around the lend point, taken as the branches of one `+`
+//! (with only the root on the route, [`Whole`]), and run in turn.
 use core::marker::PhantomData;
 
 use frunk_core::hlist::{HCons, HNil};
@@ -12,7 +12,7 @@ use super::{
     plan::Plan,
     plus::{
         CatCols, CheckBranches, Dedup, DisjointBranches, OneEach, Pick, PlusHeld, PlusPos,
-        TakesBranches, Union, branch,
+        TakesBranches, Union, Whole, branch,
     },
     tree::{Ctx, On},
 };
@@ -221,7 +221,7 @@ where
     <NeedsAt<C, P, W> as CatCols<C, Ps>>::Cat: Dedup<Out = U>,
     U: Union,
 {
-    type Cols = U;
+    type Cols = Whole<U>;
     fn build<'a>(hs: <U as Plan>::Hs<'a>, at: &F) -> LentReactions<'a, P, PlusPos<Ps, U, F>>
     where
         Self: 'a,

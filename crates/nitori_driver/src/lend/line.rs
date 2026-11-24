@@ -9,7 +9,10 @@
 //! node of the chain no deeper than every anchor around is so the one on
 //! the route: a column of a kind that deep takes that row alone, and a
 //! node set below an anchor that deep takes the rows below the anchor's
-//! node on the route alone ([`LineAt`]).
+//! node on the route alone ([`LineAt`]). The union of a `+`, and of the
+//! reactions to a point, no longer says which anchor its items are below,
+//! so it is taken as if inside the root ([`Whole`](super::plus::Whole)):
+//! every row of a kind below the root.
 use core::{marker::PhantomData, ops::Range};
 
 use frunk_core::hlist::{HCons, HNil};
@@ -67,6 +70,10 @@ pub fn route_rows<Ln: LineAt>(
     }
     // A route the walk did not go through, which the needs' types rule out:
     // every row.
+    debug_assert!(
+        route.is_some(),
+        "a column no deeper than every anchor around has its node on the route"
+    );
     route.map(|i| i..i + 1)
 }
 
@@ -81,7 +88,8 @@ pub fn anchor_rows<Ln: LineAt, T>(
     rows: &[T],
     span: impl Fn(&T) -> Span,
 ) -> Option<Range<usize>> {
-    // Below the root, every row is below it.
+    // Below the root, every row is below it; one row at most, the keys pick
+    // it out if it is below another anchor ([`Collect`](super::tree::Collect)).
     if depth == 0 || off::<Ln>(depth) || rows.len() <= 1 {
         return None;
     }

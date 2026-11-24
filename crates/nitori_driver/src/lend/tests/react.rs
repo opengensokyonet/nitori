@@ -209,6 +209,37 @@ fn which_kinds_react() {
     );
 }
 
+type SurveyIt = HList![Cap<Survey>];
+/// Fire the survey with a number.
+struct FireSurvey(u32);
+impl Visit<SurveyIt> for FireSurvey {
+    type Out = ();
+    fn visit<'v, P: Pos>(self, view: View<'v, SurveyIt, P>) {
+        let hlist_pat![mut survey] = view;
+        survey.fire(self.0);
+    }
+}
+
+/// A reaction taking the members of the connection, of a kind on the route
+/// to the lend point too, from a point lent outside a `+`: every member,
+/// not the one on the route alone.
+#[test]
+fn a_reaction_takes_every_member_beside_the_route() {
+    let mut root = tree_one_as_two();
+    let at = hlist![PathKey(10), LinkId(1)];
+    lend_visit::<_, _, LinkPath, _, SurveyIt, _, _, _>(&mut root, &at, &mut (), FireSurvey(4));
+    let one = (take_log(), after_send!(&mut root, at));
+    let mut root = tree_two();
+    let at = hlist![LinkId(1)];
+    lend_visit::<_, _, LinkPath, _, SurveyIt, _, _, _>(&mut root, &at, &mut (), FireSurvey(4));
+    let two = (take_log(), after_send!(&mut root, at));
+    same_on_both(
+        one,
+        two,
+        (lines(&["survey@link 4 2 300 2"]), Some((1, alloc::vec![0]))),
+    );
+}
+
 /// The driver's points at link 2: started takes the reactions of the
 /// connection and of the link path, ending only the connection's.
 #[test]

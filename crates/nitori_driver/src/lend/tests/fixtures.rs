@@ -180,7 +180,7 @@ impl Share<LinkPath> for Core {
 impl Share<LinkPath> for Loss {
     type Data = HList![];
     type Calls = crate::call::tests::LossLinkCalls;
-    type Reacts = HList![ReactsTo<Probe, LossAtLink>];
+    type Reacts = HList![ReactsTo<Probe, LossAtLink>, ReactsTo<Survey, SurveyAtLink>];
 }
 impl Share<Recovery> for Core {
     type Data = HList![];

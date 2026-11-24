@@ -7,6 +7,7 @@ mod component;
 mod context;
 pub(crate) mod fixtures;
 mod generic;
+mod line;
 mod locator;
 mod logged;
 mod member_list;
