@@ -146,6 +146,13 @@ fn the_composed_family_forwards_the_exact_length() {
     );
 }
 
+#[test]
+fn the_composed_family_forwards_writes() {
+    let mut io = ComposedReceiver::new(Cursor::new(Vec::new()), ReadSkip);
+    io.sync_write_be_unpin(0x0102_u16).unwrap();
+    assert_eq!(io.into_parts().0.into_inner(), [1, 2]);
+}
+
 /// Skips `length` bytes by reading, with the state composed on the access.
 #[call(sync)]
 async fn skip_by_reading<F: Read>(

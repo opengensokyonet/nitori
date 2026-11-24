@@ -1,6 +1,6 @@
 //! Skipping built from reading: composition states that give a reader the
 //! [`Skip`] capability by reading and dropping what it reads.
-use crate::{ExactLen, Read, ReadChunk, Skip};
+use crate::{ExactLen, Read, ReadChunk, Skip, Write};
 use bytes::{Buf, BufMut};
 use core::{
     marker::PhantomData,
@@ -43,8 +43,8 @@ pub struct ReadChunkSkip;
 
 /// The family of a view of `F` composed with [`ReadSkip`] or
 /// [`ReadChunkSkip`] (`S`): its views are the views of `F` themselves. It
-/// forwards [`Read`], [`ReadChunk`] and [`ExactLen`] when `F` has them, and
-/// skips through `S`.
+/// forwards [`Read`], [`ReadChunk`], [`ExactLen`] and [`Write`] when `F` has
+/// them, and skips through `S`.
 pub struct Skippable<F, S>(PhantomData<fn(F) -> F>, PhantomData<S>);
 
 impl<F: ReceiverFamily, S> ReceiverFamily for Skippable<F, S> {
@@ -103,6 +103,20 @@ impl<F: ExactLen, S> ExactLen for Skippable<F, S> {
         Self: 'v,
     {
         F::remaining_len(host)
+    }
+}
+
+impl<F: Write, S> Write for Skippable<F, S> {
+    type Error = F::Error;
+    fn poll_write<'v, I: Buf + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        input: &mut I,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'v,
+    {
+        F::poll_write(host, cx, input)
     }
 }
 
