@@ -17,9 +17,12 @@ use frunk_core::{
 use super::{
     Lend,
     check::{Check, Deep, Disjoint, Takes, TakesExclusive, Touch},
+    context::LendContext,
+    line::{Inside, LineAt},
     list::{And, Append, FirstTrue, IndexEq, Nowhere, Or, RouteEq},
-    plan::{Anchored, ExCol, NodeSet, Plan, ShCol, Shared},
+    plan::{Anchored, Copied, ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol, Shared},
     rows::{Rows, Span},
+    table::KindTab,
     tree::Ctx,
 };
 use crate::{
@@ -592,7 +595,7 @@ where
     <Bs as CatCols<C, Ps>>::Cat: Dedup<Out = U>,
     U: Union,
 {
-    type Cols = U;
+    type Cols = Whole<U>;
     fn build<'a>(hs: U::Hs<'a>, at: &F) -> PlusView<'a, Bs, PlusPos<Ps, U, F>>
     where
         Self: 'a,
@@ -601,6 +604,87 @@ where
             PlusHeld { hs, at: at.clone() },
             <Bs as MakeFns<C, Ps, U>>::fns(),
         )
+    }
+}
+
+/// The union `U` of a `+` as the plan of the `+`: its items no longer say
+/// which anchor they are below, so it is taken with only the root on the
+/// route ([`LineAt`]), every other row of each table its items take.
+pub struct Whole<U>(PhantomData<fn() -> U>);
+impl<U: Plan> Plan for Whole<U> {
+    type Hs<'a> = U::Hs<'a>;
+}
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext, U: Run<R, Pt, X>> Run<R, Pt, X>
+    for Whole<U>
+{
+    type Ex<'a> = U::Ex<'a>;
+    type Store<'b> = U::Store<'b>;
+    fn mark(tab: &mut R::Table<'_>) {
+        U::mark(tab);
+    }
+    fn take<'a, Ln: LineAt>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
+    where
+        Self: 'a,
+    {
+        U::take::<Inside<Ln, HNil>>(tab, cx)
+    }
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Self::Store<'b>
+    where
+        Self: 'a,
+    {
+        U::gather::<Inside<Ln, HNil>>(tab)
+    }
+    fn handles<'a: 'c, 'b: 'c, 'c>(ex: Self::Ex<'a>, store: &'c Self::Store<'b>) -> Self::Hs<'c>
+    where
+        Self: 'a,
+    {
+        U::handles(ex, store)
+    }
+}
+impl<MRt, U: PartPlan<MRt>> PartPlan<MRt> for Whole<U> {
+    type Left<'a>
+        = U::Left<'a>
+    where
+        Self: 'a;
+    fn left<'a>(hs: U::Hs<'a>) -> Self::Left<'a>
+    where
+        Self: 'a,
+    {
+        U::left(hs)
+    }
+    fn part<'a>(left: &mut Self::Left<'a>, member: Span) -> U::Hs<'a>
+    where
+        Self: 'a,
+    {
+        U::part(left, member)
+    }
+}
+impl<MRt, U: Rebor<MRt>> Rebor<MRt> for Whole<U> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut U::Hs<'c>, member: Span) -> U::Hs<'b> {
+        U::rebor(hs, member)
+    }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut U::Hs<'c>) -> U::Hs<'b> {
+        U::rebor_all(hs)
+    }
+}
+impl<U: Copied> Copied for Whole<U> {
+    fn copied<'b, 'c: 'b>(hs: &'b U::Hs<'c>) -> U::Hs<'c> {
+        U::copied(hs)
+    }
+    fn shortened<'b, 'c: 'b>(hs: &'b U::Hs<'c>) -> U::Hs<'b> {
+        U::shortened(hs)
+    }
+}
+impl<U: Norm> Norm for Whole<U> {
+    type Out = U::Out;
+}
+impl<V: Union, U: Pick<V>> Pick<V> for Whole<U> {
+    type Ex<'b> = U::Ex<'b>;
+    fn ex<'b, 'c: 'b>(slots: &mut V::Slots<'b, 'c>) -> Self::Ex<'b> {
+        U::ex(slots)
+    }
+    fn pick<'b, 'c: 'b>(ex: Self::Ex<'b>, seen: V::Seen<'b, 'c>) -> U::Hs<'b> {
+        U::pick(ex, seen)
     }
 }
 

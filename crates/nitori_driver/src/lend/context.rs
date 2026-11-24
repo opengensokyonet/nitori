@@ -19,6 +19,7 @@ use nitori_clock::MonotonicClock;
 use super::{
     Lend,
     check::{Check, Takes, TakesExclusive},
+    line::LineAt,
     list::IndexEq,
     plan::{Copied, ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol},
     plus::{IndexOf, Item, Merge, Norm, Pick, SameItem, Union},
@@ -250,13 +251,13 @@ where
     type Ex<'a> = Pc::Hs<'a>;
     type Store<'b> = ();
     fn mark(_: &mut R::Table<'_>) {}
-    fn take<'a>(_: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Pc::Hs<'a>
+    fn take<'a, Ln: LineAt>(_: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Pc::Hs<'a>
     where
         Self: 'a,
     {
         X::piece(cx)
     }
-    fn gather<'a: 'b, 'b>(_: &'b R::Table<'a>) -> Self::Store<'b>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(_: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a,
     {

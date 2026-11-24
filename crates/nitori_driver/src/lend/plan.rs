@@ -8,10 +8,11 @@
 //! the walk visits only what the plan takes. The plan is then taken in two
 //! passes: the exclusive columns first, in the order of the plan, each
 //! component taken out of its row; then, with the rows left shared, the
-//! shared columns and node sets, any of them more than once. That no two
-//! needs take the same column with one of them exclusive is checked on the
-//! types where the needs are proved, so a component missing from its row
-//! is a broken invariant.
+//! shared columns and node sets, any of them more than once, each table's
+//! rows on the route alone where the plan's anchors allow ([`LineAt`]).
+//! That no two needs take the same column with one of them exclusive is
+//! checked on the types where the needs are proved, so a component missing
+//! from its row is a broken invariant.
 //!
 //! Every entry of a column keeps its node's place in the walk, so that the
 //! members of an `Under` are each given their entries in one pass
@@ -22,6 +23,7 @@ use frunk_core::hlist::{HCons, HNil};
 
 use super::{
     context::LendContext,
+    line::{Inside, LineAt, RouteDepth, anchor_rows, route_rows},
     list::RouteEq,
     rows::{self, Rows, Span},
     table::{KindTab, SlotAt, TabAt},
@@ -30,16 +32,19 @@ use crate::id::{False, True};
 
 /// The component `X` of the nodes of the kind at the route `Rt` that the
 /// lending visits, at the position `J` of their components, exclusive;
-/// the nodes have full keys `F`.
+/// the nodes have full keys `F`. Taken where that kind is no deeper than
+/// every anchor around it, the node on the route alone ([`LineAt`]).
 pub struct ExCol<Rt, J, F, X>(PhantomData<fn() -> (Rt, J, F, X)>);
 /// The component `X` of the nodes of the kind at `Rt` that the lending
-/// visits, shared.
+/// visits, shared; the node on the route alone as for [`ExCol`].
 pub struct ShCol<Rt, J, F, X>(PhantomData<fn() -> (Rt, J, F, X)>);
 /// The full keys of the nodes of the kind at `Rt` that the lending visits,
 /// among them every one below the anchor, the node of the kind at `A` on
 /// the route to the lend point, which marks the anchor for the walk; what
 /// is below the anchor is picked out of them by key
-/// ([`Collect`](super::tree::Collect)).
+/// ([`Collect`](super::tree::Collect)). Taken where the anchor is no deeper
+/// than every anchor around it, the nodes below the anchor's node on the
+/// route alone ([`LineAt`]).
 pub struct NodeSet<Rt, F, A>(PhantomData<fn() -> (Rt, F, A)>);
 
 /// A plan and the handles it is given, borrowing the tree for `'a`.
@@ -124,12 +129,13 @@ pub trait Run<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext>: Plan {
     /// Mark, in the tables, what the plan takes, before the walk.
     fn mark(tab: &mut R::Table<'_>);
     /// The first pass: the exclusive columns, taken out of the rows, and
-    /// the pieces of the context, out of its row.
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
+    /// the pieces of the context, out of its row; the plan is taken where
+    /// `Ln` says, which says which rows of each table it takes.
+    fn take<'a, Ln: LineAt>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a;
-    /// The second pass: the shared columns and node sets.
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Self::Store<'b>
+    /// The second pass: the shared columns and node sets, where `Ln` says.
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a;
     /// The handles, from both passes.
@@ -141,12 +147,12 @@ impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext> Run<R, Pt, X> for () {
     type Ex<'a> = ();
     type Store<'b> = ();
     fn mark(_: &mut R::Table<'_>) {}
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
     }
-    fn gather<'a: 'b, 'b>(_: &'b R::Table<'a>) -> Self::Store<'b>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(_: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a,
     {
@@ -161,13 +167,13 @@ impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext> Run<R, Pt, X> for HNil {
     type Ex<'a> = HNil;
     type Store<'b> = HNil;
     fn mark(_: &mut R::Table<'_>) {}
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> HNil
+    fn take<'a, Ln: LineAt>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> HNil
     where
         Self: 'a,
     {
         HNil
     }
-    fn gather<'a: 'b, 'b>(_: &'b R::Table<'a>) -> HNil
+    fn gather<'a: 'b, 'b, Ln: LineAt>(_: &'b R::Table<'a>) -> HNil
     where
         Self: 'a,
     {
@@ -191,23 +197,23 @@ where
         A::mark(tab);
         B::mark(tab);
     }
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
-        let head = A::take(tab, cx);
+        let head = A::take::<Ln>(tab, cx);
         HCons {
             head,
-            tail: B::take(tab, cx),
+            tail: B::take::<Ln>(tab, cx),
         }
     }
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Self::Store<'b>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a,
     {
         HCons {
-            head: A::gather(tab),
-            tail: B::gather(tab),
+            head: A::gather::<Ln>(tab),
+            tail: B::gather::<Ln>(tab),
         }
     }
     fn handles<'a: 'c, 'b: 'c, 'c>(ex: Self::Ex<'a>, store: &'c Self::Store<'b>) -> Self::Hs<'c>
@@ -231,18 +237,18 @@ where
         A::mark(tab);
         B::mark(tab);
     }
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
-        let a = A::take(tab, cx);
-        (a, B::take(tab, cx))
+        let a = A::take::<Ln>(tab, cx);
+        (a, B::take::<Ln>(tab, cx))
     }
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Self::Store<'b>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a,
     {
-        (A::gather(tab), B::gather(tab))
+        (A::gather::<Ln>(tab), B::gather::<Ln>(tab))
     }
     fn handles<'a: 'c, 'b: 'c, 'c>(
         (a, b): Self::Ex<'a>,
@@ -254,8 +260,15 @@ where
         (A::handles(a, sa), B::handles(b, sb))
     }
 }
-impl<R, Pt: 'static, X: LendContext, Rt: 'static, J: 'static, F: Clone + 'static, C: 'static>
-    Run<R, Pt, X> for ExCol<Rt, J, F, C>
+impl<
+    R,
+    Pt: 'static,
+    X: LendContext,
+    Rt: RouteDepth + 'static,
+    J: 'static,
+    F: Clone + 'static,
+    C: 'static,
+> Run<R, Pt, X> for ExCol<Rt, J, F, C>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F>,
     R::AtComps: SlotAt<J, C = C>,
@@ -265,12 +278,20 @@ where
     fn mark(tab: &mut R::Table<'_>) {
         R::want_mut(tab).rows = true;
     }
-    fn take<'a>(tab: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Rows<(F, &'a mut C, Span)>
+    fn take<'a, Ln: LineAt>(
+        tab: &mut R::Table<'a>,
+        _: &mut X::Row<'a>,
+    ) -> Rows<(F, &'a mut C, Span)>
     where
         Self: 'a,
     {
-        R::rows_mut(tab)
-            .iter_mut()
+        let route = R::route(tab);
+        let rows = R::rows_mut(tab);
+        let rows = match route_rows::<Ln>(Rt::DEPTH, route, rows.len()) {
+            Some(at) => &mut rows[at],
+            None => rows,
+        };
+        rows.iter_mut()
             .map(|r| {
                 // Invariant: the needs were checked not to overlap, so no
                 // need before this one took the component.
@@ -281,7 +302,7 @@ where
             })
             .collect()
     }
-    fn gather<'a: 'b, 'b>(_: &'b R::Table<'a>) -> Self::Store<'b>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(_: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a,
     {
@@ -296,8 +317,8 @@ where
         ex
     }
 }
-impl<R, Pt: 'static, X: LendContext, Rt: 'static, J: 'static, F: 'static, C: 'static> Run<R, Pt, X>
-    for ShCol<Rt, J, F, C>
+impl<R, Pt: 'static, X: LendContext, Rt: RouteDepth + 'static, J: 'static, F: 'static, C: 'static>
+    Run<R, Pt, X> for ShCol<Rt, J, F, C>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F>,
     R::AtComps: SlotAt<J, C = C>,
@@ -307,17 +328,21 @@ where
     fn mark(tab: &mut R::Table<'_>) {
         R::want_mut(tab).rows = true;
     }
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
     }
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Rows<(&'b F, &'b C, Span)>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Rows<(&'b F, &'b C, Span)>
     where
         Self: 'a,
     {
-        R::rows(tab)
-            .iter()
+        let rows = R::rows(tab);
+        let rows = match route_rows::<Ln>(Rt::DEPTH, R::route(tab), rows.len()) {
+            Some(at) => &rows[at],
+            None => rows,
+        };
+        rows.iter()
             .map(|r| {
                 // Invariant: no exclusive need took a column a shared need
                 // takes, which the check of overlaps refuses.
@@ -335,7 +360,7 @@ where
         Shared::Rows(store)
     }
 }
-impl<R, Pt: 'static, X: LendContext, Rt: 'static, F: 'static, A: 'static> Run<R, Pt, X>
+impl<R, Pt: 'static, X: LendContext, Rt: 'static, F: 'static, A: RouteDepth + 'static> Run<R, Pt, X>
     for NodeSet<Rt, F, A>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F> + TabAt<Pt, HNil, A>,
@@ -346,19 +371,22 @@ where
         <R as TabAt<Pt, HNil, Rt>>::want_mut(tab).rows = true;
         <R as TabAt<Pt, HNil, A>>::want_mut(tab).anchor = true;
     }
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
     }
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Rows<(&'b F, Span)>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Rows<(&'b F, Span)>
     where
         Self: 'a,
     {
-        <R as TabAt<Pt, HNil, Rt>>::rows(tab)
-            .iter()
-            .map(|r| (&r.fk, r.span))
-            .collect()
+        let rows = <R as TabAt<Pt, HNil, Rt>>::rows(tab);
+        let on = <R as TabAt<Pt, HNil, A>>::anchor(tab);
+        let rows = match anchor_rows::<Ln, _>(A::DEPTH, on, rows, |r| r.span) {
+            Some(at) => &rows[at],
+            None => rows,
+        };
+        rows.iter().map(|r| (&r.fk, r.span)).collect()
     }
     fn handles<'a: 'c, 'b: 'c, 'c>(_: (), store: &'c Rows<(&'b F, Span)>) -> &'c [(&'c F, Span)]
     where
@@ -600,25 +628,25 @@ pub struct Anchored<A, P>(PhantomData<fn() -> (A, P)>);
 impl<A: 'static, P: Plan> Plan for Anchored<A, P> {
     type Hs<'a> = P::Hs<'a>;
 }
-impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext, A: 'static, P: Run<R, Pt, X>> Run<R, Pt, X>
-    for Anchored<A, P>
+impl<R: KindTab<Pt, HNil>, Pt: 'static, X: LendContext, A: RouteDepth + 'static, P: Run<R, Pt, X>>
+    Run<R, Pt, X> for Anchored<A, P>
 {
     type Ex<'a> = P::Ex<'a>;
     type Store<'b> = P::Store<'b>;
     fn mark(tab: &mut R::Table<'_>) {
         P::mark(tab);
     }
-    fn take<'a>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(tab: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
-        P::take(tab, cx)
+        P::take::<Inside<Ln, A>>(tab, cx)
     }
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Self::Store<'b>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Self::Store<'b>
     where
         Self: 'a,
     {
-        P::gather(tab)
+        P::gather::<Inside<Ln, A>>(tab)
     }
     fn handles<'a: 'c, 'b: 'c, 'c>(ex: Self::Ex<'a>, store: &'c Self::Store<'b>) -> Self::Hs<'c>
     where

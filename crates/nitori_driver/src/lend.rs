@@ -25,6 +25,7 @@ pub(crate) mod cycle;
 pub(crate) mod entry;
 pub(crate) mod ident;
 pub(crate) mod input;
+pub(crate) mod line;
 pub(crate) mod list;
 pub(crate) mod locator;
 pub(crate) mod members;
@@ -47,6 +48,7 @@ pub(crate) mod tests;
 use check::{Check, DeepEnoughAll, Disjoint, Takes};
 pub(crate) use context::LendContext;
 use cycle::NoCycle;
+use line::AtPoint;
 use plan::{Plan, Run};
 use table::{KidRoute, KindTab};
 use tree::{Ctx, Cx, Locate};
@@ -122,8 +124,8 @@ where
         return None;
     }
     let mut row = cx.row();
-    let ex = <N::Cols as Run<R, Pt, X>>::take(&mut tab, &mut row);
-    let store = <N::Cols as Run<R, Pt, X>>::gather(&tab);
+    let ex = <N::Cols as Run<R, Pt, X>>::take::<AtPoint>(&mut tab, &mut row);
+    let store = <N::Cols as Run<R, Pt, X>>::gather::<AtPoint>(&tab);
     let hs = <N::Cols as Run<R, Pt, X>>::handles(ex, &store);
     Some(f(N::build(hs, at)))
 }

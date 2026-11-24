@@ -57,6 +57,12 @@ pub struct Tab<F, Row, Kids> {
     pub rows: Rows<TabRow<F, Row>>,
     /// What the plan wants.
     pub want: Want,
+    /// Where among the rows the row of this kind's node on the route to the
+    /// lend point is, when the walk went through one and rows are wanted.
+    pub route: Option<usize>,
+    /// The place in the walk of this kind's node on the route, when it is an
+    /// anchor and the walk went through it.
+    pub anchor: Option<Span>,
     /// One table per child kind, in the order of the children.
     pub kids: Kids,
 }
@@ -65,6 +71,8 @@ impl<F, Row, Kids: Default> Default for Tab<F, Row, Kids> {
         Self {
             rows: Rows::default(),
             want: Want::default(),
+            route: None,
+            anchor: None,
             kids: Kids::default(),
         }
     }
@@ -173,12 +181,17 @@ where
             walk,
             below,
         );
+        let span = Span { start, end: *walk };
+        if tab.want.anchor {
+            tab.anchor = Some(span);
+        }
         if tab.want.rows {
+            tab.route = Some(tab.rows.len());
             tab.rows.push(TabRow {
                 fk,
                 row: data.row(),
                 ident: *ident,
-                span: Span { start, end: *walk },
+                span,
             });
         }
         found
@@ -410,6 +423,12 @@ pub trait TabAt<Pt: 'static, F, Rt>: KindTab<Pt, F> {
     ) -> &'b mut [TabRow<Self::AtFk, <Self::AtComps as RowFam>::Row<'a>>];
     /// What the plan wants of the table, to mark it.
     fn want_mut<'a: 'b, 'b>(tab: &'b mut Self::Table<'a>) -> &'b mut Want;
+    /// Where among the rows the row of that kind's node on the route is
+    /// ([`Tab::route`]).
+    fn route(tab: &Self::Table<'_>) -> Option<usize>;
+    /// The place in the walk of that kind's node on the route, an anchor
+    /// ([`Tab::anchor`]).
+    fn anchor(tab: &Self::Table<'_>) -> Option<Span>;
 }
 impl<K, Pt: 'static, F: Clone + PartialEq + 'static> TabAt<Pt, F, HNil> for K
 where
@@ -432,6 +451,12 @@ where
     }
     fn want_mut<'a: 'b, 'b>(tab: &'b mut Self::Table<'a>) -> &'b mut Want {
         &mut tab.want
+    }
+    fn route(tab: &Self::Table<'_>) -> Option<usize> {
+        tab.route
+    }
+    fn anchor(tab: &Self::Table<'_>) -> Option<Span> {
+        tab.anchor
     }
 }
 impl<K, Pt: 'static, F, J, Rt> TabAt<Pt, F, HCons<J, Rt>> for K
@@ -476,6 +501,20 @@ where
             <K::Children as KidTab<Pt, F, J>>::Fk,
             Rt,
         >>::want_mut(<K::Children as KidTab<Pt, F, J>>::kid_mut(&mut tab.kids))
+    }
+    fn route(tab: &Self::Table<'_>) -> Option<usize> {
+        <<K::Children as KidTab<Pt, F, J>>::Kind as TabAt<
+            Pt,
+            <K::Children as KidTab<Pt, F, J>>::Fk,
+            Rt,
+        >>::route(<K::Children as KidTab<Pt, F, J>>::kid(&tab.kids))
+    }
+    fn anchor(tab: &Self::Table<'_>) -> Option<Span> {
+        <<K::Children as KidTab<Pt, F, J>>::Kind as TabAt<
+            Pt,
+            <K::Children as KidTab<Pt, F, J>>::Fk,
+            Rt,
+        >>::anchor(<K::Children as KidTab<Pt, F, J>>::kid(&tab.kids))
     }
 }
 

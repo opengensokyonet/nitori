@@ -225,3 +225,111 @@ fn one_member_at_a_time_takes_above_it_exclusive() {
     );
     assert_eq!(got, Some(vec![2, 2, 2]));
 }
+
+/// At a link, its own planner and logical path's records, exclusive,
+/// beside an `Under` over every link and every logical path: the tables
+/// of both kinds hold the rows of the members, and what is taken on the
+/// way up is the row on the route.
+type UpBesideUnders = HList![
+    Mut<Planner>,
+    Mut<SentRecords>,
+    Under<ConnCore, Ref<LinkCore>>,
+    Under<ConnCore, Ref<Credit>>
+];
+
+#[test]
+fn on_the_way_up_beside_unders_over_the_same_kinds() {
+    let mut root = tree_one();
+    let got = lend!(
+        &mut root,
+        LinkPath,
+        UpBesideUnders,
+        hlist![PathKey(20), LinkId(3)],
+        |hlist_pat![planner, records, links, entries]| {
+            planner.next_pn += 1;
+            records.acked = 7;
+            (links.len(), entries.len())
+        }
+    );
+    assert_eq!(got, Some((3, 3)));
+    let got = lend!(
+        &mut root,
+        Conn1,
+        HList![Under<ConnCore, Ref<Planner>>, Under<ConnCore, Ref<SentRecords>>],
+        hlist![],
+        |hlist_pat![planners, records]| {
+            let planners: Vec<_> = planners.iter().map(|(_, p)| p.next_pn).collect();
+            let records: Vec<_> = records.iter().map(|(_, r)| r.acked).collect();
+            (planners, records)
+        }
+    );
+    assert_eq!(got, Some((vec![100, 200, 301], vec![0, 7])));
+}
+
+/// [`UpBesideUnders`]'s planner and links in a `+`, whose union takes
+/// every row of each table.
+type UpInAPlus = needs![(Mut<Planner> + Under<ConnCore, Ref<LinkCore>>)];
+
+#[test]
+fn on_the_way_up_in_a_plus_beside_an_under() {
+    let mut root = tree_one();
+    let got = lend!(
+        &mut root,
+        LinkPath,
+        UpInAPlus,
+        hlist![PathKey(10), LinkId(2)],
+        |hlist_pat![mut plus]| {
+            plus.take::<Mut<Planner>, _>().next_pn += 1;
+            plus.take::<Under<ConnCore, Ref<LinkCore>>, _>().len()
+        }
+    );
+    assert_eq!(got, Some(3));
+    let got = lend!(
+        &mut root,
+        Conn1,
+        HList![Under<ConnCore, Ref<Planner>>],
+        hlist![],
+        |hlist_pat![planners]| planners.iter().map(|(_, p)| p.next_pn).collect::<Vec<_>>()
+    );
+    assert_eq!(got, Some(vec![100, 201, 300]));
+}
+
+/// At a link, by each link of its logical path, every planner of the
+/// connection: the anchor inside is above the one outside.
+type AnchorAboveInside = HList![Under<
+    SentRecords,
+    At<LinkCore, HList![Ref<LinkCore>, Under<ConnCore, Ref<Planner>>]>,
+>];
+
+#[test]
+fn an_anchor_inside_above_the_one_outside() {
+    let mut root = tree_one();
+    let got = lend!(
+        &mut root,
+        LinkPath,
+        AnchorAboveInside,
+        hlist![PathKey(10), LinkId(1)],
+        |hlist_pat![v]| v
+            .iter()
+            .map(|(k, hlist_pat![_, all])| (*k, all.len()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(got, Some(vec![(LinkId(1), 3), (LinkId(2), 3)]));
+}
+
+#[test]
+fn nested_unders_lent_at_a_link() {
+    let mut root = tree_one();
+    let got = lend!(
+        &mut root,
+        LinkPath,
+        ByPath,
+        hlist![PathKey(10), LinkId(1)],
+        |hlist_pat![v]| {
+            v.iter()
+                .map(|(p, hlist_pat![_, own, all])| (*p, own.len(), all.len()))
+                .collect::<Vec<_>>()
+        }
+    );
+    assert_eq!(got, Some(vec![(PathKey(10), 2, 3), (PathKey(20), 1, 3)]));
+}

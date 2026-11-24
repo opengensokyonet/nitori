@@ -13,6 +13,7 @@ use frunk_core::{
 
 use super::{
     context::{CxCol, LendContext},
+    line::{LineAt, RouteDepth, route_rows},
     list::RouteEq,
     plan::{Copied, ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol},
     plus::{IndexOf, Item, Merge, Norm, Pick, SameItem, Union},
@@ -32,7 +33,8 @@ pub type Idents<'a, F> = &'a [(&'a F, NodeIdent, Span)];
 impl<Rt: 'static, F: 'static> Plan for IdentCol<Rt, F> {
     type Hs<'a> = Idents<'a, F>;
 }
-impl<R, Pt: 'static, X: LendContext, Rt: 'static, F: 'static> Run<R, Pt, X> for IdentCol<Rt, F>
+impl<R, Pt: 'static, X: LendContext, Rt: RouteDepth + 'static, F: 'static> Run<R, Pt, X>
+    for IdentCol<Rt, F>
 where
     R: TabAt<Pt, HNil, Rt, AtFk = F>,
 {
@@ -41,19 +43,21 @@ where
     fn mark(tab: &mut R::Table<'_>) {
         R::want_mut(tab).rows = true;
     }
-    fn take<'a>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
+    fn take<'a, Ln: LineAt>(_: &mut R::Table<'a>, _: &mut X::Row<'a>) -> Self::Ex<'a>
     where
         Self: 'a,
     {
     }
-    fn gather<'a: 'b, 'b>(tab: &'b R::Table<'a>) -> Rows<(&'b F, NodeIdent, Span)>
+    fn gather<'a: 'b, 'b, Ln: LineAt>(tab: &'b R::Table<'a>) -> Rows<(&'b F, NodeIdent, Span)>
     where
         Self: 'a,
     {
-        R::rows(tab)
-            .iter()
-            .map(|r| (&r.fk, r.ident, r.span))
-            .collect()
+        let rows = R::rows(tab);
+        let rows = match route_rows::<Ln>(Rt::DEPTH, R::route(tab), rows.len()) {
+            Some(at) => &rows[at],
+            None => rows,
+        };
+        rows.iter().map(|r| (&r.fk, r.ident, r.span)).collect()
     }
     fn handles<'a: 'c, 'b: 'c, 'c>(
         _: (),

@@ -12,6 +12,7 @@ use super::{
     Lend, LendContext,
     check::{Check, DeepEnoughAll, Disjoint, Takes},
     cycle::NoCycle,
+    line::AtPoint,
     list::{Prefix, Z},
     plan::Run,
     table::{KidRoute, KindTab, TabAt},
@@ -121,8 +122,8 @@ where
         return None;
     }
     let mut row = cx.row();
-    let ex = <N::Cols as Run<R, Pt, X>>::take(&mut tab, &mut row);
-    let store = <N::Cols as Run<R, Pt, X>>::gather(&tab);
+    let ex = <N::Cols as Run<R, Pt, X>>::take::<AtPoint>(&mut tab, &mut row);
+    let store = <N::Cols as Run<R, Pt, X>>::gather::<AtPoint>(&tab);
     let hs = <N::Cols as Run<R, Pt, X>>::handles(ex, &store);
     Some(f(N::build(hs, at)))
 }
