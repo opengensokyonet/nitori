@@ -100,8 +100,10 @@ impl<F: ReceiverFamily> RawViewLoan<F> {
 /// An exclusive pinned view loan that hides its parent's inner lifetime.
 ///
 /// The exact family remains invariant. No capability registry, allocation or
-/// reconstruction is needed. Access is scoped to `with` or `apply`; references
-/// into that temporary access cannot escape. This type is neither Send nor Sync.
+/// reconstruction is needed. Access through `with` or `apply` is scoped to
+/// the callback; references into that temporary access cannot escape it.
+/// `project` consumes the loan instead, for one pinned borrow that lasts for
+/// `'scope`. This type is neither Send nor Sync.
 pub struct ViewLoan<'scope, F: ReceiverFamily> {
     raw: RawViewLoan<F>,
     borrow: PhantomData<&'scope mut ()>,
@@ -146,12 +148,16 @@ impl<'scope, F: ReceiverFamily + 'scope> ViewLoan<'scope, F> {
             unsafe { core::ptr::from_mut(project(access).get_unchecked_mut()) }
         });
         // SAFETY: `new` made this loan from a `Pin<&'scope mut _>` of the
-        // view, whose inner lifetime outlives 'scope, so the view stays live,
-        // in place and borrowed by this loan alone for all of 'scope. The loan
-        // is consumed here, so the view has no other use in 'scope. `target`
-        // was reached by reborrowing the view, so it is valid as long as the
-        // view's borrow, and `T: 'scope` keeps what `T` itself borrows valid
-        // as long. `project` returned it pinned, and it is only pinned again.
+        // view, whose inner lifetime outlives 'scope (`'parent: 'scope`,
+        // `F: 'scope`), so the view stays live, in place and borrowed by this
+        // loan alone for all of 'scope; the loan is consumed here, so the view
+        // has no other use in 'scope. `project` must hold for every
+        // `'access` its argument's implied bounds allow, and `'access = 'scope`
+        // is one of them, so whatever it returns, a reborrow of the view or a
+        // borrow it captured, is valid for 'scope: calling it with the
+        // `Pin<&'scope mut _>` given to `new` would have type-checked.
+        // `T: 'scope` keeps what `T` itself borrows valid as long. `project`
+        // returned it pinned, and it is only pinned again.
         unsafe { Pin::new_unchecked(&mut *target) }
     }
     pub fn with<B, R>(&mut self, body: B) -> R
