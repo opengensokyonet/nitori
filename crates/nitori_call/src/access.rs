@@ -1,4 +1,5 @@
-//! Access to the view lent for the current poll.
+//! Access to the view of the current poll: lent by a call, or constructed
+//! from a held receiver.
 use crate::{
     Compose, Composed, Lent, LentAccess, Receiver, ReceiverFamily, ViewOperation, loan::RawViewLoan,
 };
@@ -97,13 +98,14 @@ impl<F: ReceiverFamily> ViewCell<F> {
         }
     }
     fn release_point(&self) -> ReleasePoint<'_> {
-        ReleasePoint {
+        ReleasePoint(Some(Offer {
             lent: self.view.get().is_some(),
             releasable: self.releasable.get(),
             kept: self.kept.get(),
-            release: Some((&self.release, &self.branches)),
+            release: &self.release,
+            branches: &self.branches,
             root: self.root.get(),
-        }
+        }))
     }
 }
 
@@ -206,27 +208,23 @@ impl ViewRequest<'_> {
     }
 }
 
-/// Where an operation offers back the view of the current poll.
-pub struct ReleasePoint<'a> {
+/// Where an operation offers back the view of the current poll: nowhere for
+/// an access that is never lent a view.
+pub struct ReleasePoint<'a>(Option<Offer<'a>>);
+/// The state of a slot's cell that answers a release point.
+struct Offer<'a> {
     lent: bool,
     releasable: bool,
     kept: bool,
-    /// Where the offer is recorded and the branches that wait for its
-    /// answer; `None` when there is never a view to offer back.
-    release: Option<(&'a Cell<bool>, &'a Branches)>,
+    release: &'a Cell<bool>,
+    branches: &'a Branches,
     root: *const Waker,
 }
 impl ReleasePoint<'_> {
     /// The release point of an access that is never lent a view, and so has
     /// none to offer back: it completes at once.
     fn fixed() -> ReleasePoint<'static> {
-        ReleasePoint {
-            lent: false,
-            releasable: false,
-            kept: false,
-            release: None,
-            root: ptr::null(),
-        }
+        ReleasePoint(None)
     }
     /// Offer the view back unless there is none to release. `offered`
     /// records whether this release point already did. Like a request, an
@@ -234,16 +232,16 @@ impl ReleasePoint<'_> {
     /// executor between the call and this point is woken before the call
     /// is polled with the answer.
     fn poll(self, offered: &mut bool, cx: &mut Context<'_>) -> Poll<()> {
-        let Some((release, branches)) = self.release else {
+        let Some(offer) = self.0 else {
             return Poll::Ready(());
         };
-        if !self.lent || !self.releasable || (*offered && self.kept) {
+        if !offer.lent || !offer.releasable || (*offered && offer.kept) {
             return Poll::Ready(());
         }
         *offered = true;
-        release.set(true);
-        if !polled_directly(self.root, cx) {
-            defer(branches, cx.waker());
+        offer.release.set(true);
+        if !polled_directly(offer.root, cx) {
+            defer(offer.branches, cx.waker());
         }
         Poll::Pending
     }
@@ -480,8 +478,10 @@ impl<F: ReceiverFamily> ReceiverAccess for ReceiverSlot<'_, F> {
 /// call in between. Every operation written for an access runs on it.
 ///
 /// The view is always at hand: an access never waits for it, a release point
-/// completes at once, and [`LentAccess::with`] works outside any poll too.
-/// The access is `Send` and `Sync` when the receiver is.
+/// completes at once, and [`LentAccess::with`] works outside any poll too, a
+/// destructor included, where a slot has no view. Each access constructs a
+/// view of its own. The access is `Send` and `Sync` when the receiver is,
+/// with or without `std`, and its views may be used on any thread it reaches.
 ///
 /// The receiver is held by value or by `&mut`, and must be `Unpin`, since
 /// the access moves with whatever holds it. Pin one that is not first:

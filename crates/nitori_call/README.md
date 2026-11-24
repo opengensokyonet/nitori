@@ -471,11 +471,13 @@ each call on it, a cancelled call included, and calls on it can compose again.
 `ReceiverAccess` is implemented by the slot a root operation receives, by
 `ConstructedAccess`, by `Composed`, and by `&mut A`; downstream crates do not
 implement it. Each use
-borrows the access mutably, so two operations cannot use it at the same time,
-and it never leaves the operation. With the `std` feature an access is `Send` but
-not `Sync`: within a poll it may move to a scoped thread, which can ask for a
-view, but only the thread polling the call may use the view, and an access
-elsewhere panics. Without `std` an access is neither `Send` nor `Sync`.
+borrows the access mutably, so two operations cannot use it at the same time.
+A slot, and every access derived from it, never leaves the operation. With the
+`std` feature such an access is `Send` but not `Sync`: within a poll it may move
+to a scoped thread, which can ask for a view, but only the thread polling the
+call may use the view, and an access elsewhere panics. Without `std` it is
+neither `Send` nor `Sync`. A `ConstructedAccess`, described below, is held
+outside any operation and is `Send` and `Sync` when its receiver is.
 Hand-written leaf operations call `poll_access`, which lends the current view
 to a callback:
 
@@ -758,7 +760,8 @@ hold no resource between polls.
 
 An operation's destructor can run outside a poll, when the call is dropped, and
 there is no view then. `with` panics in that case. A destructor uses `try_with`,
-which returns `None` there, on one access or on a tuple.
+which returns `None` there, on one access or on a tuple. A `ConstructedAccess`
+has its view outside a poll too: `try_with` on it always runs.
 
 ## Executors
 

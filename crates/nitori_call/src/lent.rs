@@ -181,8 +181,10 @@ use core::{
 };
 use receivers::{LentReceivers, LentViews};
 
-/// An access whose call is lent a view on every poll, so that using the view
-/// neither waits nor can end the poll. Other work runs only at `.await` and
+/// An access whose view is at hand whenever it is polled, so that using the
+/// view neither waits nor can end the poll: the call of a slot is lent one on
+/// every poll, and a [`ConstructedAccess`](crate::ConstructedAccess)
+/// constructs one at each access. Other work runs only at `.await` and
 /// `yield`; the code between them is atomic with respect to it.
 ///
 /// The slots of a [`LentCall`], [`ConstructedAccess`](crate::ConstructedAccess),
@@ -193,9 +195,11 @@ pub trait LentAccess: ReceiverAccess {
     /// Run `body` once with this poll's view.
     ///
     /// # Panics
-    /// Outside a poll, which only an operation's destructor can reach: use
-    /// [`try_with`](Self::try_with) there. Like every use of a view, on a
-    /// thread other than the one polling the call.
+    /// Without a view: on a slot outside the poll of its call, which only an
+    /// operation's destructor can reach; use [`try_with`](Self::try_with)
+    /// there. Like every use of a lent view, on a thread other than the one
+    /// polling the call. A [`ConstructedAccess`](crate::ConstructedAccess)
+    /// panics in neither case.
     #[track_caller]
     fn with<R, B>(&mut self, body: B) -> R
     where
@@ -206,12 +210,15 @@ pub trait LentAccess: ReceiverAccess {
             .expect("a lent view used outside a poll")
     }
 
-    /// Run `body` once with this poll's view, or return `None` outside a
-    /// poll, which only an operation's destructor can reach.
+    /// Run `body` once with this poll's view, or return `None` without one:
+    /// on a slot outside the poll of its call, which only an operation's
+    /// destructor can reach. A [`ConstructedAccess`](crate::ConstructedAccess)
+    /// always has its view, so a destructor of a type that holds one does
+    /// access its receiver here.
     ///
     /// # Panics
-    /// Like every use of a view, on a thread other than the one polling the
-    /// call.
+    /// Like every use of a lent view, on a thread other than the one polling
+    /// the call.
     fn try_with<R, B>(&mut self, body: B) -> Option<R>
     where
         Self: Sized,
