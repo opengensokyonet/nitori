@@ -17,8 +17,7 @@ use core::fmt;
 use frunk_core::hlist::HNil;
 
 use crate::{
-    call::Composition,
-    driver::{Edit, HandlerPos},
+    driver::{Edit, HandlerFor},
     need::Need,
     structure::{KeyAddress, NodeKind},
 };
@@ -69,10 +68,9 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// #![feature(impl_trait_in_assoc_type)]
 /// use nitori_driver::{
 ///     __private::calls::{StillClock, Total},
-///     call::Composition,
 ///     component::Part,
 ///     composition,
-///     driver::{Edit, HandlerPos},
+///     driver::{Edit, HandlerFor},
 ///     frunk_core::HList,
 ///     id::Numbered,
 ///     request::HandleRequest,
@@ -88,7 +86,7 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// struct Closing;
 /// impl HandleRequest<Top, u8> for Closing {
 ///     type Needs = HList![];
-///     fn handle<P: HandlerPos<Top, Needs = Self::Needs, Q: Composition<Priority = u8>>>(
+///     fn handle<P: HandlerFor<Top, Self, u8>>(
 ///         edit: Edit<'_, Top, P>,
 ///         _: u8,
 ///     ) {
@@ -113,10 +111,9 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// # #![feature(impl_trait_in_assoc_type)]
 /// # use nitori_driver::{
 /// #     __private::calls::{StillClock, Total},
-/// #     call::Composition,
 /// #     component::Part,
 /// #     composition,
-/// #     driver::{Edit, HandlerPos},
+/// #     driver::{Edit, HandlerFor},
 /// #     frunk_core::HList,
 /// #     id::Numbered,
 /// #     request::HandleRequest,
@@ -132,7 +129,7 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// # struct Closing;
 /// # impl HandleRequest<Top, u8> for Closing {
 /// #     type Needs = HList![];
-/// #     fn handle<P: HandlerPos<Top, Needs = Self::Needs, Q: Composition<Priority = u8>>>(
+/// #     fn handle<P: HandlerFor<Top, Self, u8>>(
 /// #         edit: Edit<'_, Top, P>,
 /// #         _: u8,
 /// #     ) {
@@ -161,10 +158,7 @@ pub trait HandleRequest<K: NodeKind, Pr>: 'static {
     /// What the edit handle lends, at the node the request is for.
     type Needs: Need;
     /// Handle `request`, for the node `edit` is at.
-    fn handle<P: HandlerPos<K, Needs = Self::Needs, Q: Composition<Priority = Pr>>>(
-        edit: Edit<'_, K, P>,
-        request: K::Request,
-    );
+    fn handle<P: HandlerFor<K, Self, Pr>>(edit: Edit<'_, K, P>, request: K::Request);
 }
 
 /// The handler of a kind that cannot be asked anything: its `Request`
@@ -172,10 +166,7 @@ pub trait HandleRequest<K: NodeKind, Pr>: 'static {
 pub struct NoRequests;
 impl<K: NodeKind<Request: EmptyRequest>, Pr> HandleRequest<K, Pr> for NoRequests {
     type Needs = HNil;
-    fn handle<P: HandlerPos<K, Needs = HNil, Q: Composition<Priority = Pr>>>(
-        _: Edit<'_, K, P>,
-        request: K::Request,
-    ) {
+    fn handle<P: HandlerFor<K, Self, Pr>>(_: Edit<'_, K, P>, request: K::Request) {
         request.never()
     }
 }

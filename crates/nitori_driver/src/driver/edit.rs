@@ -63,6 +63,22 @@ pub trait HandlerPos<K: NodeKind>: EditPos<K> {
         F: for<'v> FnOnce(View<'v, Self::Needs, Self::NeedsPos>) -> O;
 }
 
+/// Where the edit handle the handler `H` of the kind `K` gets is, under
+/// a composition at the priority `Pr`: a handler names its position
+/// with this one bound
+/// ([`HandleRequest::handle`](crate::request::HandleRequest::handle)).
+pub trait HandlerFor<K: NodeKind, H: HandleRequest<K, Pr> + ?Sized, Pr>:
+    HandlerPos<K, Needs = H::Needs, Q: Composition<Priority = Pr>>
+{
+}
+impl<K, H, Pr, P> HandlerFor<K, H, Pr> for P
+where
+    K: NodeKind,
+    H: HandleRequest<K, Pr> + ?Sized,
+    P: HandlerPos<K, Needs = H::Needs, Q: Composition<Priority = Pr>>,
+{
+}
+
 /// The position of the edit handle of a handler at a node of the kind
 /// `K` under `Q`, proved as `O`, its needs at `NP`.
 #[allow(clippy::type_complexity)]

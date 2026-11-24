@@ -64,7 +64,7 @@ pub use edit::{
     ChildEditAt, ChildOps, ChildOpsList, ChildPos, FkAppend, FkStep, HandlerAt, NoChildEdit,
     NoChildOps, NthChildOps,
 };
-pub use edit::{Edit, EditPos, HandlerPos, NoChildError};
+pub use edit::{Edit, EditPos, HandlerFor, HandlerPos, NoChildError};
 pub use operate::OperateError;
 #[doc(hidden)]
 pub use place::FkPlace;

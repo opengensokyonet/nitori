@@ -108,13 +108,7 @@ impl<K: NodeKind<Request = CloseConn, EndReason = ()>, Pr> crate::request::Handl
     for Closing
 {
     type Needs = HList![];
-    fn handle<
-        P: crate::driver::HandlerPos<
-                K,
-                Needs = Self::Needs,
-                Q: crate::call::Composition<Priority = Pr>,
-            >,
-    >(
+    fn handle<P: crate::driver::HandlerFor<K, Self, Pr>>(
         edit: crate::driver::Edit<'_, K, P>,
         _: CloseConn,
     ) {

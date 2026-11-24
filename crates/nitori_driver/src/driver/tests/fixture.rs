@@ -14,7 +14,7 @@ use crate::{
     call::{CallFamily, CallKind, Composition, LoanHost, LoanNeeds, RootOf},
     component::{ArgsOf, Component, ComponentView, EndCause, Part, PartList},
     composition,
-    driver::{Edit, HandlerPos},
+    driver::{Edit, HandlerFor},
     id::Numbered,
     lend::tests::fixtures::TestClock,
     need::{Mut, OwnAddress, OwnKey, Pos, Ref, Requests, View, WakerOf, Wakes},
@@ -117,10 +117,7 @@ pub struct EndMe;
 pub struct TopHandler;
 impl HandleRequest<Top, Level> for TopHandler {
     type Needs = HList![Ref<Hub>];
-    fn handle<P: HandlerPos<Top, Needs = Self::Needs, Q: Composition<Priority = Level>>>(
-        mut edit: Edit<'_, Top, P>,
-        request: TopAsk,
-    ) {
+    fn handle<P: HandlerFor<Top, Self, Level>>(mut edit: Edit<'_, Top, P>, request: TopAsk) {
         edit.lend(|hlist_pat![_hub]| note(format!("top {request:?}")));
         let out = match request {
             TopAsk::Note(_) => return,
@@ -156,10 +153,7 @@ impl HandleRequest<Leaf, Level> for LeafHandler {
         Requests<NodeRequest<Top, Leaf>>,
         Requests<NodeRequest<Top, Top>>,
     ];
-    fn handle<P: HandlerPos<Leaf, Needs = Self::Needs, Q: Composition<Priority = Level>>>(
-        mut edit: Edit<'_, Leaf, P>,
-        code: u8,
-    ) {
+    fn handle<P: HandlerFor<Leaf, Self, Level>>(mut edit: Edit<'_, Leaf, P>, code: u8) {
         edit.lend(|hlist_pat![ctl, leaves, tops]| {
             note(format!("leaf {} asked {code}", ctl.key));
             if (100..200).contains(&code) {
@@ -179,10 +173,7 @@ impl HandleRequest<Leaf, Level> for LeafHandler {
 pub struct TwigHandler;
 impl<Pr> HandleRequest<Twig, Pr> for TwigHandler {
     type Needs = HList![];
-    fn handle<P: HandlerPos<Twig, Needs = Self::Needs, Q: Composition<Priority = Pr>>>(
-        edit: Edit<'_, Twig, P>,
-        _: EndMe,
-    ) {
+    fn handle<P: HandlerFor<Twig, Self, Pr>>(edit: Edit<'_, Twig, P>, _: EndMe) {
         edit.end_self(());
     }
 }
