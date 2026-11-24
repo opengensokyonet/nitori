@@ -12,9 +12,11 @@ use core::{
 
 /// A monotonic clock and its timer.
 ///
-/// It gives a monotonic instant and a timer, not calendar time. A driver
-/// reads it at the start of each poll and sleeps on it until its next
-/// deadline.
+/// It gives a monotonic instant and a timer, not calendar time.
+/// `nitori_driver` reads it before each item it handles and each lending
+/// from outside, and lends what it read; the timer call of
+/// `nitori_driver_timer` sleeps on it until the earliest instant a
+/// component set.
 ///
 /// A clone is another handle to the same clock: the code that composes a
 /// driver can give one to each part that reports or waits for instants.
