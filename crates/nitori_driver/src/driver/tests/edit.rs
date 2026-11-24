@@ -127,6 +127,36 @@ fn a_node_added_runs_at_the_priority_it_was_added_with() {
 }
 
 #[test]
+fn a_call_settled_sees_the_node_added_before_it_settled() {
+    notes();
+    let mut d = Driver::<QT>::new(clock(), (), hlist![()], Level::Low);
+    let add = Ask::Top(TopAsk::AddTwig(1, 7, false));
+    core(&mut d)
+        .add::<Leaf, _>(
+            hlist![1],
+            vec![Step::SettleSee(add, Level::Low)],
+            Level::Low,
+        )
+        .unwrap();
+    let (_, w) = outer();
+    let _ = poll(&mut d, &w);
+    // before settling the leaf has no twig; the request is handled first,
+    // and the call, back from settling, reads the twig in its own lending
+    assert_eq!(
+        notes(),
+        [
+            "call 1 #1",
+            "call 1 sees twigs []",
+            "top AddTwig(1, 7, false)",
+            "top: Ok(())",
+            "call 1 sees twigs [7]",
+            "call 1 settled",
+            "call 1 #2"
+        ]
+    );
+}
+
+#[test]
 fn moved_a_twig_is_the_same_node_under_another_leaf() {
     let mut d = with_leaves(&[1, 2]);
     ask(&mut d, vec![TopAsk::AddTwig(1, 7, false)]);

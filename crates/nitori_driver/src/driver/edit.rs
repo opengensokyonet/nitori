@@ -280,7 +280,8 @@ impl<'e, K: NodeKind, P: EditPos<K>> Edit<'e, K, P> {
     /// Move the grandchild of the kind `GK` kept under `key`, with the
     /// nodes below it, from the child of the kind `CK` kept under `from`
     /// to the one kept under `to`, keeping its key. Every node moved is
-    /// the same node as before, and its calls go on. Refused, and nothing
+    /// the same node as before, and its calls go on; none of them starts
+    /// or ends, so neither `NodeStarted` nor `NodeEnding` fires. Refused, and nothing
     /// moves, when a child or the grandchild is not there, or `to` keeps
     /// a child of the kind `GK` under `key`.
     pub fn move_grandchild<CK: NodeKind, I, GK: NodeKind, J>(

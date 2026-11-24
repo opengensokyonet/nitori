@@ -17,7 +17,7 @@ use crate::{
     driver::{Edit, HandlerFor},
     id::Numbered,
     lend::tests::fixtures::TestClock,
-    need::{Mut, OwnAddress, OwnKey, Pos, Ref, Requests, View, WakerOf, Wakes},
+    need::{Members, Mut, OwnAddress, OwnKey, Pos, Ref, Requests, Under, View, WakerOf, Wakes},
     request::{HandleRequest, NodeRequest},
     structure::{Child, KeyAddress, NodeKind, Share, SlotVec},
 };
@@ -202,6 +202,9 @@ pub enum Step {
     Ask(Vec<Ask>),
     /// Put this request in and settle at this priority.
     Settle(Ask, Level),
+    /// Like `Settle`, noting the keys of the twigs its leaf has, before
+    /// and after the settling.
+    SettleSee(Ask, Level),
     /// Wake its own waker on every poll from now on.
     Spin,
     /// Panic.
@@ -343,6 +346,7 @@ impl<Q: Composition<Priority = Level>> CallKind<Q, Leaf> for Script {
         Wakes<Level>,
         Requests<NodeRequest<Top, Leaf>>,
         Requests<NodeRequest<Top, Top>>,
+        Under<Ctl, Ref<Tip>>,
     ];
     type Op = Self;
     fn start(_: &mut Vec<Step>) -> Self {
@@ -356,8 +360,14 @@ enum Then {
     WakeSelf,
     Hand,
     Settle(crate::call::Settle),
+    SettleSee(crate::call::Settle),
     Spin,
     Return,
+}
+
+/// The keys of the twigs below the leaf, in the order the view holds them.
+fn twig_keys<'a, V: Members<&'a Tip>>(twigs: &V) -> Vec<u32> {
+    twigs.iter().map(|(_, t)| t.key).collect()
 }
 
 /// The address of what `ask` is for, and the request.
@@ -383,7 +393,7 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
     loop {
         let (then, key) = host.with(|mut view| {
             let (step, key) = {
-                let hlist_pat![ctl, _, _, _, _] = view.needs();
+                let hlist_pat![ctl, _, _, _, _, _] = view.needs();
                 ctl.polls += 1;
                 note(format!("call {} #{}", ctl.key, ctl.polls));
                 let step = if spinning {
@@ -396,7 +406,7 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
             let then = match step {
                 Step::Pend => Then::Wait,
                 Step::Wake(levels) => {
-                    let hlist_pat![_, own, wakes, _, _] = view.needs();
+                    let hlist_pat![_, own, wakes, _, _, _] = view.needs();
                     for p in levels {
                         wakes.wake(own, p);
                     }
@@ -408,7 +418,7 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
                     Then::Hand
                 }
                 Step::Ask(asks) => {
-                    let hlist_pat![_, _, _, leaves, tops] = view.needs();
+                    let hlist_pat![_, _, _, leaves, tops, _] = view.needs();
                     for a in asks {
                         put(a, *leaves, *tops);
                     }
@@ -416,10 +426,16 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
                 }
                 Step::Settle(ask, p) => {
                     {
-                        let hlist_pat![_, _, _, leaves, tops] = view.needs();
+                        let hlist_pat![_, _, _, leaves, tops, _] = view.needs();
                         put(ask, *leaves, *tops);
                     }
                     Then::Settle(view.settle(p))
+                }
+                Step::SettleSee(ask, p) => {
+                    let hlist_pat![_, _, _, leaves, tops, twigs] = view.needs();
+                    note(format!("call {key} sees twigs {:?}", twig_keys(&*twigs)));
+                    put(ask, *leaves, *tops);
+                    Then::SettleSee(view.settle(p))
                 }
                 Step::Spin => Then::Spin,
                 Step::Panic => panic!("the script panics"),
@@ -431,6 +447,14 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
             Then::Return => return,
             Then::Settle(s) => {
                 s.await;
+                note(format!("call {key} settled"));
+            }
+            Then::SettleSee(s) => {
+                s.await;
+                host.with(|mut view| {
+                    let hlist_pat![_, _, _, _, _, twigs] = view.needs();
+                    note(format!("call {key} sees twigs {:?}", twig_keys(&*twigs)));
+                });
                 note(format!("call {key} settled"));
             }
             Then::Spin | Then::WakeSelf => {
