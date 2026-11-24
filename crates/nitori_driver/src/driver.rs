@@ -90,7 +90,7 @@ pub const ITEMS_PER_POLL: usize = 128;
 
 /// What the driver of a composition `Q` keeps tables of: what was proved
 /// of every kind.
-pub(crate) type Tables<Q> = <<Q as Composition>::Pack as PackList<Q, KindsOf<Q>>>::Tables;
+pub(crate) type Tables<Q> = <Q as Composition>::Tables;
 
 /// The driver of a tree of the composition `Q`: a future that runs its
 /// calls and components by priority until the root ended.

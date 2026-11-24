@@ -4,7 +4,9 @@ A driver for the state of one connection, or of another protocol's
 connection: a tree of nodes the code that uses it declares, the calls it
 runs at the nodes by priority, and what it lends them. It is experimental
 and builds without the standard library, with `alloc`; it needs the
-nightly toolchain the repository pins.
+nightly toolchain the repository pins. Its default `std` feature turns on
+`nitori_call`'s, whose call slots are then `Send`: a driver whose
+components, calls and requests are `Send` is `Send` then.
 
 This crate gives the mechanism without protocol meaning; the code that
 uses it declares its structure, its parts, their components and calls,

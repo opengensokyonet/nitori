@@ -6,6 +6,12 @@ publish = false
 license = "Apache-2.0 OR MIT"
 description = "The tree of state a driver keeps and lends to its calls"
 
+[features]
+default = ["std"]
+# Call slots that are `Send`, so that a driver whose components, calls and
+# requests are `Send` is `Send` too.
+std = ["nitori_call/std"]
+
 [dependencies]
 frunk_core.workspace = true
 nitori_call.workspace = true

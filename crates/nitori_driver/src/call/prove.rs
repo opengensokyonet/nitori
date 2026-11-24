@@ -22,7 +22,7 @@ use super::{
     RootOf, RunsOn,
     host::CallHost,
     kinds::{KindsOnce, ListRest},
-    pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindOps, SlotPoll},
+    pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindList, KindOps, PackList, SlotPoll},
 };
 use crate::{
     component::{ArgsOf, Component, EndCause},
@@ -96,6 +96,13 @@ where
 /// The pack of the kinds `L` of `Q`; [`composition!`](crate::composition!)
 /// defines the opaque pack with it.
 pub fn prove<Q: Composition, L: Prove<Q, I> + KindsOnce, I>() -> PhantomData<L::Out> {
+    PhantomData
+}
+/// The pack `P` with its tables; [`composition!`](crate::composition!)
+/// defines the opaque tables with it.
+pub fn with_tables<Q: Composition, L: KindList<Q>, P: PackList<Q, L>>(
+    _: PhantomData<P>,
+) -> PhantomData<(P, P::Tables)> {
     PhantomData
 }
 

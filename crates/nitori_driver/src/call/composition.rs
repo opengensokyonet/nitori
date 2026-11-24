@@ -47,11 +47,16 @@ pub trait Composition: 'static + Sized {
     /// What a waking is ranked by, the highest handled first; its levels
     /// are the user's.
     type Priority: Ord + Copy + 'static;
+    /// What the driver keeps of the nodes of every kind: the tables of
+    /// [`Pack`](Composition::Pack), opaque too. Named apart from the pack
+    /// so that the driver is `Send` exactly when they are: a projection
+    /// out of the opaque pack would not be.
+    type Tables: 'static;
     /// What was proved of every kind of the structure, in the order of
     /// [`KindsOf`].
-    type Pack: PackList<Self, KindsOf<Self>>;
-    /// Only to define `Pack`.
-    fn pack() -> PhantomData<Self::Pack>;
+    type Pack: PackList<Self, KindsOf<Self>, Tables = Self::Tables>;
+    /// Only to define `Pack` and `Tables`.
+    fn pack() -> PhantomData<(Self::Pack, Self::Tables)>;
     /// The root of a new tree: every component of the root built in the
     /// order of the parts, from `start` and the arguments.
     fn root(
@@ -322,7 +327,7 @@ pub(crate) fn set_now<Q: Composition>(
 /// # }
 /// use nitori_driver::call::{
 ///     Composition, KindsOf, RootNode,
-///     __pack::{PackList, new_root, prove},
+///     __pack::{PackList, new_root, prove, with_tables},
 /// };
 /// struct Q;
 /// impl Composition for Q {
@@ -330,9 +335,10 @@ pub(crate) fn set_now<Q: Composition>(
 ///     type Parts = HList![One];
 ///     type Clock = StillClock;
 ///     type Priority = u8;
-///     type Pack = impl PackList<Self, KindsOf<Self>>;
-///     fn pack() -> core::marker::PhantomData<Self::Pack> {
-///         prove::<Self, KindsOf<Self>, _>()
+///     type Tables = impl Sized + 'static;
+///     type Pack = impl PackList<Self, KindsOf<Self>, Tables = Self::Tables>;
+///     fn pack() -> core::marker::PhantomData<(Self::Pack, Self::Tables)> {
+///         with_tables::<Self, KindsOf<Self>, _>(prove::<Self, KindsOf<Self>, _>())
 ///     }
 ///     fn root(
 ///         start: &mut <Top as NodeKind>::Start,
@@ -350,9 +356,16 @@ macro_rules! composition {
             type Parts = $parts;
             type Clock = $clock;
             type Priority = $priority;
-            type Pack = impl $crate::call::__pack::PackList<Self, $crate::call::KindsOf<Self>>;
-            fn pack() -> ::core::marker::PhantomData<Self::Pack> {
-                $crate::call::__pack::prove::<Self, $crate::call::KindsOf<Self>, _>()
+            type Tables = impl ::core::marker::Sized + 'static;
+            type Pack = impl $crate::call::__pack::PackList<
+                    Self,
+                    $crate::call::KindsOf<Self>,
+                    Tables = Self::Tables,
+                >;
+            fn pack() -> ::core::marker::PhantomData<(Self::Pack, Self::Tables)> {
+                $crate::call::__pack::with_tables::<Self, $crate::call::KindsOf<Self>, _>(
+                    $crate::call::__pack::prove::<Self, $crate::call::KindsOf<Self>, _>(),
+                )
             }
             fn root(
                 start: &mut <$root as $crate::structure::NodeKind>::Start,

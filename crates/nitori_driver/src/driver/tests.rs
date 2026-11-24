@@ -54,3 +54,11 @@ fn outer() -> (Arc<Counting>, Waker) {
 fn poll<Q: Composition>(d: &mut Driver<Q>, w: &Waker) -> Poll<()> {
     Pin::new(d).poll(&mut Context::from_waker(w))
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn the_driver_is_send() {
+    fn send<T: Send>() {}
+    send::<Driver<fixture::QT>>();
+    send::<Driver<crate::call::tests::Q1>>();
+}

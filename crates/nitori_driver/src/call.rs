@@ -129,7 +129,7 @@ pub mod __pack {
         },
         prove::{
             FewCalls, Fits, KindPositions, Prove, ProveCalls, ProveChildren, ProveComps, RootBuild,
-            prove,
+            prove, with_tables,
         },
     };
 }
