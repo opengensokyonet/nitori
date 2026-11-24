@@ -1,10 +1,12 @@
-//! Adding, removing and moving nodes.
+//! The types of editing the tree: why a node could not be added or moved,
+//! and the children of a path's parent.
 use snafu::Snafu;
 
+#[cfg(test)]
 use super::{
-    Append, ChildAt, ChildOfKind, ChildStorage, ChildrenOf, HandleAt, KeyAt, KindAt, KindFor, Node,
-    NodePath, Occupied, PathFrom, SplitLast, Store,
+    Append, ChildAt, ChildOfKind, HandleAt, KeyAt, KindFor, Node, NodePath, Occupied, Store,
 };
+use super::{ChildrenOf, KindAt, PathFrom, SplitLast};
 
 /// The children of the node a path `X` from the root `R` leads to.
 pub type ParentChildren<R, X> = ChildrenOf<<X as PathFrom<R>>::Target>;
@@ -53,6 +55,7 @@ impl<N> InsertError<N> {
 /// position among the parent's children is inferred from its kind.
 /// Returns the child's path.
 #[allow(clippy::type_complexity)]
+#[cfg(test)]
 pub(crate) fn insert<R, P, X, CK, I>(
     root: &mut Node<R, P>,
     at: X,
@@ -86,21 +89,6 @@ pub type LastChildren<R, X> = ChildrenOf<<<X as SplitLast>::Parent as PathFrom<R
 /// The kind of the node a path `X` from `R` leads to, through its parent.
 pub type LastKind<R, X> = KindAt<LastChildren<R, X>, <X as SplitLast>::Index>;
 
-/// Take the node at `at` out of the tree, with every node below it.
-///
-/// The nodes below it go with it.
-pub(crate) fn remove<R, P, X>(root: &mut Node<R, P>, at: X) -> Option<Node<LastKind<R, X>, P>>
-where
-    R: KindFor<P>,
-    X: SplitLast,
-    X::Parent: NodePath<R, P>,
-    LastChildren<R, X>: ChildAt<X::Index, P, Storage: ChildStorage<Handle = X::Handle>>,
-{
-    let (parent, h) = at.split_last();
-    let parent = parent.node_mut(root)?;
-    <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut parent.children).remove(h)
-}
-
 /// Why a node could not be moved; it stays where it was.
 #[derive(Debug, Snafu, PartialEq, Eq)]
 #[snafu(module)]
@@ -117,54 +105,4 @@ pub enum MoveError {
         /// Why.
         source: OccupiedError,
     },
-}
-
-/// Move the node at `at`, with every node below it, under `to`, a node of
-/// the kind of its parent, keeping its key. Returns the new path.
-///
-/// Both ends are checked before the node is taken out: when the move
-/// fails the node has not moved, and keeps its handle.
-#[allow(clippy::type_complexity)]
-pub(crate) fn move_to<R, P, X, B>(
-    root: &mut Node<R, P>,
-    at: X,
-    to: B,
-) -> Result<<B as Append<X::Index, X::Handle>>::Out, MoveError>
-where
-    R: KindFor<P>,
-    X: SplitLast,
-    X::Parent: NodePath<R, P>,
-    B: NodePath<R, P, Target = <X::Parent as PathFrom<R>>::Target> + Append<X::Index, X::Handle>,
-    LastChildren<R, X>: ChildAt<X::Index, P, Storage: ChildStorage<Handle = X::Handle>>,
-{
-    let (parent, h) = at.split_last();
-    let from = parent.node(root).ok_or(MoveError::NoSource)?;
-    let store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store(&from.children);
-    let key = store.key(h).ok_or(MoveError::NoSource)?.clone();
-    let dest = to.node(root).ok_or(MoveError::NoDestination)?;
-    let dest_store = <LastChildren<R, X> as ChildAt<X::Index, P>>::store(&dest.children);
-    if dest_store.find(&key).is_some() {
-        return Err(MoveError::Occupied {
-            source: OccupiedError,
-        });
-    }
-    // Invariant: the source was reached just above and nothing has
-    // changed the tree since.
-    let from = parent
-        .node_mut(root)
-        .expect("the source parent was reached a moment ago");
-    let node = <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut from.children)
-        .remove(h)
-        .expect("the node was found a moment ago");
-    // Invariant: the destination was reached and its key was free just
-    // above, and taking the node out changed neither.
-    let dest = to
-        .node_mut(root)
-        .expect("the destination was reached a moment ago");
-    match <LastChildren<R, X> as ChildAt<X::Index, P>>::store_mut(&mut dest.children)
-        .insert(key, node)
-    {
-        Ok(h) => Ok(to.append(h)),
-        Err(_) => unreachable!("the destination's key was free a moment ago"),
-    }
 }

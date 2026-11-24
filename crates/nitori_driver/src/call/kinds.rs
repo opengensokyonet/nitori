@@ -164,8 +164,6 @@ where
 {
     type Calls = <O::Calls as Add<Os::Calls>>::Output;
 }
-/// The calls of the parts `Pt` at the kind `K`.
-pub(crate) type CallsOf<Pt, K> = <Pt as PartsCalls<K>>::Calls;
 
 /// The component `C` in the share of the part `O`.
 pub struct Comp<O, C>(core::marker::PhantomData<fn() -> (O, C)>);
@@ -195,8 +193,6 @@ where
 {
     type Comps = <<O::Data as InPart<O>>::Out as Add<Os::Comps>>::Output;
 }
-/// The components of the parts `Pt` at the kind `K`.
-pub(crate) type CompsOf<Pt, K> = <Pt as PartsComps<K>>::Comps;
 
 // ------------------------------------------------------------------ request boxes
 

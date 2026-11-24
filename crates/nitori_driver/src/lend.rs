@@ -69,6 +69,7 @@ pub type PointFk<R, Pt, L, IL, Xc> = <PointCx<R, Pt, L, IL, Xc> as Ctx>::Fk;
 
 /// Code that takes a view at a position it is generic over, as a call
 /// does: the driver gives it the position it inferred.
+#[cfg(test)]
 pub trait Visit<N: Need> {
     /// What it gives back.
     type Out;
@@ -120,6 +121,7 @@ where
 }
 
 /// [`lend`], handing the view to code generic over its position.
+#[cfg(test)]
 pub(crate) fn lend_visit<R, Pt: 'static, L, IL, N, P, X, V>(
     root: &mut Node<R, Pt>,
     at: &PointFk<R, Pt, L, IL, X>,

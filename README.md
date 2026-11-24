@@ -4,7 +4,7 @@ Foundational Rust tools for Open Gensokyo Network, administratively supported by
 
 Source: [opengensokyonet/nitori](https://github.com/opengensokyonet/nitori).
 
-This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, `nitori_driver` the tree of state a driver keeps for its calls, `nitori_clock` a monotonic clock, and a DATA frame codec prototype. The TLS 1.3 handshake package has moved to the kasen repository as `kasen_handshake`. The current APIs are experimental and are not stable production APIs.
+This repository contains the experimental `nitori_call` mechanism, `nitori_io` byte IO capabilities and operations, `nitori_crypto` cryptographic capabilities with ring and aws-lc-rs implementations, `nitori_driver` a driver for the state of one connection and its calls, `nitori_clock` a monotonic clock, and a DATA frame codec prototype. The TLS 1.3 handshake package has moved to the kasen repository as `kasen_handshake`. The current APIs are experimental and are not stable production APIs.
 
 ## Layout
 
@@ -14,7 +14,7 @@ Each package documents itself in its own README or crate documentation. Dependen
 
 - [`crates/nitori_call`](crates/nitori_call/README.md): operations written as ordinary async functions that run on a resource their caller lends one poll at a time; depends on `nitori_call_macros`.
 - `crates/nitori_call_macros`: the `#[call]` and `#[capability]` procedural macros of `nitori_call`.
-- [`crates/nitori_driver`](crates/nitori_driver/README.md): the tree of state a driver keeps and lends to its calls: the structure, the needs of calls, capabilities, component hooks and requests; depends on `nitori_call` and `nitori_clock`.
+- [`crates/nitori_driver`](crates/nitori_driver/README.md): a driver for the state of one connection: the structure of nodes, the needs lent to calls and components, capabilities, reaction points, requests and their handlers, and the driver that runs the calls by priority; depends on `nitori_call` and `nitori_clock`.
 
 ### IO
 

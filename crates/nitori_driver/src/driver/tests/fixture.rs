@@ -217,8 +217,6 @@ pub enum Step {
     /// Not a step of the call, which waits: its leaf's component panics
     /// when woken.
     PanicOnWake,
-    /// Return.
-    Return,
 }
 
 /// A leaf's component: its number, the rest of its call's script, and how
@@ -378,7 +376,6 @@ enum Then {
     SettleSee(crate::call::Settle),
     Spin,
     Guard,
-    Return,
 }
 
 /// Notes its drop: a call is dropped before its node's components end.
@@ -466,12 +463,10 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
                 Step::Panic => panic!("the script panics"),
                 Step::Guard => Then::Guard,
                 Step::PanicOnWake => Then::Wait,
-                Step::Return => Then::Return,
             };
             (then, key)
         });
         match then {
-            Then::Return => return,
             Then::Settle(s) => {
                 s.await;
                 note(format!("call {key} settled"));

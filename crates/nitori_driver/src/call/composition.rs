@@ -4,7 +4,9 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use frunk_core::hlist::{HCons, HNil, Selector};
+#[cfg(test)]
+use frunk_core::hlist::Selector;
+use frunk_core::hlist::{HCons, HNil};
 use nitori_clock::MonotonicClock;
 
 use super::{
@@ -14,13 +16,14 @@ use super::{
 use crate::{
     component::{ArgsOf, PartList},
     lend::{
-        context::{Context, RequestList, WakeList},
+        context::{Context, WakeList},
         entry::{BuildRootShares, build_root},
     },
     need::LentClock,
-    request::NodeRequest,
     structure::{ChildAddresses, KindFor, Node, NodeKind},
 };
+#[cfg(test)]
+use crate::{lend::context::RequestList, request::NodeRequest};
 
 /// A composition: a root kind, a list of parts, the driver's clock and
 /// the priority a waking has, and what was proved once of every kind of
@@ -110,6 +113,7 @@ pub(crate) fn context<Q: Composition>(
 /// The requests for the nodes of the kind `K` put in the lendings of
 /// `cx`, each with its place in the order of the context, leaving the box
 /// empty; `I` is inferred.
+#[cfg(test)]
 pub(crate) fn take_requests<Q, K, I>(cx: &mut ContextOf<Q>) -> Vec<(u64, NodeRequest<RootOf<Q>, K>)>
 where
     Q: Composition,

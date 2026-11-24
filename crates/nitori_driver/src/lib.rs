@@ -4,9 +4,6 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
-// The driver around the engine comes in later steps; until then, parts of
-// the engine are used only by its tests.
-#![allow(dead_code)]
 
 extern crate alloc;
 extern crate self as nitori_driver;

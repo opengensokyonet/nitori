@@ -3,6 +3,7 @@
 //! out of the tree; and the driver dropped.
 use alloc::vec::Vec;
 
+#[cfg(test)]
 use frunk_core::hlist::Selector;
 
 use super::{
@@ -91,6 +92,7 @@ impl<Q: Composition> Core<Q> {
 
     /// End the subtree at the node `number` of the kind `K` (at `I`,
     /// inferred) for `reason`, as [`end_at`](Self::end_at) does.
+    #[cfg(test)]
     pub(crate) fn end_for<K, I>(&mut self, number: u32, reason: &IxEndReason<Q, I>)
     where
         KindsOf<Q>: Selector<K, I>,

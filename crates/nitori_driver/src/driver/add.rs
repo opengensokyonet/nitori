@@ -2,7 +2,9 @@
 //! given a number, its calls started and woken, and `NodeStarted` fired.
 use alloc::{sync::Arc, vec, vec::Vec};
 
-use frunk_core::hlist::{HNil, Selector};
+use frunk_core::hlist::HNil;
+#[cfg(test)]
+use frunk_core::hlist::Selector;
 
 use super::{
     Core,
@@ -105,6 +107,7 @@ impl<Q: Composition> Core<Q> {
 
     /// Add a node of the kind `K` (at `I`, inferred), as
     /// [`add_at`](Self::add_at) does.
+    #[cfg(test)]
     pub(crate) fn add<K, I>(
         &mut self,
         fk: IxFk<Q, I>,

@@ -85,33 +85,26 @@ mod pack;
 mod prove;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod walk;
 
+#[cfg(test)]
+pub(crate) use composition::take_requests;
 pub use composition::{
     ClockOf, Composition, ContextOf, KindsOf, PartsOf, PriorityOf, RootNode, RootOf,
 };
-#[allow(unused_imports)]
 pub(crate) use composition::{
-    RequestListsOf, context, request_lists, set_now, swap_wakes, take_requests, take_wakes,
+    RequestListsOf, context, request_lists, set_now, swap_wakes, take_wakes,
 };
-#[allow(unused_imports)]
 pub(crate) use host::CallHost;
 pub use host::Settle;
 pub use kind::{CallFamily, CallKind, CallView, Lent, Loan, LoanHost, LoanNeeds, RunsOn};
 pub use kinds::OtherKind;
-#[allow(unused_imports)]
-pub(crate) use pack::{build, end, node_ending, node_started, poll_call, start_calls, wake};
 pub use prove::{BuildAt, ProveCall, ProveComponent, ProveHandler, ProveKind};
+#[cfg(test)]
+pub(crate) use walk::{build, end, node_ending, node_started, poll_call, start_calls, wake};
 // The submodules name one another's items through here.
-#[allow(unused_imports)]
-use self::{
-    __pack::*,
-    kinds::{CallsOf, CompsOf, KindNotIn},
-    pack::{
-        CallKindsAt, CallKindsFrom, CallPosAt, CallsAt, CompKindsAt, CompsAt, DescAt, EndReasonOf,
-        FkAt, FkOf, IlOf, KindPosAt, NthCall, NthComp, PackNth, RunningAt, RunningCalls, StartAt,
-        StartCalls, StartOf,
-    },
-};
+use self::__pack::*;
 
 /// The items of the pack at a position of the structure, for the driver.
 pub(crate) mod pack_at {

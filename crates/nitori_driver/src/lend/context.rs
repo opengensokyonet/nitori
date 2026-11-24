@@ -132,6 +132,7 @@ impl<R> RequestList<R> {
     }
     /// The requests put in, each with its place in the order, leaving the
     /// list empty.
+    #[cfg(test)]
     pub(crate) fn take(&mut self) -> Vec<(u64, R)> {
         core::mem::take(&mut self.requests)
     }

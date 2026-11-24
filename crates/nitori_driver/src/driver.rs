@@ -57,7 +57,6 @@ mod wake;
 #[cfg(test)]
 mod tests;
 
-#[allow(unused_imports)]
 pub(crate) use add::AddRefused;
 #[doc(hidden)]
 pub use edit::{
