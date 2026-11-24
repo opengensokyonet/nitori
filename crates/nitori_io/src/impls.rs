@@ -1,5 +1,5 @@
 //! In-memory hosts and transparent pointer forwarding.
-use crate::{Read, ReadChunk, Write};
+use crate::{Read, ReadChunk, Skip, Write};
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{
@@ -34,6 +34,51 @@ macro_rules! memory_read {
     )*};
 }
 memory_read!(&[u8], Bytes, BytesMut, VecDeque<u8>);
+/// Advance the buffer by at most `maximum` bytes, or report EOF.
+fn skip_buffer<B: Buf + ?Sized, M: crate::Min<usize, Output = usize>>(
+    source: &mut B,
+    maximum: M,
+) -> Option<usize> {
+    let available = source.remaining();
+    if available == 0 {
+        return None;
+    }
+    let count = crate::Min::min(maximum, available);
+    source.advance(count);
+    Some(count)
+}
+macro_rules! memory_skip {
+    ($($ty:ty),* $(,)?) => {$(
+        impl Skip for Direct<$ty> {
+            type Count = usize;
+            fn poll_skip<'visit, M: crate::Min<usize, Output = usize> + Clone>(
+                host: Pin<&mut Self::ReceiverView<'visit>>,
+                _: &mut Context<'_>,
+                maximum: M,
+            ) -> Poll<Result<Option<usize>, Self::Error>>
+            where
+                Self: 'visit,
+            {
+                Poll::Ready(Ok(skip_buffer(host.get_pin_mut().get_mut(), maximum)))
+            }
+        }
+    )*};
+}
+memory_skip!(&[u8], Bytes, BytesMut, VecDeque<u8>);
+#[cfg(feature = "std")]
+impl<T: AsRef<[u8]> + Unpin> Skip for Direct<Cursor<T>> {
+    type Count = usize;
+    fn poll_skip<'visit, M: crate::Min<usize, Output = usize> + Clone>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        _: &mut Context<'_>,
+        maximum: M,
+    ) -> Poll<Result<Option<usize>, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        Poll::Ready(Ok(skip_buffer(host.get_pin_mut().get_mut(), maximum)))
+    }
+}
 macro_rules! memory_write {
     ($($ty:ty),* $(,)?) => {$ (
         impl Write for Direct<$ty> {

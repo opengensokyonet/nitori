@@ -1,7 +1,8 @@
 //! Explicit capability adapters: chunk reads with caller-selected allocation
 //! limits, and byte budgets for composed accesses.
 use crate::{
-    PollReadExt as _, PollWriteExt as _, Read, ReadChunk, Write, helpers::poll_chunk_from_read,
+    PollReadExt as _, PollWriteExt as _, Read, ReadChunk, Skip, Write,
+    helpers::poll_chunk_from_read,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{
@@ -105,6 +106,25 @@ where
             BytesMut::with_capacity,
             BytesMut::freeze,
         )
+    }
+}
+/// Skips on the inner source. Chunk storage holds no data between polls, so
+/// nothing buffered is passed over or left behind.
+impl<T: Receiver> Skip for Direct<Chunked<T>>
+where
+    T::Family: Skip,
+{
+    type Count = <T::Family as Skip>::Count;
+    fn poll_skip<'visit, M: crate::Min<Self::Count, Output = Self::Count> + Clone>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        maximum: M,
+    ) -> Poll<Result<Option<Self::Count>, Self::Error>>
+    where
+        Self: 'visit,
+    {
+        let inner = host.get_pin_mut().project().inner;
+        <T::Family as Skip>::poll_skip(core::pin::pin!(inner.view()), cx, maximum)
     }
 }
 impl<T: Receiver> crate::ExactLen for Direct<Chunked<T>>
@@ -319,6 +339,55 @@ where
         Poll::Ready(Ok(chunk))
     }
 }
+/// The smaller of a caller's maximum and a budget, as one maximum for the
+/// parent.
+#[derive(Clone)]
+struct BothMaxima<M, L>(M, L);
+impl<C, M: crate::Min<C, Output = C>, L: crate::Min<C, Output = C>> crate::Min<C>
+    for BothMaxima<M, L>
+{
+    type Output = C;
+    fn min(self, rhs: C) -> C {
+        crate::Min::min(self.0, crate::Min::min(self.1, rhs))
+    }
+}
+/// Skips within the budget, reporting EOF at its boundary without polling the
+/// parent, as reads do. The parent bounds each skip by both the requested
+/// maximum and the budget, so the skipped count, in the parent's `Count`,
+/// fits the budget.
+impl<F: Skip, L> Skip for Limited<F, ReadLimit<L>>
+where
+    L: Clone
+        + crate::Min<usize, Output = usize>
+        + core::ops::SubAssign<<usize as crate::Min<L>>::Output>
+        + crate::Min<F::Count, Output = F::Count>
+        + core::ops::SubAssign<<F::Count as crate::Min<L>>::Output>,
+    usize: crate::Min<L>,
+    F::Count: crate::Min<L> + Clone,
+{
+    type Count = F::Count;
+    fn poll_skip<'v, M: crate::Min<F::Count, Output = F::Count> + Clone>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        maximum: M,
+    ) -> Poll<Result<Option<F::Count>, Self::Error>>
+    where
+        Self: 'v,
+    {
+        let view = host.project();
+        let budget = view.limit.0.clone();
+        if crate::Min::min(budget.clone(), usize::MAX) == 0 {
+            return Poll::Ready(Ok(None));
+        }
+        let skipped = ready!(F::poll_skip(view.parent, cx, BothMaxima(maximum, budget)))?;
+        if let Some(count) = &skipped {
+            // The count is at most the budget, so the minimum is the count
+            // itself, in the budget's subtraction type.
+            view.limit.0 -= crate::Min::min(count.clone(), view.limit.0.clone());
+        }
+        Poll::Ready(Ok(skipped))
+    }
+}
 impl<F: Write> Write for Limited<F, WriteLimit> {
     type Error = F::Error;
     fn poll_write<'v, I: Buf + ?Sized>(
@@ -392,6 +461,21 @@ impl<F: Write> Write for Lent<F> {
     {
         host.get_mut()
             .with(|parent| F::poll_write(parent.into_pin(), cx, input))
+    }
+}
+/// Skips on the lent view.
+impl<F: Skip> Skip for Lent<F> {
+    type Count = F::Count;
+    fn poll_skip<'v, M: crate::Min<F::Count, Output = F::Count> + Clone>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        maximum: M,
+    ) -> Poll<Result<Option<F::Count>, Self::Error>>
+    where
+        Self: 'v,
+    {
+        host.get_mut()
+            .with(|parent| F::poll_skip(parent.into_pin(), cx, maximum))
     }
 }
 /// The exact length of the lent view.

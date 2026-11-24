@@ -37,6 +37,9 @@ macro_rules! lengths {
             type Output = $integer;
             fn min(self, rhs: $integer) -> $integer { rhs }
         }
+        impl core::ops::SubAssign<$integer> for Infinite {
+            fn sub_assign(&mut self, _: $integer) {}
+        }
     )+};
 }
 lengths!(u8, u16, u32, u64, u128, usize);
@@ -46,8 +49,4 @@ impl Min for Infinite {
     fn min(self, _: Self) -> Self {
         self
     }
-}
-
-impl core::ops::SubAssign<usize> for Infinite {
-    fn sub_assign(&mut self, _: usize) {}
 }

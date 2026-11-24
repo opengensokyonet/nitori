@@ -5,20 +5,22 @@ verified with 1.100.0-nightly, 2026-09-19).
 
 ## Capabilities and operations
 
-`Read`, `ReadChunk`, and `Write` are capabilities on `ReceiverFamily` types.
+`Read`, `ReadChunk`, `Skip`, and `Write` are capabilities on `ReceiverFamily` types.
 Each method accepts a pinned `Self::ReceiverView<'visit>` for any valid visit lifetime;
 errors and chunks are stable associated types independent of that visit.
 `Read` fills any `BufMut`; `ReadChunk: Read` additionally returns owned `Buf`
-chunks from the same cursor. `Write` accepts any `Buf`. Buffer generics belong
+chunks from the same cursor, and `Skip: Read` advances that cursor without
+delivering the bytes (see [Skipping](#skipping)). `Write` accepts any `Buf`. Buffer generics belong
 to the methods. Neither hosts nor buffers require `Send`, `Sync`, `Unpin`, or
 `'static`. These traits are not dyn-compatible; buffer arguments can be unsized.
 
 `#[capability]` generates a primitive operation for each poll method: `read::Read`,
-`read_chunk::ReadChunk` and `write::Write`. Each borrows its buffer and completes
+`read_chunk::ReadChunk`, `skip::Skip` and `write::Write`. Each borrows its buffer and completes
 with the poll's result. The operations derived from them live in `calls`,
 together with their errors. Import the generated extension traits to call them:
-`ReadExt`, `ReadChunkExt`, `WriteExt` and `calls::{Name}Ext` on receiver accesses
-inside operations, and `ReadHostExt`, `ReadChunkHostExt`, `WriteHostExt` and
+`ReadExt`, `ReadChunkExt`, `SkipExt`, `WriteExt` and `calls::{Name}Ext` on receiver
+accesses inside operations, and `ReadHostExt`, `ReadChunkHostExt`, `SkipHostExt`,
+`WriteHostExt` and
 `calls::{Name}HostExt` on executors such as memory buffers and bridges.
 `use nitori_io::prelude::*` imports all of them anonymously, together with the
 capabilities.
@@ -65,6 +67,7 @@ may stay borrowed across Pending.
 | --- | --- |
 | `read::Read::new(&mut destination)` | `Result<usize, F::Error>` |
 | `read_chunk::ReadChunk::new(nonzero_maximum)` | `Result<Option<F::Chunk>, F::Error>` |
+| `skip::Skip::new(maximum)` | `Result<Option<F::Count>, F::Error>` |
 | `write::Write::new(&mut input)` | `Result<usize, F::Error>` |
 | `ReadExact::new(&mut destination, length)` | `Result<(), ReadExactError<F::Error>>` |
 | `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<F::Error>>` |
@@ -94,15 +97,15 @@ wrapper families define their own views. Host methods also work on custom
 
 ## Built-in hosts and bridges
 
-| Receiver | Read | Write | Native ReadChunk |
-| --- | --- | --- | --- |
-| `&[u8]` | yes | — | borrowed subslice |
-| `&mut [u8]` | — | bounded | — |
-| `Bytes` | yes | — | zero-copy split |
-| `BytesMut` | yes | append | zero-copy split |
-| `Vec<u8>` | — | append | — |
-| `VecDeque<u8>` | consume front | append | — |
-| `std::io::Cursor<T>` | when `T: AsRef<[u8]> + Unpin` | when the cursor implements `std::io::Write` and `T: Unpin` | — |
+| Receiver | Read | Write | Native ReadChunk | Native Skip |
+| --- | --- | --- | --- | --- |
+| `&[u8]` | yes | — | borrowed subslice | advance |
+| `&mut [u8]` | — | bounded | — | — |
+| `Bytes` | yes | — | zero-copy split | advance |
+| `BytesMut` | yes | append | zero-copy split | advance |
+| `Vec<u8>` | — | append | — | — |
+| `VecDeque<u8>` | consume front | append | — | consume front |
+| `std::io::Cursor<T>` | when `T: AsRef<[u8]> + Unpin` | when the cursor implements `std::io::Write` and `T: Unpin` | — | when `T: AsRef<[u8]> + Unpin` |
 
 Memory operations use `Infallible`, except cursor writes which preserve
 `std::io::Error`. A full slice writer returns zero. A cursor write offers one
@@ -266,6 +269,36 @@ fn main() {
 }
 ```
 
+## Skipping
+
+`Skip` advances past bytes without delivering them. Its associated `Count`
+is chosen by the source: memory hosts skip natively, by advancing their
+cursor, and report `usize`. Each `poll_skip` takes a maximum, a finite
+count of any unsigned width or `Infinite`, and skips `maximum.min(available)`
+bytes by the `Min` rules above, so the result has the source's `Count` type.
+`Some(n)` is the count this poll skipped, at most the maximum, and `None` is
+EOF. As with reads, the count is exactly what was consumed and `Pending` and
+`Err` consume nothing, so a budget or a payload's remainder kept above the
+source stays in step with it, cancellation included. A zero maximum is an
+empty request: `Some(0)` reports no progress and says nothing about EOF, and
+the request still reaches the host.
+
+A loan of a view, `Chunked` and a read budget forward `Skip` with the
+parent's `Count`; a budget bounds each skip by itself too and reports EOF at
+its boundary without polling the parent. For it, the quota must also satisfy
+`L: Min<F::Count, Output = F::Count>` and `F::Count: Min<L> + Clone`, with
+`L: SubAssign` of that minimum, which the built-in widths and `Infinite` do.
+
+```rust
+use nitori_io::{Infinite, adapters::ReadLimit, prelude::*};
+
+let mut input = &b"abcdef"[..];
+assert_eq!(input.sync_skip_unpin(2u8), Ok(Some(2usize)));
+let mut framed = nitori_call::ComposedReceiver::new(input, ReadLimit(3u8));
+assert_eq!(framed.sync_skip_unpin(Infinite), Ok(Some(3)));
+assert_eq!(framed.sync_skip_unpin(Infinite), Ok(None));
+```
+
 ## Splitting a buffer
 
 `SplitTo` cuts the first bytes of a buffer off as a piece of their own and
@@ -353,7 +386,7 @@ not a hard `remaining_mut()` limit. Fallible allocation and allocation-error
 mapping belong to the caller, which can prepare storage in advance. Neither
 helper adds blanket impls or recursive defaults.
 
-Flush/Close contracts, Skip, dynamic host adaptation, and higher-level codecs
+Flush/Close contracts, dynamic host adaptation, and higher-level codecs
 remain outside this first implementation.
 
 ## Verification

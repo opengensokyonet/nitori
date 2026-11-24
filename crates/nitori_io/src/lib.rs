@@ -89,6 +89,43 @@ pub trait ReadChunk: Read {
         Self: 'visit;
 }
 
+/// Advance past bytes of the same stream as [`Read`] without delivering them.
+///
+/// `maximum` bounds this poll. It is a finite count of any width or
+/// [`Infinite`]; the host takes `maximum.min(available)` as the number to
+/// skip, where `available` is what it can skip now, so the result has the
+/// source's own `Count` type. `Some(n)` reports the bytes this poll skipped,
+/// at most `maximum`; `None` means EOF. As with [`Read`], the reported count
+/// is exactly what the poll consumed, and `Pending` and `Err` consume
+/// nothing, so a count kept above this source (a budget, a payload's
+/// remainder) stays in step with it across cancellation. Register the waker
+/// before returning `Pending`.
+///
+/// A zero maximum is an empty request, like an empty read buffer: `Some(0)`
+/// means no progress and says nothing about EOF, and `Some(0)` is reported
+/// for no other maximum. The request still reaches the host, which can report
+/// its terminal error or EOF first. `None` always means EOF.
+///
+/// A source implements this when it can skip natively, without copying, such
+/// as a memory buffer advancing its cursor. There is no blanket
+/// implementation for readers. `Count` is chosen by the source and needs no
+/// arithmetic here; code that adds or compares counts states its own bounds.
+#[nitori_call::capability(sync)]
+pub trait Skip: Read {
+    /// This source's representation of a skipped byte count.
+    type Count;
+    // The bound `Clone` lets the generated operation offer the same maximum
+    // again after Pending.
+    fn poll_skip<'visit, M>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        maximum: M,
+    ) -> Poll<Result<Option<Self::Count>, <Self as Read>::Error>>
+    where
+        Self: 'visit,
+        M: Min<Self::Count, Output = Self::Count> + Clone;
+}
+
 /// Accept a prefix of a caller-selected buffer and advance its cursor.
 ///
 /// The return count equals the decrease in `remaining()`. `Pending` and `Err`
