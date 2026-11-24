@@ -2,4 +2,5 @@
 //! nothing here is stable.
 pub use crate::lend::{assert_lends, assert_lends_in, entry::assert_component_lends};
 
+pub mod calls;
 pub mod doc;

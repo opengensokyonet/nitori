@@ -21,8 +21,13 @@ pub trait NodeKind: 'static + Sized {
     type EndReason: 'static = ();
     /// What the one adding a node of this kind gives it to start from;
     /// `()` by default. Each component takes out what it keeps of it, such
-    /// as a value that moves once.
+    /// as a value that moves once, and the calls take what is left.
     type Start: 'static = ();
+    /// What a node of this kind can be asked to change in its own subtree,
+    /// one closed type; `Infallible` by default, for nothing. A request
+    /// names its node by key address
+    /// ([`NodeRequest`](crate::request::NodeRequest)).
+    type Request: 'static = Infallible;
 }
 
 /// The kind and the storage kind of the first child of an empty list of

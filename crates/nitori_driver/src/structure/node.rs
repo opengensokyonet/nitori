@@ -21,6 +21,11 @@ pub trait Share<K> {
     /// [`ReactsTo`](crate::react::ReactsTo)`<point, reaction>`, none by
     /// default.
     type Reacts: 'static = HNil;
+    /// The kinds of the calls the part keeps at each node of this kind, an
+    /// `HList`; none by default. A new node's calls start after its
+    /// components are built, in the order of the parts, then in this order
+    /// ([`CallKind::start`](crate::call::CallKind::start)).
+    type Calls: HList + 'static = HNil;
 }
 
 /// What the parts `Self` keep of their shares in a node of the kind `K`

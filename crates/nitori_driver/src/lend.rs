@@ -37,7 +37,7 @@ pub(crate) mod up;
 pub(crate) mod waker;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use check::{Check, DeepEnoughAll, Disjoint, Takes};
 pub(crate) use context::LendContext;

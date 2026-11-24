@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(associated_type_defaults)]
+#![cfg_attr(test, feature(impl_trait_in_assoc_type))]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
@@ -15,12 +16,14 @@ extern crate self as nitori_driver;
 /// this one.
 pub use frunk_core;
 
+pub mod call;
 pub mod capability;
 pub mod component;
 pub mod id;
 pub(crate) mod lend;
 pub mod need;
 pub mod react;
+pub mod request;
 pub mod structure;
 
 /// What the examples of the documentation prove needs with. Not for use;

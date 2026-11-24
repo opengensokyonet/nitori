@@ -257,6 +257,7 @@ name = "nitori_driver"
 version = "0.0.0"
 dependencies = [
  "frunk_core",
+ "nitori_call",
  "nitori_clock",
  "nitori_driver_macros",
  "snafu",

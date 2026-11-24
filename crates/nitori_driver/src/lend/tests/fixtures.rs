@@ -84,16 +84,22 @@ pub struct LogicalPath;
 impl NodeKind for LogicalPath {
     type Children = HList![Child<Entry, SlotVec<LinkId>>, Child<LinkPath, SlotVec<LinkId>>];
 }
+/// A connection can be asked to close, for a code.
 #[derive(Numbered)]
 pub struct Conn1;
 impl NodeKind for Conn1 {
     type Children = HList![Child<LogicalPath, SlotVec<PathKey>>];
+    type Request = CloseConn;
 }
 #[derive(Numbered)]
 pub struct Conn2;
 impl NodeKind for Conn2 {
     type Children = HList![Child<Entry, SlotVec<LinkId>>, Child<LinkPath, SlotVec<LinkId>>];
+    type Request = CloseConn;
 }
+/// What a connection is asked: to close, for a code.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CloseConn(pub u32);
 
 /// The part with the connection's, the links' and the entries' state.
 pub struct Core;
@@ -146,6 +152,7 @@ impl Share<LogicalPath> for Loss {
 }
 impl Share<LinkPath> for Core {
     type Data = HList![LinkCore, Planner];
+    type Calls = crate::call::tests::CoreLinkCalls;
     type Reacts = HList![
         ReactsTo<PacketsSent, RA1>,
         ReactsTo<P1, RC1>,
@@ -157,6 +164,7 @@ impl Share<LinkPath> for Core {
 }
 impl Share<LinkPath> for Loss {
     type Data = HList![];
+    type Calls = crate::call::tests::LossLinkCalls;
     type Reacts = HList![ReactsTo<Probe, LossAtLink>];
 }
 impl Share<Recovery> for Core {

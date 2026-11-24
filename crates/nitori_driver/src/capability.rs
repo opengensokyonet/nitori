@@ -129,6 +129,24 @@ impl<F: 'static> Need for Contributed<F> {
     type View<'t, P: Pos> = P::Held<'t>;
 }
 
+/// Every part's piece for the family `F`, for code that names the list of
+/// parts `L` the pieces come from: a composed capability, taken with
+/// [`Cap`](crate::need::Cap)`<ContributedBy<F, L>>`.
+///
+/// Its object is the list of the pieces, [`PiecesOf`]`<'t, L, F>`, which
+/// does not depend on where it is lent: a call generic over the structure
+/// names `L` as the parts of its composition and uses the pieces through
+/// what a bound of the composition says of them. Where the parts are
+/// known, [`Contributed<F>`](Contributed) is the same.
+pub struct ContributedBy<F, L>(PhantomData<fn() -> (F, L)>);
+impl<F: 'static, L: PieceList<F>> Capability for ContributedBy<F, L> {
+    type Needs = L::Needs;
+    type Object<'t, P: Pos> = L::Pieces<'t>;
+    fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> L::Pieces<'t> {
+        L::assemble::<P>(view)
+    }
+}
+
 /// What the part `Self` contributes to the family `F`: needs, and the
 /// piece put together from their view.
 ///
