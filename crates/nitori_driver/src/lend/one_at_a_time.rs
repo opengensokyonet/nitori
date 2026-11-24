@@ -8,6 +8,7 @@ use super::{
     check::{CheckBody, TakesBody, TakesExclusive},
     list::Len,
     plan::{Plan, Rebor},
+    rows::Span,
     tree::{Collect, Ctx, UnderPos},
     under::{Body, Gather, UnderBody},
 };
@@ -22,9 +23,10 @@ impl<PT: Pos, Cs: Plan, MF: 'static> Pos for OnePos<PT, Cs, MF> {
 }
 
 /// What the view of members taken one at a time holds: their full keys
-/// and the handles of what they take, lent for `'t`.
+/// and places in the walk, and the handles of what they take, lent for
+/// `'t`.
 pub struct OneHeld<'t, Cs: Plan, MF> {
-    members: Vec<MF>,
+    members: Vec<(MF, Span)>,
     hs: Cs::Hs<'t>,
 }
 
@@ -35,10 +37,11 @@ fn one<'t, 'b, MC: Ctx, T: Body<MC, PT>, PT: Pos>(
     i: usize,
 ) -> T::View<'b, PT>
 where
-    T::Cols: Rebor,
+    T::Cols: Rebor<MC::Route>,
 {
     let OneHeld { members, hs } = held;
-    T::build(<T::Cols as Rebor>::rebor(hs), &members[i])
+    let (member, span) = &members[i];
+    T::build(<T::Cols as Rebor<MC::Route>>::rebor(hs, *span), member)
 }
 
 /// The members, lent one at a time, may take exclusive what they share,
@@ -54,12 +57,12 @@ where
     MC: Ctx<Fk = MF>,
     MF: Clone + 'static,
     T: UnderBody + Body<MC, PT, Cols = Cs>,
-    Cs: Rebor,
+    Cs: Rebor<MC::Route>,
     Sh: Collect<AF, MF, LF>,
 {
     type Cols = Cs;
     fn gather<'a>(
-        rows: &'a [&'a MF],
+        rows: &'a [(&'a MF, Span)],
         hs: Cs::Hs<'a>,
         anchor: &AF,
         at: &LF,
@@ -68,10 +71,11 @@ where
     where
         Self: 'a,
     {
-        let all = Sh::collect(rows, anchor, at, line, |m| m.clone());
-        let (keys, members) = <<Sh::Shape as Shape>::Out<MF> as Members<MF>>::iter(&all)
-            .map(|(k, m)| (k.clone(), m.clone()))
-            .unzip();
+        let all = Sh::collect(rows, anchor, at, line, |m, span| (m.clone(), span));
+        let (keys, members) =
+            <<Sh::Shape as Shape>::Out<(MF, Span)> as Members<(MF, Span)>>::iter(&all)
+                .map(|(k, m)| (k.clone(), m.clone()))
+                .unzip();
         OneView::new(keys, OneHeld { members, hs }, one::<MC, T, PT>)
     }
 }

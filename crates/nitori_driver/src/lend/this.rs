@@ -1,6 +1,5 @@
 //! The component of the lend point itself: what a component's operations
 //! are lent first.
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use frunk_core::hlist::{HCons, HNil};
@@ -9,6 +8,7 @@ use super::{
     Lend,
     check::{Check, Takes, TakesExclusive, Touch},
     plan::ExCol,
+    rows::{Rows, Span},
     tree::{Comps, Ctx, Elem, FlatData},
 };
 use crate::{
@@ -40,14 +40,14 @@ where
     C::Route: 'static,
 {
     type Cols = ExCol<C::Route, J, C::Fk, X>;
-    fn build<'a>(hs: Vec<(C::Fk, &'a mut X)>, at: &C::Fk) -> &'a mut X
+    fn build<'a>(hs: Rows<(C::Fk, &'a mut X, Span)>, at: &C::Fk) -> &'a mut X
     where
         Self: 'a,
     {
         // Invariant: the lending found the lend point in the tree.
         hs.into_iter()
-            .find(|(f, _)| f == at)
-            .map(|(_, x)| x)
+            .find(|(f, _, _)| f == at)
+            .map(|(_, x, _)| x)
             .expect("the lend point is in the tree")
     }
 }

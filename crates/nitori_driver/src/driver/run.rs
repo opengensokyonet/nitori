@@ -69,10 +69,10 @@ impl<Q: Composition> Core<Q> {
     /// priority it set.
     fn take_marks(&mut self) {
         let slots = &self.nodes.slots;
-        let ids = self
-            .shared
-            .take(|id| slots.get(id).and_then(NodeSlot::head));
-        for id in ids {
+        let mut ids = core::mem::take(&mut self.marked);
+        self.shared
+            .take(|id| slots.get(id).and_then(NodeSlot::head), &mut ids);
+        for &id in &ids {
             let Some(head) = self.nodes.slots.get(id).and_then(NodeSlot::head) else {
                 continue;
             };
@@ -93,6 +93,7 @@ impl<Q: Composition> Core<Q> {
                 }
             }
         }
+        self.marked = ids;
     }
 
     /// The waker of the call `j` of the node `number`, made with the

@@ -16,7 +16,7 @@ use super::{
     lend,
     list::Prefix,
     plan::Run,
-    table::TabAt,
+    table::{KidRoute, KindTab, TabAt},
     this::This,
     tree::{Ctx, Locate},
 };
@@ -55,7 +55,8 @@ where
     <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
-    R: TabAt<Pt, HNil, <R as Locate<L, IL>>::Route, AtFk = PointFk<R, Pt, L, IL, X>>,
+    R: KindTab<Pt, HNil>,
+    R::Children: KidRoute<Pt, HNil, <R as Locate<L, IL>>::Route, PointFk<R, Pt, L, IL, X>>,
     X: LendContext,
     N::Cols: Run<R, Pt, X>,
 {
@@ -93,6 +94,12 @@ where
     <R as Locate<L, IL>>::Route: RouteParent,
     R: TabAt<Pt, HNil, ParentRoute<R, L, IL>>,
     NewPointFk<R, Pt, L, IL, X>: Prefix<<R as TabAt<Pt, HNil, ParentRoute<R, L, IL>>>::AtFk>,
+    R::Children: KidRoute<
+            Pt,
+            HNil,
+            ParentRoute<R, L, IL>,
+            <R as TabAt<Pt, HNil, ParentRoute<R, L, IL>>>::AtFk,
+        >,
     X: LendContext,
     N::Cols: Run<R, Pt, X>,
 {

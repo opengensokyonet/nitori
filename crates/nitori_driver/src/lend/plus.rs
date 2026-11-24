@@ -7,7 +7,6 @@
 //! union again: first the branch's exclusive columns, each lent again for
 //! the branch, then the rest read through for its shared columns and node
 //! sets ([`Pick`]).
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use frunk_core::{
@@ -19,7 +18,8 @@ use super::{
     Lend,
     check::{Check, Deep, Disjoint, Takes, TakesExclusive, Touch},
     list::{And, Append, FirstTrue, IndexEq, Nowhere, Or, RouteEq},
-    plan::{ExCol, NodeSet, Plan, ShCol, Shared},
+    plan::{Anchored, ExCol, NodeSet, Plan, ShCol, Shared},
+    rows::{Rows, Span},
     tree::Ctx,
 };
 use crate::{
@@ -58,8 +58,11 @@ impl<Rt, J, F, X> Norm for ExCol<Rt, J, F, X> {
 impl<Rt, J, F, X> Norm for ShCol<Rt, J, F, X> {
     type Out = HCons<ShCol<Rt, J, F, X>, HNil>;
 }
-impl<Rt, F> Norm for NodeSet<Rt, F> {
-    type Out = HCons<NodeSet<Rt, F>, HNil>;
+impl<Rt, F, A> Norm for NodeSet<Rt, F, A> {
+    type Out = HCons<NodeSet<Rt, F, A>, HNil>;
+}
+impl<A, P: Norm> Norm for Anchored<A, P> {
+    type Out = P::Out;
 }
 
 /// Whether two items of a flat plan are the same column, exclusive or
@@ -88,20 +91,25 @@ same_col! {
     ShCol ExCol;
     ShCol ShCol;
 }
-impl<R1, J1, F1, X1, R2, F2> SameItem<NodeSet<R2, F2>> for ExCol<R1, J1, F1, X1> {
+impl<R1, J1, F1, X1, R2, F2, A2> SameItem<NodeSet<R2, F2, A2>> for ExCol<R1, J1, F1, X1> {
     type Out = False;
 }
-impl<R1, F1, R2, J2, F2, X2> SameItem<ExCol<R2, J2, F2, X2>> for NodeSet<R1, F1> {
+impl<R1, F1, A1, R2, J2, F2, X2> SameItem<ExCol<R2, J2, F2, X2>> for NodeSet<R1, F1, A1> {
     type Out = False;
 }
-impl<R1, J1, F1, X1, R2, F2> SameItem<NodeSet<R2, F2>> for ShCol<R1, J1, F1, X1> {
+impl<R1, J1, F1, X1, R2, F2, A2> SameItem<NodeSet<R2, F2, A2>> for ShCol<R1, J1, F1, X1> {
     type Out = False;
 }
-impl<R1, F1, R2, J2, F2, X2> SameItem<ShCol<R2, J2, F2, X2>> for NodeSet<R1, F1> {
+impl<R1, F1, A1, R2, J2, F2, X2> SameItem<ShCol<R2, J2, F2, X2>> for NodeSet<R1, F1, A1> {
     type Out = False;
 }
-impl<R1: RouteEq<R2>, F1, R2, F2> SameItem<NodeSet<R2, F2>> for NodeSet<R1, F1> {
-    type Out = R1::Out;
+/// Node sets are the same when they are of one kind below one anchor.
+impl<R1: RouteEq<R2>, F1, A1: RouteEq<A2>, R2, F2, A2> SameItem<NodeSet<R2, F2, A2>>
+    for NodeSet<R1, F1, A1>
+where
+    R1::Out: And<A1::Out>,
+{
+    type Out = <R1::Out as And<A1::Out>>::Out;
 }
 
 /// One item of a flat plan for two that are the same: a column exclusive
@@ -119,7 +127,7 @@ impl<Rt, J, F, X, Rt2, J2, F2, X2> Merge<ExCol<Rt2, J2, F2, X2>> for ShCol<Rt, J
 impl<Rt, J, F, X, Rt2, J2, F2, X2> Merge<ShCol<Rt2, J2, F2, X2>> for ShCol<Rt, J, F, X> {
     type Out = Self;
 }
-impl<Rt, F, B> Merge<B> for NodeSet<Rt, F> {
+impl<Rt, F, A, B> Merge<B> for NodeSet<Rt, F, A> {
     type Out = Self;
 }
 
@@ -200,33 +208,33 @@ pub trait Item: Plan {
 }
 impl<Rt: 'static, J: 'static, F: 'static, X: 'static> Item for ExCol<Rt, J, F, X> {
     type Slot<'b, 'c>
-        = Option<&'b mut Vec<(F, &'c mut X)>>
+        = Option<&'b mut Rows<(F, &'c mut X, Span)>>
     where
         'c: 'b;
     type Seen<'b, 'c>
-        = Option<&'b [(F, &'c mut X)]>
+        = Option<&'b [(F, &'c mut X, Span)]>
     where
         'c: 'b;
-    fn slot<'b, 'c: 'b>(hs: &'b mut Vec<(F, &'c mut X)>) -> Self::Slot<'b, 'c> {
+    fn slot<'b, 'c: 'b>(hs: &'b mut Rows<(F, &'c mut X, Span)>) -> Self::Slot<'b, 'c> {
         Some(hs)
     }
     fn seen<'b, 'c: 'b>(slot: Self::Slot<'b, 'c>) -> Self::Seen<'b, 'c> {
         slot.map(|v| &v[..])
     }
 }
-impl<Rt: 'static, F: 'static> Item for NodeSet<Rt, F> {
+impl<Rt: 'static, F: 'static, A: 'static> Item for NodeSet<Rt, F, A> {
     type Slot<'b, 'c>
-        = &'b [&'c F]
+        = &'b [(&'c F, Span)]
     where
         'c: 'b;
     type Seen<'b, 'c>
-        = &'b [&'c F]
+        = &'b [(&'c F, Span)]
     where
         'c: 'b;
-    fn slot<'b, 'c: 'b>(hs: &'b mut &'c [&'c F]) -> &'b [&'c F] {
+    fn slot<'b, 'c: 'b>(hs: &'b mut &'c [(&'c F, Span)]) -> &'b [(&'c F, Span)] {
         hs
     }
-    fn seen<'b, 'c: 'b>(slot: &'b [&'c F]) -> &'b [&'c F] {
+    fn seen<'b, 'c: 'b>(slot: &'b [(&'c F, Span)]) -> &'b [(&'c F, Span)] {
         slot
     }
 }
@@ -310,14 +318,16 @@ pub trait ColAt<I>: Union {
     /// The component.
     type X: 'static;
     /// The column, exclusive, taken out of the slots.
-    fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Vec<(Self::F, &'c mut Self::X)>;
+    fn ex<'b, 'c: 'b>(
+        slots: &mut Self::Slots<'b, 'c>,
+    ) -> &'b mut Rows<(Self::F, &'c mut Self::X, Span)>;
 }
 impl<Rt: 'static, J: 'static, F: Clone + 'static, X: 'static, T: Union> ColAt<Here>
     for HCons<ExCol<Rt, J, F, X>, T>
 {
     type F = F;
     type X = X;
-    fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Vec<(F, &'c mut X)> {
+    fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Rows<(F, &'c mut X, Span)> {
         // Invariant: a branch's needs were checked not to overlap, so it
         // takes a column exclusive once.
         slots
@@ -329,7 +339,7 @@ impl<Rt: 'static, J: 'static, F: Clone + 'static, X: 'static, T: Union> ColAt<He
 impl<H: Item, T: ColAt<I>, I> ColAt<There<I>> for HCons<H, T> {
     type F = T::F;
     type X = T::X;
-    fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Vec<(T::F, &'c mut T::X)> {
+    fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Rows<(T::F, &'c mut T::X, Span)> {
         T::ex(&mut slots.tail)
     }
 }
@@ -380,17 +390,17 @@ pub trait SetAt<I>: Union {
     /// The nodes' full keys.
     type F: 'static;
     /// The full keys.
-    fn set<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [&'c Self::F];
+    fn set<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [(&'c Self::F, Span)];
 }
-impl<Rt: 'static, F: 'static, T: Union> SetAt<Here> for HCons<NodeSet<Rt, F>, T> {
+impl<Rt: 'static, F: 'static, A: 'static, T: Union> SetAt<Here> for HCons<NodeSet<Rt, F, A>, T> {
     type F = F;
-    fn set<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [&'c F] {
+    fn set<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [(&'c F, Span)] {
         seen.head
     }
 }
 impl<H: Item, T: SetAt<I>, I> SetAt<There<I>> for HCons<H, T> {
     type F = T::F;
-    fn set<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [&'c T::F] {
+    fn set<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [(&'c T::F, Span)] {
         T::set(seen.tail)
     }
 }
@@ -448,14 +458,17 @@ impl<U, Rt: 'static, J: 'static, F: Clone + 'static, X: 'static> Pick<U> for ExC
 where
     U: IndexOf<ExCol<Rt, J, F, X>> + ColAt<<U as IndexOf<ExCol<Rt, J, F, X>>>::I, F = F, X = X>,
 {
-    type Ex<'b> = Vec<(F, &'b mut X)>;
-    fn ex<'b, 'c: 'b>(slots: &mut U::Slots<'b, 'c>) -> Vec<(F, &'b mut X)> {
+    type Ex<'b> = Rows<(F, &'b mut X, Span)>;
+    fn ex<'b, 'c: 'b>(slots: &mut U::Slots<'b, 'c>) -> Rows<(F, &'b mut X, Span)> {
         <U as ColAt<_>>::ex(slots)
             .iter_mut()
-            .map(|(f, x)| (f.clone(), &mut **x))
+            .map(|(f, x, s)| (f.clone(), &mut **x, *s))
             .collect()
     }
-    fn pick<'b, 'c: 'b>(ex: Vec<(F, &'b mut X)>, _: U::Seen<'b, 'c>) -> Vec<(F, &'b mut X)> {
+    fn pick<'b, 'c: 'b>(
+        ex: Rows<(F, &'b mut X, Span)>,
+        _: U::Seen<'b, 'c>,
+    ) -> Rows<(F, &'b mut X, Span)> {
         ex
     }
 }
@@ -469,14 +482,24 @@ where
         <U as ReadAt<_>>::read(seen)
     }
 }
-impl<U, Rt: 'static, F: 'static> Pick<U> for NodeSet<Rt, F>
+impl<U, Rt: 'static, F: 'static, A: 'static> Pick<U> for NodeSet<Rt, F, A>
 where
-    U: IndexOf<NodeSet<Rt, F>> + SetAt<<U as IndexOf<NodeSet<Rt, F>>>::I, F = F>,
+    U: IndexOf<NodeSet<Rt, F, A>> + SetAt<<U as IndexOf<NodeSet<Rt, F, A>>>::I, F = F>,
 {
     type Ex<'b> = ();
     fn ex<'b, 'c: 'b>(_: &mut U::Slots<'b, 'c>) {}
-    fn pick<'b, 'c: 'b>(_: (), seen: U::Seen<'b, 'c>) -> &'b [&'b F] {
+    fn pick<'b, 'c: 'b>(_: (), seen: U::Seen<'b, 'c>) -> &'b [(&'b F, Span)] {
         <U as SetAt<_>>::set(seen)
+    }
+}
+
+impl<U: Union, A: 'static, P: Pick<U>> Pick<U> for Anchored<A, P> {
+    type Ex<'b> = P::Ex<'b>;
+    fn ex<'b, 'c: 'b>(slots: &mut U::Slots<'b, 'c>) -> Self::Ex<'b> {
+        P::ex(slots)
+    }
+    fn pick<'b, 'c: 'b>(ex: Self::Ex<'b>, seen: U::Seen<'b, 'c>) -> Self::Hs<'b> {
+        P::pick(ex, seen)
     }
 }
 

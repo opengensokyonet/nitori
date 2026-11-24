@@ -3,10 +3,12 @@
 //!
 //! A lend point is a kind of node (its place in the structure, as types)
 //! and a node's full key (the keys from the root down to it). A lending
-//! walks the tree once into one table of rows per kind ([`table`]), takes
-//! what each need's plan names in two passes ([`plan`]), and makes the
-//! view of each need from its handles ([`Lend`]). Where the needs are
-//! proved, their checks ([`check`]) give the reasons a list does not hold.
+//! marks what the needs' plan takes ([`plan`]), walks the tree once into
+//! one table of rows per kind ([`table`]): down the route to the lend
+//! point by key, and below an anchor through the nodes the plan takes
+//! from; it takes what the plan names in two passes, and makes the view of
+//! each need from its handles ([`Lend`]). Where the needs are proved,
+//! their checks ([`check`]) give the reasons a list does not hold.
 // The engine computes with types; a marker over several of them is what
 // it is made of.
 #![allow(clippy::type_complexity)]
@@ -31,6 +33,7 @@ pub(crate) mod own;
 pub(crate) mod plan;
 pub(crate) mod plus;
 pub(crate) mod react;
+pub(crate) mod rows;
 pub(crate) mod table;
 pub(crate) mod this;
 pub(crate) mod tree;
@@ -45,7 +48,7 @@ use check::{Check, DeepEnoughAll, Disjoint, Takes};
 pub(crate) use context::LendContext;
 use cycle::NoCycle;
 use plan::{Plan, Run};
-use table::{KindTab, TabAt};
+use table::{KidRoute, KindTab};
 use tree::{Ctx, Cx, Locate};
 
 /// The proof that the need `Self` can be lent at the lend point `C`, at
@@ -98,19 +101,24 @@ where
     <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
-    R: TabAt<
-            Pt,
-            frunk_core::hlist::HNil,
-            <R as Locate<L, IL>>::Route,
-            AtFk = PointFk<R, Pt, L, IL, X>,
-        >,
+    R: KindTab<Pt, frunk_core::hlist::HNil>,
+    R::Children: KidRoute<Pt, frunk_core::hlist::HNil, <R as Locate<L, IL>>::Route, PointFk<R, Pt, L, IL, X>>,
     X: LendContext,
     N::Cols: Run<R, Pt, X>,
     F: for<'v> FnOnce(N::View<'v, P>) -> O,
 {
     let mut tab = <R as KindTab<Pt, frunk_core::hlist::HNil>>::Table::default();
-    R::fill(root, frunk_core::hlist::HNil, &mut tab);
-    if !R::rows(&tab).iter().any(|(f, _)| f == at) {
+    <N::Cols as Run<R, Pt, X>>::mark(&mut tab);
+    R::settle(&mut tab);
+    let mut walk = 0;
+    if !R::fill_route::<<R as Locate<L, IL>>::Route, _>(
+        root,
+        frunk_core::hlist::HNil,
+        at,
+        &mut tab,
+        &mut walk,
+        false,
+    ) {
         return None;
     }
     let mut row = cx.row();
@@ -137,12 +145,8 @@ where
     <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
-    R: TabAt<
-            Pt,
-            frunk_core::hlist::HNil,
-            <R as Locate<L, IL>>::Route,
-            AtFk = PointFk<R, Pt, L, IL, X>,
-        >,
+    R: KindTab<Pt, frunk_core::hlist::HNil>,
+    R::Children: KidRoute<Pt, frunk_core::hlist::HNil, <R as Locate<L, IL>>::Route, PointFk<R, Pt, L, IL, X>>,
     X: LendContext,
     N::Cols: Run<R, Pt, X>,
     V: Visit<N>,

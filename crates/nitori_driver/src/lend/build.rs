@@ -14,7 +14,7 @@ use super::{
     cycle::NoCycle,
     list::{Prefix, Z},
     plan::Run,
-    table::{KindTab, TabAt},
+    table::{KidRoute, KindTab, TabAt},
     tree::{ChainOf, Ctx, Locate, NoParent, On},
 };
 use crate::{
@@ -102,17 +102,22 @@ where
     <R as Locate<L, IL>>::Route: RouteParent,
     R: TabAt<Pt, HNil, ParentRoute<R, L, IL>>,
     NewPointFk<R, Pt, L, IL, X>: Prefix<<R as TabAt<Pt, HNil, ParentRoute<R, L, IL>>>::AtFk>,
+    R::Children: KidRoute<
+            Pt,
+            HNil,
+            ParentRoute<R, L, IL>,
+            <R as TabAt<Pt, HNil, ParentRoute<R, L, IL>>>::AtFk,
+        >,
     X: LendContext,
     N::Cols: Run<R, Pt, X>,
     F: for<'v> FnOnce(N::View<'v, P>) -> O,
 {
     let mut tab = <R as KindTab<Pt, HNil>>::Table::default();
-    R::fill(root, HNil, &mut tab);
+    <N::Cols as Run<R, Pt, X>>::mark(&mut tab);
+    R::settle(&mut tab);
     let parent: <R as TabAt<Pt, HNil, ParentRoute<R, L, IL>>>::AtFk = at.prefix();
-    if !<R as TabAt<Pt, HNil, ParentRoute<R, L, IL>>>::rows(&tab)
-        .iter()
-        .any(|(f, _)| *f == parent)
-    {
+    let mut walk = 0;
+    if !R::fill_route::<ParentRoute<R, L, IL>, _>(root, HNil, &parent, &mut tab, &mut walk, false) {
         return None;
     }
     let mut row = cx.row();

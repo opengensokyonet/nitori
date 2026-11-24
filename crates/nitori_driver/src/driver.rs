@@ -143,6 +143,9 @@ pub(crate) struct Core<Q: Composition> {
     pub(crate) order: Vec<(u64, usize)>,
     /// The wakes taken after a lending; kept for its room.
     pub(crate) wakes: Vec<(crate::need::ComponentWaker, PriorityOf<Q>)>,
+    /// The nodes whose calls were marked, taken before each item; kept
+    /// for its room.
+    pub(crate) marked: Vec<usize>,
     pub(crate) shared: Arc<Shared>,
     /// The waker of the last poll.
     pub(crate) outer: Option<Waker>,
@@ -179,6 +182,7 @@ impl<Q: Composition> Driver<Q> {
             settles: Vec::new(),
             order: Vec::new(),
             wakes: Vec::new(),
+            marked: Vec::new(),
             shared: Arc::new(Shared::default()),
             outer: None,
             epoch: 0,

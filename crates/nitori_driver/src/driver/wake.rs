@@ -132,12 +132,16 @@ impl Shared {
             outer.waker.wake_by_ref();
         }
     }
-    /// Take the whole stack: the numbers of the nodes marked, in the order
-    /// they were first marked. `head` gives the head of a number, live or
-    /// retired.
-    pub(crate) fn take<'h>(&self, head: impl Fn(usize) -> Option<&'h NodeHead>) -> Vec<usize> {
+    /// Take the whole stack into `out`: the numbers of the nodes marked,
+    /// in the order they were first marked. `head` gives the head of a
+    /// number, live or retired.
+    pub(crate) fn take<'h>(
+        &self,
+        head: impl Fn(usize) -> Option<&'h NodeHead>,
+        out: &mut Vec<usize>,
+    ) {
         let mut at = self.top.swap(0, SeqCst);
-        let mut out = Vec::new();
+        out.clear();
         while at != 0 {
             let id = at - 1;
             out.push(id);
@@ -146,7 +150,6 @@ impl Shared {
             at = head(id).map_or(0, |h| h.next.load(SeqCst));
         }
         out.reverse();
-        out
     }
 }
 

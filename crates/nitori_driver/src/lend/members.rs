@@ -127,12 +127,12 @@ impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, H: Need, T: Need>
 where
     Self: ItemComps + Body<MC, PB>,
     <Self as ItemComps>::Out: 'static,
-    <Self as Body<MC, PB>>::Cols: PartPlan<MC::Fk>,
+    <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
     Sh: Collect<AF, MC::Fk, LF>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
-        rows: &'a [&'a MC::Fk],
+        rows: &'a [(&'a MC::Fk, super::rows::Span)],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,

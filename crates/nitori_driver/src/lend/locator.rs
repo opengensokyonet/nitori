@@ -12,7 +12,7 @@ use super::{
     },
     input::InputNeed,
     list::{Append, Len, Prefix},
-    plan::{NodeSet, Plan},
+    plan::{Anchored, NodeSet, Plan},
     tree::{Collect, Ctx, Cx, FindBelow, FindUp, ToShape},
     under::MRoute,
     up::{UpFk, UpKind, UpPre},
@@ -90,13 +90,17 @@ where
     LocCx<C, A, IA, X, IK>: Ctx,
     T: Lend<LocCx<C, A, IA, X, IK>, PT>,
     C::Fk: Prefix<UpFk<C, A, IA>>,
+    UpPre<C, A, IA>: 'static,
 {
     type Cols = (
         <L::Input as Lend<C, PI>>::Cols,
-        (
-            NodeSet<MRoute<C, A, IA, X, IK>, LocFk<C, A, IA, X, IK>>,
-            T::Cols,
-        ),
+        Anchored<
+            UpPre<C, A, IA>,
+            (
+                NodeSet<MRoute<C, A, IA, X, IK>, LocFk<C, A, IA, X, IK>, UpPre<C, A, IA>>,
+                T::Cols,
+            ),
+        >,
     );
     fn build<'a>(
         (ins, (rows, ths)): <Self::Cols as Plan>::Hs<'a>,
@@ -107,7 +111,7 @@ where
     {
         let input = <L::Input as Lend<C, PI>>::build(ins, at);
         let anchor: UpFk<C, A, IA> = at.prefix();
-        let all = Sh::collect(rows, &anchor, at, false, |m| m.clone());
+        let all = Sh::collect(rows, &anchor, at, false, |m, _| m.clone());
         let (keys, members): (Vec<L::Key>, Vec<LocFk<C, A, IA, X, IK>>) =
             all.iter().map(|(k, m)| (k.clone(), m.clone())).unzip();
         let picked = L::pick::<PI>(input, &keys)

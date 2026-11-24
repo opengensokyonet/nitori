@@ -1,13 +1,12 @@
 //! Lists of needs, the needs taken on the way up, and moving the lend
 //! point.
-use alloc::vec::Vec;
-
 use frunk_core::hlist::{HCons, HNil};
 
 use super::{
     Lend,
     list::{HasPrefix, Prefix},
     plan::{ExCol, Plan, ShCol, Shared},
+    rows::{Rows, Span},
     tree::{AtPos, Ctx, Cx, FindUp, UpPos},
 };
 use crate::need::{At, AtTarget, ExactlyOne, Mut, Pos, Ref};
@@ -61,15 +60,15 @@ where
     UpCol<C, X, I>: 'static,
 {
     type Cols = ExCol<UpPre<C, X, I>, UpCol<C, X, I>, UpFk<C, X, I>, X>;
-    fn build<'a>(hs: Vec<(UpFk<C, X, I>, &'a mut X)>, at: &C::Fk) -> &'a mut X
+    fn build<'a>(hs: Rows<(UpFk<C, X, I>, &'a mut X, Span)>, at: &C::Fk) -> &'a mut X
     where
         Self: 'a,
     {
         // Invariant: the lend point is in the tree, so is every node above
         // it.
         hs.into_iter()
-            .find(|(f, _)| at.has_prefix(f))
-            .map(|(_, x)| x)
+            .find(|(f, _, _)| at.has_prefix(f))
+            .map(|(_, x, _)| x)
             .expect("the node above a lend point is in the tree")
     }
 }

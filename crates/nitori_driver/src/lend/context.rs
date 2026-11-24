@@ -20,8 +20,9 @@ use super::{
     Lend,
     check::{Check, Takes, TakesExclusive},
     list::IndexEq,
-    plan::{ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol},
+    plan::{Copied, ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol},
     plus::{IndexOf, Item, Merge, Norm, Pick, SameItem, Union},
+    rows::Span,
     table::KindTab,
     tree::Ctx,
 };
@@ -248,6 +249,7 @@ where
 {
     type Ex<'a> = Pc::Hs<'a>;
     type Store<'b> = ();
+    fn mark(_: &mut R::Table<'_>) {}
     fn take<'a>(_: &mut R::Table<'a>, cx: &mut X::Row<'a>) -> Pc::Hs<'a>
     where
         Self: 'a,
@@ -267,16 +269,31 @@ where
     }
 }
 /// A piece is shared: every member of an `Under` copies it.
-impl<M, I: 'static, Pc: Piece> PartPlan<M> for CxCol<I, Pc> {
-    fn part<'a>(hs: &mut Pc::Hs<'a>, _: &M) -> Pc::Hs<'a>
+impl<MRt, I: 'static, Pc: Piece> PartPlan<MRt> for CxCol<I, Pc> {
+    type Left<'a> = Pc::Hs<'a>;
+    fn left<'a>(hs: Pc::Hs<'a>) -> Pc::Hs<'a>
+    where
+        Self: 'a,
+    {
+        hs
+    }
+    fn part<'a>(hs: &mut Pc::Hs<'a>, _: Span) -> Pc::Hs<'a>
     where
         Self: 'a,
     {
         *hs
     }
 }
-impl<I: 'static, Pc: Piece> Rebor for CxCol<I, Pc> {
-    fn rebor<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>) -> Pc::Hs<'b> {
+impl<MRt, I: 'static, Pc: Piece> Rebor<MRt> for CxCol<I, Pc> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>, _: Span) -> Pc::Hs<'b> {
+        Pc::shorten(*hs)
+    }
+}
+impl<I: 'static, Pc: Piece> Copied for CxCol<I, Pc> {
+    fn copied<'b, 'c: 'b>(hs: &'b Pc::Hs<'c>) -> Pc::Hs<'c> {
+        *hs
+    }
+    fn shortened<'b, 'c: 'b>(hs: &'b Pc::Hs<'c>) -> Pc::Hs<'b> {
         Pc::shorten(*hs)
     }
 }
@@ -304,10 +321,10 @@ impl<I, Pc, Rt, J, F, X> SameItem<CxCol<I, Pc>> for ShCol<Rt, J, F, X> {
 impl<I, Pc, B> Merge<B> for CxCol<I, Pc> {
     type Out = Self;
 }
-impl<I, Pc, Rt, F> SameItem<NodeSet<Rt, F>> for CxCol<I, Pc> {
+impl<I, Pc, Rt, F, A> SameItem<NodeSet<Rt, F, A>> for CxCol<I, Pc> {
     type Out = False;
 }
-impl<I, Pc, Rt, F> SameItem<CxCol<I, Pc>> for NodeSet<Rt, F> {
+impl<I, Pc, Rt, F, A> SameItem<CxCol<I, Pc>> for NodeSet<Rt, F, A> {
     type Out = False;
 }
 impl<I: 'static, Pc: Piece> Item for CxCol<I, Pc> {

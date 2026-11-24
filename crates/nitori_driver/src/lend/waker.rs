@@ -42,8 +42,8 @@ where
         // it.
         let node = hs
             .iter()
-            .find(|(f, _)| at.has_prefix(f))
-            .map(|(_, ident)| *ident)
+            .find(|(f, _, _)| at.has_prefix(f))
+            .map(|(_, ident, _)| *ident)
             .expect("the node above a lend point is in the tree");
         ComponentWaker::new(node, number_of::<X>())
     }
@@ -77,8 +77,8 @@ where
         // so every member has a row.
         let node = hs
             .iter()
-            .find(|(f, _)| *f == member)
-            .map(|(_, ident)| *ident)
+            .find(|(f, _, _)| *f == member)
+            .map(|(_, ident, _)| *ident)
             .expect("a member of an `Under` is in the tree");
         ComponentWaker::new(node, number_of::<X>())
     }
@@ -87,12 +87,12 @@ impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
     Gather<MC, AF, LF, super::tree::UnderPos<IA, IK, Sh, PB>> for WakerOf<X>
 where
     Self: Body<MC, PB>,
-    <Self as Body<MC, PB>>::Cols: PartPlan<MC::Fk>,
+    <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
     Sh: Collect<AF, MC::Fk, LF>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
-        rows: &'a [&'a MC::Fk],
+        rows: &'a [(&'a MC::Fk, super::rows::Span)],
         hs: <Self::Cols as super::plan::Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,

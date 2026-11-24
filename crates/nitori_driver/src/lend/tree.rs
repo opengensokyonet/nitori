@@ -8,7 +8,10 @@ use frunk_core::{
     indices::{Here, There},
 };
 
-use super::list::{Append, Concat, KeyTuple, PushKey, SameBranch, ShiftFirst};
+use super::{
+    list::{Append, Concat, KeyTuple, PushKey, SameBranch, ShiftFirst},
+    rows::Span,
+};
 use crate::{
     need::{KeyedBy, Optional, Pos, Shape, Single},
     structure::{
@@ -459,42 +462,50 @@ where
 }
 
 /// How the members of a result are gathered, by its shape, from the full
-/// keys `rows` of the nodes of the members' kind: the anchor's full key is
-/// `AF`, a member's `MF`, the lend point's `LF`.
+/// keys `rows` of the nodes of the members' kind, with their places in the
+/// walk: the anchor's full key is `AF`, a member's `MF`, the lend point's
+/// `LF`.
 pub trait Collect<AF, MF, LF>: ToShape {
-    /// The result, `f` called for each member; `line` is whether the
-    /// members' kind and the lend point's are on one line from the root
-    /// ([`RouteLine`](super::list::RouteLine)), without which no member is
-    /// in the lend point's own branch.
+    /// The result, `f` called for each member, in the order of the walk;
+    /// `line` is whether the members' kind and the lend point's are on one
+    /// line from the root ([`RouteLine`](super::list::RouteLine)), without
+    /// which no member is in the lend point's own branch.
     fn collect<V>(
-        rows: &[&MF],
+        rows: &[(&MF, Span)],
         anchor: &AF,
         at: &LF,
         line: bool,
-        f: impl FnMut(&MF) -> V,
+        f: impl FnMut(&MF, Span) -> V,
     ) -> <Self::Shape as Shape>::Out<V>;
 }
-impl<AF, LF> Collect<AF, AF, LF> for ShSelf {
+impl<AF: PartialEq, LF> Collect<AF, AF, LF> for ShSelf {
     fn collect<V>(
-        _: &[&AF],
+        rows: &[(&AF, Span)],
         anchor: &AF,
         _: &LF,
         _: bool,
-        mut f: impl FnMut(&AF) -> V,
+        mut f: impl FnMut(&AF, Span) -> V,
     ) -> crate::need::SingleView<V> {
-        // The anchor is on the chain of the lend point, which is there.
-        crate::need::SingleView::new(f(anchor))
+        // Invariant: the anchor is on the chain of the lend point, which is
+        // there, and the members' kind is the anchor's, so its row is taken.
+        let (_, span) = rows
+            .iter()
+            .find(|(r, _)| *r == anchor)
+            .expect("the anchor of an `Under` is in the tree");
+        crate::need::SingleView::new(f(anchor, *span))
     }
 }
 impl<AF: PartialEq, LF> Collect<AF, AF, LF> for ShOpt {
     fn collect<V>(
-        rows: &[&AF],
+        rows: &[(&AF, Span)],
         anchor: &AF,
         _: &LF,
         _: bool,
-        mut f: impl FnMut(&AF) -> V,
+        mut f: impl FnMut(&AF, Span) -> V,
     ) -> Option<V> {
-        rows.contains(&anchor).then(|| f(anchor))
+        rows.iter()
+            .find(|(r, _)| *r == anchor)
+            .map(|(_, span)| f(anchor, *span))
     }
 }
 impl<AF: Concat<KL>, KL: KeyTuple + 'static, LF> Collect<AF, AF::Out, LF> for ShKeys<KL>
@@ -502,17 +513,17 @@ where
     AF::Out: SameBranch<LF>,
 {
     fn collect<V>(
-        rows: &[&AF::Out],
+        rows: &[(&AF::Out, Span)],
         anchor: &AF,
         at: &LF,
         line: bool,
-        mut f: impl FnMut(&AF::Out) -> V,
+        mut f: impl FnMut(&AF::Out, Span) -> V,
     ) -> crate::need::KeyedView<KL::Tuple, V> {
         crate::need::KeyedView::new(
             rows.iter()
-                .filter_map(|r| {
+                .filter_map(|&(r, span)| {
                     AF::strip(r, anchor)
-                        .map(|keys| (keys.to_tuple(), f(r), line && r.same_branch(at)))
+                        .map(|keys| (keys.to_tuple(), f(r, span), line && r.same_branch(at)))
                 })
                 .collect(),
         )
