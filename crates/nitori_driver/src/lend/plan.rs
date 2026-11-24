@@ -28,14 +28,18 @@ use super::{
 };
 use crate::id::{False, True};
 
-/// The component `X` of every node of the kind at the route `Rt`, at the
-/// position `J` of its components, exclusive; the nodes have full keys
-/// `F`.
+/// The component `X` of the nodes of the kind at the route `Rt` that the
+/// lending visits, at the position `J` of their components, exclusive;
+/// the nodes have full keys `F`.
 pub struct ExCol<Rt, J, F, X>(PhantomData<fn() -> (Rt, J, F, X)>);
-/// The component `X` of every node of the kind at `Rt`, shared.
+/// The component `X` of the nodes of the kind at `Rt` that the lending
+/// visits, shared.
 pub struct ShCol<Rt, J, F, X>(PhantomData<fn() -> (Rt, J, F, X)>);
-/// The full keys of every node of the kind at `Rt` below the anchor,
-/// the node of the kind at `A` on the route to the lend point.
+/// The full keys of the nodes of the kind at `Rt` that the lending visits,
+/// among them every one below the anchor, the node of the kind at `A` on
+/// the route to the lend point, which marks the anchor for the walk; what
+/// is below the anchor is picked out of them by key
+/// ([`Collect`](super::tree::Collect)).
 pub struct NodeSet<Rt, F, A>(PhantomData<fn() -> (Rt, F, A)>);
 
 /// A plan and the handles it is given, borrowing the tree for `'a`.
@@ -411,7 +415,10 @@ impl<MRt> PartPlan<MRt> for HNil {
         HNil
     }
 }
-impl<MRt, A: PartPlan<MRt>, B: PartPlan<MRt>> PartPlan<MRt> for HCons<A, B> {
+/// A list of items is the union of a `+` ([`Norm`](super::plus::Norm)),
+/// whose items no longer say which anchor they are below
+/// ([`UnionPart`]).
+impl<MRt, A: UnionPart<MRt>, B: PartPlan<MRt>> PartPlan<MRt> for HCons<A, B> {
     type Left<'a>
         = HCons<A::Left<'a>, B::Left<'a>>
     where
@@ -453,8 +460,9 @@ impl<MRt, A: PartPlan<MRt>, B: PartPlan<MRt>> PartPlan<MRt> for (A, B) {
         (A::part(a, member), B::part(b, member))
     }
 }
-/// The entries of an exclusive column are at or below the members, the
-/// check refusing one above them: each member's are the next in the walk.
+/// The entries of an exclusive column handed out by member are at or below
+/// the members, the check of an `Under` refusing one above them: each
+/// member's are the next in the walk.
 impl<MRt, Rt: 'static, J: 'static, F: 'static, X: 'static> PartPlan<MRt> for ExCol<Rt, J, F, X> {
     type Left<'a> = core::iter::Peekable<rows::IntoIter<(F, &'a mut X, Span)>>;
     fn left<'a>(hs: Rows<(F, &'a mut X, Span)>) -> Self::Left<'a>
@@ -509,25 +517,40 @@ pub trait Rebor<MRt>: Plan {
     /// The member's part of `hs`, the member being at `member`, borrowed
     /// for `'b`.
     fn rebor<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>, member: Span) -> Self::Hs<'b>;
+    /// All of `hs`, borrowed for `'b`: what is below an anchor above the
+    /// member, or an item of the union of a `+`.
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>) -> Self::Hs<'b>;
 }
 impl<MRt> Rebor<MRt> for () {
     fn rebor<'b, 'c: 'b>(_: &'b mut (), _: Span) {}
+    fn rebor_all<'b, 'c: 'b>(_: &'b mut ()) {}
 }
 impl<MRt, A: Rebor<MRt>, B: Rebor<MRt>> Rebor<MRt> for (A, B) {
     fn rebor<'b, 'c: 'b>((a, b): &'b mut Self::Hs<'c>, member: Span) -> Self::Hs<'b> {
         (A::rebor(a, member), B::rebor(b, member))
+    }
+    fn rebor_all<'b, 'c: 'b>((a, b): &'b mut Self::Hs<'c>) -> Self::Hs<'b> {
+        (A::rebor_all(a), B::rebor_all(b))
     }
 }
 impl<MRt> Rebor<MRt> for HNil {
     fn rebor<'b, 'c: 'b>(_: &'b mut HNil, _: Span) -> HNil {
         HNil
     }
+    fn rebor_all<'b, 'c: 'b>(_: &'b mut HNil) -> HNil {
+        HNil
+    }
 }
+/// A list of items is the union of a `+`, whose items no longer say which
+/// anchor they are below: every member is lent all of it.
 impl<MRt, A: Rebor<MRt>, B: Rebor<MRt>> Rebor<MRt> for HCons<A, B> {
-    fn rebor<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>, member: Span) -> Self::Hs<'b> {
+    fn rebor<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>, _: Span) -> Self::Hs<'b> {
+        Self::rebor_all(hs)
+    }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut Self::Hs<'c>) -> Self::Hs<'b> {
         HCons {
-            head: A::rebor(&mut hs.head, member),
-            tail: B::rebor(&mut hs.tail, member),
+            head: A::rebor_all(&mut hs.head),
+            tail: B::rebor_all(&mut hs.tail),
         }
     }
 }
@@ -544,15 +567,26 @@ impl<MRt, Rt: 'static, J: 'static, F: Clone + 'static, X: 'static> Rebor<MRt>
             .map(|(f, x, s)| (f.clone(), &mut **x, *s))
             .collect()
     }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut Rows<(F, &'c mut X, Span)>) -> Rows<(F, &'b mut X, Span)> {
+        hs.iter_mut()
+            .map(|(f, x, s)| (f.clone(), &mut **x, *s))
+            .collect()
+    }
 }
 impl<MRt, Rt: 'static, J: 'static, F: 'static, X: 'static> Rebor<MRt> for ShCol<Rt, J, F, X> {
     fn rebor<'b, 'c: 'b>(hs: &'b mut Shared<'c, F, X>, member: Span) -> Shared<'b, F, X> {
         hs.part_of(member)
     }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut Shared<'c, F, X>) -> Shared<'b, F, X> {
+        *hs
+    }
 }
 impl<MRt, Rt: 'static, F: 'static, A: 'static> Rebor<MRt> for NodeSet<Rt, F, A> {
     fn rebor<'b, 'c: 'b>(hs: &'b mut &'c [(&'c F, Span)], member: Span) -> &'b [(&'b F, Span)] {
         &hs[rows::member_rows_of(hs, |e| e.1, member)]
+    }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut &'c [(&'c F, Span)]) -> &'b [(&'b F, Span)] {
+        hs
     }
 }
 
@@ -614,12 +648,15 @@ where
         <A::Out as PartBy<P, MRt>>::part(left, member)
     }
 }
-impl<MRt, A: RouteEq<MRt> + 'static, P: Plan> Rebor<MRt> for Anchored<A, P>
+impl<MRt, A: RouteEq<MRt> + 'static, P: Rebor<MRt>> Rebor<MRt> for Anchored<A, P>
 where
-    A::Out: PartBy<P, MRt>,
+    A::Out: ReborBy,
 {
     fn rebor<'b, 'c: 'b>(hs: &'b mut P::Hs<'c>, member: Span) -> P::Hs<'b> {
-        <A::Out as PartBy<P, MRt>>::rebor(hs, member)
+        <A::Out as ReborBy>::rebor::<P, MRt>(hs, member)
+    }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut P::Hs<'c>) -> P::Hs<'b> {
+        P::rebor_all(hs)
     }
 }
 impl<A: 'static, P: Copied> Copied for Anchored<A, P> {
@@ -642,10 +679,8 @@ pub trait PartBy<P: Plan, MRt> {
     fn left<'a>(hs: P::Hs<'a>) -> Self::Left<'a>;
     /// The part of the member at `member`.
     fn part<'a>(left: &mut Self::Left<'a>, member: Span) -> P::Hs<'a>;
-    /// The part of the member at `member`, lent again.
-    fn rebor<'b, 'c: 'b>(hs: &'b mut P::Hs<'c>, member: Span) -> P::Hs<'b>;
 }
-impl<P: PartPlan<MRt> + Rebor<MRt>, MRt> PartBy<P, MRt> for True {
+impl<P: PartPlan<MRt>, MRt> PartBy<P, MRt> for True {
     type Left<'a>
         = P::Left<'a>
     where
@@ -656,12 +691,9 @@ impl<P: PartPlan<MRt> + Rebor<MRt>, MRt> PartBy<P, MRt> for True {
     fn part<'a>(left: &mut P::Left<'a>, member: Span) -> P::Hs<'a> {
         P::part(left, member)
     }
-    fn rebor<'b, 'c: 'b>(hs: &'b mut P::Hs<'c>, member: Span) -> P::Hs<'b> {
-        P::rebor(hs, member)
-    }
 }
-/// Above the members, an `Under` only reads, its check refusing what is
-/// taken exclusive there: every member reads all of it.
+/// Above the members lent all at once, an `Under` only reads, its check
+/// refusing what is taken exclusive there: every member reads all of it.
 impl<P: Copied, MRt> PartBy<P, MRt> for False {
     type Left<'a>
         = P::Hs<'a>
@@ -673,9 +705,88 @@ impl<P: Copied, MRt> PartBy<P, MRt> for False {
     fn part<'a>(left: &mut P::Hs<'a>, _: Span) -> P::Hs<'a> {
         P::copied(left)
     }
-    fn rebor<'b, 'c: 'b>(hs: &'b mut P::Hs<'c>, _: Span) -> P::Hs<'b> {
-        P::shortened(hs)
+}
+
+/// Lending one member again the plan of an `Under` anchored at the members
+/// ([`True`]), its part, or above them ([`False`]), all of it: the members
+/// lent one at a time may take exclusive what they share.
+pub trait ReborBy {
+    /// The part of the member at `member`, lent again.
+    fn rebor<'b, 'c: 'b, P: Rebor<MRt>, MRt>(hs: &'b mut P::Hs<'c>, member: Span) -> P::Hs<'b>;
+}
+impl ReborBy for True {
+    fn rebor<'b, 'c: 'b, P: Rebor<MRt>, MRt>(hs: &'b mut P::Hs<'c>, member: Span) -> P::Hs<'b> {
+        P::rebor(hs, member)
     }
+}
+impl ReborBy for False {
+    fn rebor<'b, 'c: 'b, P: Rebor<MRt>, MRt>(hs: &'b mut P::Hs<'c>, _: Span) -> P::Hs<'b> {
+        P::rebor_all(hs)
+    }
+}
+
+/// An item of the union of a `+` handed out to the members of an `Under`:
+/// an exclusive column by member, at or below each, the checks refusing
+/// one above them; what is read, all of it, since the item no longer says
+/// which anchor it is below.
+pub trait UnionPart<MRt>: Plan {
+    /// What is left to hand out.
+    type Left<'a>
+    where
+        Self: 'a;
+    /// All of the handles, to hand out.
+    fn left<'a>(hs: Self::Hs<'a>) -> Self::Left<'a>
+    where
+        Self: 'a;
+    /// The part of the member at `member`, after the members before it.
+    fn part<'a>(left: &mut Self::Left<'a>, member: Span) -> Self::Hs<'a>
+    where
+        Self: 'a;
+}
+impl<MRt, Rt: 'static, J: 'static, F: 'static, X: 'static> UnionPart<MRt> for ExCol<Rt, J, F, X> {
+    type Left<'a> = <Self as PartPlan<MRt>>::Left<'a>;
+    fn left<'a>(hs: Self::Hs<'a>) -> Self::Left<'a>
+    where
+        Self: 'a,
+    {
+        <Self as PartPlan<MRt>>::left(hs)
+    }
+    fn part<'a>(left: &mut Self::Left<'a>, member: Span) -> Self::Hs<'a>
+    where
+        Self: 'a,
+    {
+        <Self as PartPlan<MRt>>::part(left, member)
+    }
+}
+/// What is read: all of it, to every member.
+macro_rules! union_read_whole {
+    ($([$($g:tt)*] $item:ty;)*) => {$(
+        impl<MRt, $($g)*> $crate::lend::plan::UnionPart<MRt> for $item {
+            type Left<'a> = <Self as $crate::lend::plan::Plan>::Hs<'a>;
+            fn left<'a>(
+                hs: <Self as $crate::lend::plan::Plan>::Hs<'a>,
+            ) -> <Self as $crate::lend::plan::Plan>::Hs<'a>
+            where
+                Self: 'a,
+            {
+                hs
+            }
+            fn part<'a>(
+                left: &mut <Self as $crate::lend::plan::Plan>::Hs<'a>,
+                _: $crate::lend::rows::Span,
+            ) -> <Self as $crate::lend::plan::Plan>::Hs<'a>
+            where
+                Self: 'a,
+            {
+                <Self as $crate::lend::plan::Copied>::copied(left)
+            }
+        }
+    )*};
+}
+pub(super) use union_read_whole;
+union_read_whole! {
+    [Rt: 'static, J: 'static, F: 'static, X: 'static] ShCol<Rt, J, F, X>;
+    [Rt: 'static, F: 'static, A: 'static] NodeSet<Rt, F, A>;
 }
 
 /// A plan that only reads: its handles copied.

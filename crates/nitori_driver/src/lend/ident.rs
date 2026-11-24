@@ -21,8 +21,8 @@ use super::{
 };
 use crate::{id::False, structure::NodeIdent};
 
-/// Which node every node of the kind at the route `Rt` is, with its full
-/// key `F`.
+/// Which node each node of the kind at the route `Rt` that the lending
+/// visits is, with its full key `F`.
 pub struct IdentCol<Rt, F>(PhantomData<fn() -> (Rt, F)>);
 
 /// The identities of a kind's nodes, each with its full key and its place
@@ -84,6 +84,12 @@ impl<MRt, Rt: 'static, F: 'static> Rebor<MRt> for IdentCol<Rt, F> {
     fn rebor<'b, 'c: 'b>(hs: &'b mut Idents<'c, F>, member: Span) -> Idents<'b, F> {
         &hs[rows::member_rows_of(hs, |e| e.2, member)]
     }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut Idents<'c, F>) -> Idents<'b, F> {
+        hs
+    }
+}
+super::plan::union_read_whole! {
+    [Rt: 'static, F: 'static] IdentCol<Rt, F>;
 }
 impl<Rt: 'static, F: 'static> Copied for IdentCol<Rt, F> {
     fn copied<'b, 'c: 'b>(hs: &'b Idents<'c, F>) -> Idents<'c, F> {

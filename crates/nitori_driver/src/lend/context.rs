@@ -288,6 +288,12 @@ impl<MRt, I: 'static, Pc: Piece> Rebor<MRt> for CxCol<I, Pc> {
     fn rebor<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>, _: Span) -> Pc::Hs<'b> {
         Pc::shorten(*hs)
     }
+    fn rebor_all<'b, 'c: 'b>(hs: &'b mut Pc::Hs<'c>) -> Pc::Hs<'b> {
+        Pc::shorten(*hs)
+    }
+}
+super::plan::union_read_whole! {
+    [I: 'static, Pc: Piece] CxCol<I, Pc>;
 }
 impl<I: 'static, Pc: Piece> Copied for CxCol<I, Pc> {
     fn copied<'b, 'c: 'b>(hs: &'b Pc::Hs<'c>) -> Pc::Hs<'c> {
