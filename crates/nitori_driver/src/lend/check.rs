@@ -333,7 +333,7 @@ impl<A, T: TakesExclusive> TakesExclusive for Under<A, T> {
 impl<K> TakesExclusive for OwnKey<K> {
     type Out = False;
 }
-impl TakesExclusive for OwnAddress {
+impl<F> TakesExclusive for OwnAddress<F> {
     type Out = False;
 }
 // ------------------------------------------------------------------ depth
@@ -386,7 +386,7 @@ impl<R, X, E, I, Sd, W> Clash<Deep<I, Sd, W>> for Touch<R, X, E> {
 }
 impl<I, Sd, W, H, T> DisjointFrom<Deep<I, Sd, W>> for HCons<H, T> {}
 impl<C: Ctx, K> Check<C, KeyPos> for OwnKey<K> where C::Storage: KeyIs<K> {}
-impl<C: Ctx, A> Check<C, AddressPos<A>> for OwnAddress {}
+impl<C: Ctx, A, F> Check<C, AddressPos<A>> for OwnAddress<F> {}
 
 /// The checks of the need taken at each member, with the member as the
 /// lend point `MC`.
@@ -455,7 +455,7 @@ where
 impl<C: Ctx, K> Takes<C, KeyPos> for OwnKey<K> {
     type Touches = HNil;
 }
-impl<C: Ctx, A> Takes<C, AddressPos<A>> for OwnAddress {
+impl<C: Ctx, A, F> Takes<C, AddressPos<A>> for OwnAddress<F> {
     type Touches = HNil;
 }
 

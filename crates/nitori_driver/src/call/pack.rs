@@ -10,7 +10,6 @@
 //! only these traits; an empty list ends in a filler ([`NoKind`]) that is
 //! never reached.
 use core::{
-    convert::Infallible,
     marker::PhantomData,
     pin::Pin,
     task::{self, Poll},
@@ -24,18 +23,18 @@ use frunk_core::{
 use super::{
     Composition, ContextOf, KindsOf, PartsOf, PriorityOf, RootNode, RootOf,
     host::CallHost,
-    kinds::{FindKind, ListRest, PartsCalls, PartsComps},
+    kinds::{FindKind, ListRest, PartsCalls, PartsComps, RequestLists},
 };
 use crate::{
     component::{ArgsOf, EndCause},
-    driver::KindTable,
+    driver::{ChildOpsList, Core, KindTable, TablesAt, TailTables},
     id::Numbered,
     lend::{
         PointCx, PointFk,
         build::{NewPointCx, NewPointFk},
         tree::{Ctx, InKid, IsSelf, Locate},
     },
-    structure::{KindFor, NoChild, NodeIdent, NodeKind},
+    structure::{KindFor, MoveError, NoChild, NodeIdent, NodeKind, resolve_ident},
 };
 
 // ------------------------------------------------------------------ kinds
@@ -123,12 +122,12 @@ where
 impl<Q: Composition> KindDesc<Q> for NoKind {
     type Kind = NoChild;
     type Il = ();
-    type Fk = Infallible;
-    type NewAt = Infallible;
+    type Fk = !;
+    type NewAt = !;
     type Data = ();
     type Calls = HNil;
     type Comps = HNil;
-    fn new_at(fk: &Infallible) -> Infallible {
+    fn new_at(fk: &!) -> ! {
         match *fk {}
     }
 }
@@ -143,8 +142,8 @@ pub(crate) type StartOf<Q, D> = <<D as KindDesc<Q>>::Kind as NodeKind>::Start;
 pub(crate) type EndReasonOf<Q, D> = <<D as KindDesc<Q>>::Kind as NodeKind>::EndReason;
 
 /// A list of kinds of `Q`'s structure as head and tail (the empty list:
-/// [`NoKind`] and itself).
-pub trait KindList<Q: Composition> {
+/// [`NoKind`] and itself), with a request box for each.
+pub trait KindList<Q: Composition>: RequestLists<RootOf<Q>> {
     /// The first kind.
     type Head: KindDesc<Q>;
     /// The others.
@@ -154,7 +153,7 @@ impl<Q: Composition> KindList<Q> for HNil {
     type Head = NoKind;
     type Tail = HNil;
 }
-impl<Q: Composition, K: Numbered, T: KindList<Q>> KindList<Q> for HCons<K, T>
+impl<Q: Composition, K: NodeKind + Numbered, T: KindList<Q>> KindList<Q> for HCons<K, T>
 where
     Desc<K>: KindDesc<Q>,
 {
@@ -197,6 +196,16 @@ pub trait PackList<Q: Composition, L: KindList<Q>> {
     /// Run `v` on the kind `kind`, counted from the first; `None` when
     /// there are fewer kinds.
     fn visit<V: KindVisit<Q>>(tables: &mut Self::Tables, kind: usize, v: V) -> Option<V::Out>;
+    /// Take the first request queued in the box of the kind `kind`,
+    /// counted from the first, out of `lists`, and hand it to that kind's
+    /// handler when its node is there; `A` reaches these tables among the
+    /// driver's.
+    #[allow(private_interfaces)]
+    fn handle_first<A: TablesAt<Q, Self::Tables>>(
+        core: &mut Core<Q>,
+        lists: &mut <L as RequestLists<RootOf<Q>>>::Lists,
+        kind: usize,
+    );
 }
 impl<Q: Composition> PackList<Q, HNil> for HNil {
     type Head = NoKindPos;
@@ -214,10 +223,13 @@ impl<Q: Composition> PackList<Q, HNil> for HNil {
     fn visit<V: KindVisit<Q>>(_: &mut Self::Tables, _: usize, _: V) -> Option<V::Out> {
         None
     }
+    #[allow(private_interfaces)]
+    fn handle_first<A: TablesAt<Q, Self::Tables>>(_: &mut Core<Q>, _: &mut HNil, _: usize) {}
 }
-impl<Q: Composition, K: Numbered, T: KindList<Q>, P, PT> PackList<Q, HCons<K, T>> for HCons<P, PT>
+impl<Q: Composition, K: NodeKind + Numbered, T: KindList<Q>, P, PT> PackList<Q, HCons<K, T>>
+    for HCons<P, PT>
 where
-    Desc<K>: KindDesc<Q>,
+    Desc<K>: KindDesc<Q, Kind = K>,
     P: KindOps<Q, Desc<K>>,
     PT: PackList<Q, T>,
 {
@@ -241,6 +253,40 @@ where
             None => Some(v.visit::<Desc<K>, P>(&mut tables.head)),
             Some(rest) => PT::visit(&mut tables.tail, rest, v),
         }
+    }
+    #[allow(private_interfaces)]
+    fn handle_first<A: TablesAt<Q, Self::Tables>>(
+        core: &mut Core<Q>,
+        lists: &mut <HCons<K, T> as RequestLists<RootOf<Q>>>::Lists,
+        kind: usize,
+    ) {
+        if let Some(rest) = kind.checked_sub(1) {
+            PT::handle_first::<TailTables<A, Self::Tables>>(core, &mut lists.tail, rest);
+            return;
+        }
+        let Some((_, request)) = lists.head.pop() else {
+            return;
+        };
+        // A request for a node not there is dropped.
+        let Some(ident) = resolve_ident(&core.root, request.at.route()) else {
+            return;
+        };
+        if core
+            .nodes
+            .live(ident.number)
+            .is_none_or(|n| n.serial != ident.serial)
+        {
+            return;
+        }
+        let Some(fk) = A::get(&mut core.tables)
+            .head
+            .nodes
+            .get(&ident.number)
+            .map(|e| e.fk.clone())
+        else {
+            return;
+        };
+        P::handle(core, ident.number, fk, request.request);
     }
 }
 
@@ -291,6 +337,20 @@ pub trait KindOps<Q: Composition, D: KindDesc<Q>> {
     /// Take the node at `at` out of the tree, with every node below it;
     /// `false` when it is not there, or it is the root.
     fn remove(root: &mut RootNode<Q>, at: &D::Fk) -> bool;
+    /// What an edit handle does on each child of the kind.
+    type Children: ChildOpsList<Q, D::Fk, <D::Kind as NodeKind>::Children>;
+    /// Hand `request` to the kind's handler, for the node `number` with
+    /// the full key `fk`.
+    #[allow(private_interfaces)]
+    fn handle(core: &mut Core<Q>, number: u32, fk: D::Fk, request: <D::Kind as NodeKind>::Request);
+    /// Which node is at `at`, when one is.
+    fn ident(root: &RootNode<Q>, at: &D::Fk) -> Option<NodeIdent>;
+    /// Move the node at `from`, with every node below it, to `to`, under
+    /// another parent, keeping its key: which node its new parent is.
+    /// Nothing moves when it is not there, the new parent is not there or
+    /// keeps a node under the key, or it is the root.
+    fn transplant(root: &mut RootNode<Q>, from: &D::Fk, to: &D::Fk)
+    -> Result<NodeIdent, MoveError>;
 }
 /// The filler's item of the pack.
 pub struct NoKindPos;
@@ -299,40 +359,46 @@ impl<Q: Composition> KindOps<Q, NoKind> for NoKindPos {
     type Comps = HNil;
     fn build(
         _: &mut RootNode<Q>,
-        at: &Infallible,
-        _: &mut Infallible,
+        at: &!,
+        _: &mut !,
         _: &ArgsOf<PartsOf<Q>>,
         _: &mut ContextOf<Q>,
     ) -> Option<()> {
         match *at {}
     }
-    fn started(_: &mut RootNode<Q>, at: &Infallible, _: &mut ContextOf<Q>) -> Option<()> {
+    fn started(_: &mut RootNode<Q>, at: &!, _: &mut ContextOf<Q>) -> Option<()> {
         match *at {}
     }
-    fn ending(_: &mut RootNode<Q>, at: &Infallible, _: &mut ContextOf<Q>) -> Option<()> {
+    fn ending(_: &mut RootNode<Q>, at: &!, _: &mut ContextOf<Q>) -> Option<()> {
         match *at {}
     }
     fn build_at(
         _: &mut RootNode<Q>,
-        at: &Infallible,
-        _: &mut Infallible,
+        at: &!,
+        _: &mut !,
         _: &ArgsOf<PartsOf<Q>>,
         _: &mut ContextOf<Q>,
     ) -> Option<()> {
         match *at {}
     }
-    fn vacant(_: &RootNode<Q>, at: &Infallible) -> Option<bool> {
+    fn vacant(_: &RootNode<Q>, at: &!) -> Option<bool> {
         match *at {}
     }
-    fn insert(
-        _: &mut RootNode<Q>,
-        at: &Infallible,
-        _: (),
-        _: u32,
-    ) -> Result<(NodeIdent, NodeIdent), ()> {
+    fn insert(_: &mut RootNode<Q>, at: &!, _: (), _: u32) -> Result<(NodeIdent, NodeIdent), ()> {
         match *at {}
     }
-    fn remove(_: &mut RootNode<Q>, at: &Infallible) -> bool {
+    fn remove(_: &mut RootNode<Q>, at: &!) -> bool {
+        match *at {}
+    }
+    type Children = HNil;
+    #[allow(private_interfaces)]
+    fn handle(_: &mut Core<Q>, _: u32, fk: !, _: !) {
+        fk
+    }
+    fn ident(_: &RootNode<Q>, at: &!) -> Option<NodeIdent> {
+        match *at {}
+    }
+    fn transplant(_: &mut RootNode<Q>, at: &!, _: &!) -> Result<NodeIdent, MoveError> {
         match *at {}
     }
 }
@@ -504,50 +570,6 @@ where
 {
     type List = <P::Tail as PackNth<Q, L::Tail, I>>::List;
     type Out = <P::Tail as PackNth<Q, L::Tail, I>>::Out;
-}
-
-/// The table of the kind at the position `I` of the kinds `L`, in the
-/// tables of the pack `Self`.
-pub(crate) trait TableNth<Q: Composition, L: KindList<Q>, I>:
-    PackList<Q, L> + PackNth<Q, L, I>
-{
-    /// The table.
-    #[allow(clippy::type_complexity)]
-    fn table(
-        tables: &mut Self::Tables,
-    ) -> &mut TableOf<Q, <Self::List as KindList<Q>>::Head, Self::Out>;
-}
-impl<Q: Composition, L: KindList<Q>, P: PackList<Q, L>> TableNth<Q, L, Here> for P {
-    fn table(tables: &mut P::Tables) -> &mut TableOf<Q, L::Head, P::Head> {
-        P::head_table(tables)
-    }
-}
-impl<Q: Composition, L: KindList<Q>, P: PackList<Q, L>, I> TableNth<Q, L, There<I>> for P
-where
-    P::Tail: TableNth<Q, L::Tail, I>,
-{
-    #[allow(clippy::type_complexity)]
-    fn table(
-        tables: &mut P::Tables,
-    ) -> &mut TableOf<
-        Q,
-        <<P::Tail as PackNth<Q, L::Tail, I>>::List as KindList<Q>>::Head,
-        <P::Tail as PackNth<Q, L::Tail, I>>::Out,
-    > {
-        <P::Tail as TableNth<Q, L::Tail, I>>::table(P::tail_tables(tables))
-    }
-}
-
-/// A position in a list as a number, the first being 0.
-pub(crate) trait IndexValue {
-    /// The number.
-    const N: usize;
-}
-impl IndexValue for Here {
-    const N: usize = 0;
-}
-impl<I: IndexValue> IndexValue for There<I> {
-    const N: usize = I::N + 1;
 }
 
 /// The calls `Self` from the position `J` of the calls `Cs` on.

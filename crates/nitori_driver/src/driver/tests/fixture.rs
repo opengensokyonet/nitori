@@ -11,13 +11,14 @@ use frunk_core::{HList, hlist_pat};
 use nitori_call::{LentAccess, call};
 
 use crate::{
-    call::{CallFamily, CallKind, Composition, LoanHost, LoanNeeds},
+    call::{CallFamily, CallKind, Composition, LoanHost, LoanNeeds, RootOf},
     component::{ArgsOf, Component, ComponentView, EndCause, Part, PartList},
     composition,
+    driver::{Edit, HandlerPos},
     id::Numbered,
     lend::tests::fixtures::TestClock,
-    need::{OwnKey, Pos, Requests, View, WakerOf, Wakes},
-    request::NodeRequest,
+    need::{Mut, OwnAddress, OwnKey, Pos, Ref, Requests, View, WakerOf, Wakes},
+    request::{HandleRequest, NodeRequest},
     structure::{Child, KeyAddress, NodeKind, Share, SlotVec},
 };
 
@@ -60,30 +61,139 @@ pub enum Level {
     High,
 }
 
-/// The root: leaves by number; it can be asked for a code.
+/// The root: leaves by number; it is asked to change its subtree.
 #[derive(Numbered)]
 pub struct Top;
 impl NodeKind for Top {
     type Children = HList![Child<Leaf, SlotVec<u32>>];
-    type Request = u8;
+    type Request = TopAsk;
+    type Handler = TopHandler;
 }
-/// A leaf, added with its script; it ends and can be asked for a code.
+/// A leaf, added with its script, with twigs by number; it ends and can
+/// be asked for a code.
 #[derive(Numbered)]
 pub struct Leaf;
 impl NodeKind for Leaf {
-    type Children = HList![];
+    type Children = HList![Child<Twig, SlotVec<u32>>];
     type Start = Vec<Step>;
     type EndReason = u8;
     type Request = u8;
+    type Handler = LeafHandler;
+}
+/// A twig below a leaf, added with whether its call ends it.
+#[derive(Numbered)]
+pub struct Twig;
+impl NodeKind for Twig {
+    type Children = HList![];
+    type Start = bool;
+    type Request = EndMe;
+    type Handler = TwigHandler;
+}
+
+/// What the top is asked.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TopAsk {
+    /// Note the code.
+    Note(u8),
+    /// Add the leaf of this number with this script, woken at this level.
+    Add(u32, Vec<Step>, Level),
+    /// End the leaf of this number for this code.
+    End(u32, u8),
+    /// Replace the leaf of this number, ended for this code.
+    Replace(u32, Vec<Step>, u8, Level),
+    /// Add below the leaf the twig of this number, which ends itself or
+    /// not.
+    AddTwig(u32, u32, bool),
+    /// Move the twig from the leaf to the leaf.
+    Move { twig: u32, from: u32, to: u32 },
+    /// End the top.
+    EndSelf,
+}
+/// What a twig is asked: to end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EndMe;
+
+/// The top's handler: it notes what it is asked and what came of it.
+pub struct TopHandler;
+impl HandleRequest<Top, Level> for TopHandler {
+    type Needs = HList![Ref<Hub>];
+    fn handle<P: HandlerPos<Top, Needs = Self::Needs, Q: Composition<Priority = Level>>>(
+        mut edit: Edit<'_, Top, P>,
+        request: TopAsk,
+    ) {
+        edit.lend(|hlist_pat![_hub]| note(format!("top {request:?}")));
+        let out = match request {
+            TopAsk::Note(_) => return,
+            TopAsk::Add(k, script, p) => format!("{:?}", edit.add::<Leaf, _>(k, script, p)),
+            TopAsk::End(k, code) => format!("{:?}", edit.end::<Leaf, _>(&k, code)),
+            TopAsk::Replace(k, script, code, p) => {
+                format!("{:?}", edit.replace::<Leaf, _>(k, script, code, p))
+            }
+            TopAsk::AddTwig(leaf, twig, tidy) => match edit.child::<Leaf, _>(&leaf) {
+                None => String::from("no leaf"),
+                Some(mut child) => {
+                    format!("{:?}", child.add::<Twig, _>(twig, tidy, Level::Low))
+                }
+            },
+            TopAsk::Move { twig, from, to } => format!(
+                "{:?}",
+                edit.move_grandchild::<Leaf, _, Twig, _>(&from, &twig, &to)
+            ),
+            TopAsk::EndSelf => {
+                edit.end_self(());
+                return;
+            }
+        };
+        note(format!("top: {out}"));
+    }
+}
+/// A leaf's handler: it notes the code; from 100 it puts in the code less
+/// 100 for itself and the code for the top; from 200 it ends.
+pub struct LeafHandler;
+impl HandleRequest<Leaf, Level> for LeafHandler {
+    type Needs = HList![
+        Mut<Ctl>,
+        Requests<NodeRequest<Top, Leaf>>,
+        Requests<NodeRequest<Top, Top>>,
+    ];
+    fn handle<P: HandlerPos<Leaf, Needs = Self::Needs, Q: Composition<Priority = Level>>>(
+        mut edit: Edit<'_, Leaf, P>,
+        code: u8,
+    ) {
+        edit.lend(|hlist_pat![ctl, leaves, tops]| {
+            note(format!("leaf {} asked {code}", ctl.key));
+            if (100..200).contains(&code) {
+                leaves.push(NodeRequest::new(
+                    KeyAddress::<Top, Top>::child::<Leaf, _>(ctl.key),
+                    code - 100,
+                ));
+                tops.push(NodeRequest::new(KeyAddress::here(), TopAsk::Note(code)));
+            }
+        });
+        if code >= 200 {
+            edit.end_self(code);
+        }
+    }
+}
+/// A twig's handler: it ends the twig.
+pub struct TwigHandler;
+impl<Pr> HandleRequest<Twig, Pr> for TwigHandler {
+    type Needs = HList![];
+    fn handle<P: HandlerPos<Twig, Needs = Self::Needs, Q: Composition<Priority = Pr>>>(
+        edit: Edit<'_, Twig, P>,
+        _: EndMe,
+    ) {
+        edit.end_self(());
+    }
 }
 
 /// A request for a node, as a step puts it in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ask {
     /// For the leaf of this number, with this code.
     Leaf(u32, u8),
-    /// For the top, with this code.
-    Top(u8),
+    /// For the top.
+    Top(TopAsk),
 }
 
 /// One poll of a leaf's call.
@@ -133,6 +243,61 @@ impl Share<Top> for Run {
 impl Share<Leaf> for Run {
     type Data = HList![Ctl];
     type Calls = HList![Script];
+}
+impl Share<Twig> for Run {
+    type Data = HList![Tip];
+    type Calls = HList![Tidy];
+}
+
+/// A twig's component: its number, and whether its call ends it.
+#[derive(Debug, Numbered)]
+pub struct Tip {
+    pub key: u32,
+    pub tidy: bool,
+}
+impl<L: PartList<L>> Component<Run, L, Twig> for Tip {
+    type Needs = HList![Ref<Ctl>];
+    type BuildNeeds = HList![OwnKey<u32>];
+    fn build<P: Pos>(tidy: &mut bool, _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
+        let hlist_pat![key] = view;
+        Tip { key, tidy: *tidy }
+    }
+    fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
+        let hlist_pat![me, leaf] = view;
+        note(format!("tip {} under {}", me.key, leaf.key));
+    }
+    fn end<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>, cause: EndCause<'_, ()>) {
+        let hlist_pat![me, _] = view;
+        note(format!("end twig {} {cause:?}", me.key));
+    }
+}
+
+/// The call of a twig, written for any structure and any kind that starts
+/// from whether it ends itself and is asked to end: when its component
+/// says so, it asks its own node to end, by its own address.
+impl<Q: Composition, K: NodeKind<Start = bool, Request = EndMe>> CallKind<Q, K> for Tidy {
+    type Needs = HList![
+        Ref<Tip>,
+        OwnAddress<KeyAddress<RootOf<Q>, K>>,
+        OwnKey<u32>,
+        Requests<NodeRequest<RootOf<Q>, K>>,
+    ];
+    type Op = Self;
+    fn start(_: &mut bool) -> Self {
+        Tidy::new()
+    }
+}
+#[call]
+pub async fn tidy<W: CallFamily<C = Tidy, K: NodeKind<Start = bool, Request = EndMe>>>(
+    host: &mut impl LentAccess<Family = W>,
+) {
+    host.with(|mut view| {
+        let hlist_pat![tip, own, key, requests] = view.needs();
+        if tip.tidy {
+            note(format!("tidy {key}"));
+            requests.push(NodeRequest::new(own.clone(), EndMe));
+        }
+    });
 }
 
 impl<L: PartList<L>> Component<Run, L, Top> for Hub {

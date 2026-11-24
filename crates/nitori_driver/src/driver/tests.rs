@@ -14,8 +14,10 @@ use std::task::Wake;
 use super::{Core, Driver, Phase};
 use crate::call::Composition;
 
+mod edit;
 mod ending;
 mod fixture;
+mod operate;
 mod priority;
 mod requests;
 mod wakers;

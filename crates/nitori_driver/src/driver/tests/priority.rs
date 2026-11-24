@@ -92,9 +92,16 @@ fn settling_goes_on_after_the_requests_by_priority() {
     ]);
     let (_, w) = outer();
     let _ = poll(&mut d, &w);
+    // the request is handled before the call goes on
     assert_eq!(
         notes(),
-        ["call 1 #1", "call 1 settled", "call 1 #2", "call 2 #1"]
+        [
+            "call 1 #1",
+            "leaf 2 asked 7",
+            "call 1 settled",
+            "call 1 #2",
+            "call 2 #1"
+        ]
     );
     assert_eq!(core(&mut d).trace, [(0, 1, true)]);
     // settling low, it waits behind the low one queued before

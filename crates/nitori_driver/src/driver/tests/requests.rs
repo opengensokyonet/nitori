@@ -7,10 +7,10 @@ use frunk_core::hlist;
 
 use super::{
     core,
-    fixture::{Ask, Leaf, Level, QT, Step, clock, notes},
+    fixture::{Ask, Leaf, Level, QT, Step, TopAsk, clock, notes},
     outer, poll,
 };
-use crate::{call::__pack::RequestQueues, call::request_lists, driver::Driver};
+use crate::driver::Driver;
 
 #[test]
 fn in_the_order_put_in_across_the_kinds() {
@@ -21,9 +21,9 @@ fn in_the_order_put_in_across_the_kinds() {
             hlist![1],
             vec![Step::Ask(vec![
                 Ask::Leaf(1, 1),
-                Ask::Top(2),
+                Ask::Top(TopAsk::Note(2)),
                 Ask::Leaf(8, 3),
-                Ask::Top(4),
+                Ask::Top(TopAsk::Note(4)),
                 Ask::Leaf(1, 5),
             ])],
             Level::Low,
@@ -43,5 +43,4 @@ fn in_the_order_put_in_across_the_kinds() {
             (4, 1, true)
         ]
     );
-    assert_eq!(request_lists::<QT>(&mut c.cx).held(), 4);
 }

@@ -78,6 +78,7 @@
 
 mod composition;
 mod host;
+mod index;
 mod kind;
 mod kinds;
 mod pack;
@@ -97,7 +98,7 @@ pub use kind::{CallFamily, CallKind, CallView, Lent, Loan, LoanHost, LoanNeeds, 
 pub use kinds::OtherKind;
 #[allow(unused_imports)]
 pub(crate) use pack::{build, end, node_ending, node_started, poll_call, start_calls, wake};
-pub use prove::{BuildAt, ProveCall, ProveComponent, ProveKind};
+pub use prove::{BuildAt, ProveCall, ProveComponent, ProveHandler, ProveKind};
 // The submodules name one another's items through here.
 #[allow(unused_imports)]
 use self::{
@@ -112,9 +113,7 @@ use self::{
 
 /// The items of the pack at a position of the structure, for the driver.
 pub(crate) mod pack_at {
-    pub(crate) use super::pack::{
-        CallKindsAt, CallsAt, DescAt, EndReasonOf, FkAt, IndexValue, KindPosAt, StartAt, TableNth,
-    };
+    pub(crate) use super::index::{IxDesc, IxEndReason, IxFk, IxOps, IxStart, ix_table};
 }
 
 /// What a composition proves and packs, kind by kind: the items its proof
@@ -124,6 +123,7 @@ pub(crate) mod pack_at {
 pub mod __pack {
     pub use super::{
         composition::new_root,
+        index::PackIndex,
         kinds::{
             AllKinds, AnyIs, Comp, FindAt, FindInKids, FindKind, HasKind, InPart, KidKinds,
             KindsOnce, ListRest, Or, PartsCalls, PartsComps, PickKid, RequestLists, RequestQueues,
@@ -132,6 +132,9 @@ pub mod __pack {
             CallList, CompList, Desc, KindDesc, KindList, KindOps, KindVisit, NewAt, NewAtOf,
             NoKind, NoKindPos, PackList, SlotPoll, TableOf,
         },
-        prove::{FewCalls, Fits, KindPositions, Prove, ProveCalls, ProveComps, RootBuild, prove},
+        prove::{
+            FewCalls, Fits, KindPositions, Prove, ProveCalls, ProveChildren, ProveComps, RootBuild,
+            prove,
+        },
     };
 }

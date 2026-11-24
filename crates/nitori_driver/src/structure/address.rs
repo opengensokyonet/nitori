@@ -9,7 +9,7 @@ use frunk_core::{
 
 use super::{
     Child, ChildIndex, ChildList, ChildOfKind, ChildStorage, ChildStores, KeyAt, KindAt, KindFor,
-    Node, NodeKind, Store,
+    Node, NodeIdent, NodeKind, Store,
 };
 
 /// The driver's address of a node at or below a node of the kind `K`.
@@ -174,9 +174,16 @@ pub trait ChildAddresses<P>: ChildStores<P> {
     /// The address of the node a key address below the stores leads to,
     /// when it is there.
     fn resolve(stores: &Self::Stores, key: &Self::KeyAddr) -> Option<Self::Addr>;
+    /// Which node a key address below the stores leads to, when it is
+    /// there.
+    #[doc(hidden)]
+    fn ident(stores: &Self::Stores, key: &Self::KeyAddr) -> Option<NodeIdent>;
 }
 impl<P> ChildAddresses<P> for HNil {
     fn resolve(_: &HNil, key: &CNil) -> Option<CNil> {
+        match *key {}
+    }
+    fn ident(_: &HNil, key: &CNil) -> Option<NodeIdent> {
         match *key {}
     }
 }
@@ -194,6 +201,15 @@ where
             Coproduct::Inr(r) => T::resolve(&stores.tail, r).map(Coproduct::Inr),
         }
     }
+    fn ident(stores: &Self::Stores, key: &Self::KeyAddr) -> Option<NodeIdent> {
+        match key {
+            Coproduct::Inl((k, below)) => {
+                let h = stores.head.find(k)?;
+                resolve_ident(stores.head.get(h)?, below)
+            }
+            Coproduct::Inr(r) => T::ident(&stores.tail, r),
+        }
+    }
 }
 
 /// The address of the node the key address `key` leads to from `n`, when
@@ -205,5 +221,16 @@ pub fn resolve_node<K: KindFor<P, Children: ChildAddresses<P>>, P>(
     match &key.0 {
         None => Some(Address::here()),
         Some(k) => K::Children::resolve(&n.children, k).map(Address::below),
+    }
+}
+
+/// Which node the key address `key` leads to from `n`, when it is there.
+pub(crate) fn resolve_ident<K: KindFor<P, Children: ChildAddresses<P>>, P>(
+    n: &Node<K, P>,
+    key: &KeyRoute<K>,
+) -> Option<NodeIdent> {
+    match &key.0 {
+        None => Some(n.ident),
+        Some(k) => K::Children::ident(&n.children, k),
     }
 }

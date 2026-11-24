@@ -18,15 +18,15 @@ use frunk_core::hlist::{HCons, HNil};
 use nitori_call::LentCall;
 
 use super::{
-    CallKind, Comp, Composition, ContextOf, Lent, Loan, PartsOf, PriorityOf, RootNode, RootOf,
-    RunsOn,
+    CallKind, Comp, Composition, ContextOf, KindsOf, Lent, Loan, PartsOf, PriorityOf, RootNode,
+    RootOf, RunsOn,
     host::CallHost,
     kinds::{KindsOnce, ListRest},
     pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindOps, SlotPoll},
 };
 use crate::{
     component::{ArgsOf, Component, EndCause},
-    driver::FkPlace,
+    driver::{ChildOpsList, ChildPos, Core, Edit, FkPlace, HandlerAt},
     id::{NumberValue, Numbered, number_of},
     lend::list::{S, Z},
     lend::{
@@ -39,7 +39,8 @@ use crate::{
     },
     need::Pos,
     react::{NodeEnding, NodeStarted},
-    structure::{KindFor, Node, NodeIdent, NodeKind},
+    request::HandleRequest,
+    structure::{Child, ChildrenOf, KindFor, MoveError, Node, NodeIdent, NodeKind, OccupiedError},
 };
 
 /// The most calls a kind of node has: the driver keeps a bit for each in
@@ -64,10 +65,15 @@ impl<L: Fits<MaxCalls>> FewCalls for L {}
 type RouteOf<Q, K> = <RootOf<Q> as Locate<K, IlOf<Q, K>>>::Route;
 
 /// What was proved of one kind: the positions of its calls `PC`, of its
-/// components `PO`, of its build `IB`, and of the reaction points
-/// started `IS` and ending `IE`.
+/// components `PO`, of its build `IB`, of the reaction points started
+/// `IS` and ending `IE`, of its handler's needs `IH`, and of its
+/// children's kinds `PK`.
 #[allow(clippy::type_complexity)]
-pub struct KindPositions<PC, PO, IB, IS, IE>(PhantomData<fn() -> (PC, PO, IB, IS, IE)>);
+pub struct KindPositions<PC, PO, IB, IS, IE, IH, PK>(
+    PhantomData<fn() -> (PC, PO, IB, IS, IE, IH, PK)>,
+);
+/// The needs of the handler of `K` under `Q`.
+type HandlerNeeds<Q, K> = <<K as NodeKind>::Handler as HandleRequest<K, PriorityOf<Q>>>::Needs;
 
 // ------------------------------------------------------------------ proving
 
@@ -106,7 +112,7 @@ pub trait ProveKind<Q, I> {
 }
 type CallsOfDesc<Q, K> = <Desc<K> as KindDesc<Q>>::Calls;
 type CompsOfDesc<Q, K> = <Desc<K> as KindDesc<Q>>::Comps;
-impl<Q, K, IC, IO, IB, IS, IE> ProveKind<Q, (IC, IO, IB, IS, IE)> for K
+impl<Q, K, IC, IO, IB, IS, IE, IH, IK> ProveKind<Q, (IC, IO, IB, IS, IE, IH, IK)> for K
 where
     Q: Composition,
     K: KindFor<PartsOf<Q>>,
@@ -120,6 +126,8 @@ where
     IE: Pos,
     StartedReactions<K>: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IS>,
     EndingReactions<K>: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IE>,
+    K::Handler: HandleRequest<K, PriorityOf<Q>> + ProveHandler<Q, K, IH>,
+    ChildrenOf<K>: ProveChildren<Q, IK>,
 {
     type Pos = KindPositions<
         <CallsOfDesc<Q, K> as ProveCalls<Q, K, IC>>::Out,
@@ -127,7 +135,46 @@ where
         IB,
         IS,
         IE,
+        IH,
+        <ChildrenOf<K> as ProveChildren<Q, IK>>::Out,
     >;
+}
+
+/// The handler `Self` of the kind `K` can be lent its needs at the
+/// position `P` (inferred) at the nodes of `K` under `Q`.
+#[diagnostic::on_unimplemented(
+    message = "the handler `{Self}` cannot be lent its needs at the nodes of the kind `{K}` under `{Q}`",
+    label = "the handler of a kind of the structure",
+    note = "an edit handle lends the handler's `Needs` at the node the request is for: one of them is not on this structure, or two take the same component"
+)]
+pub trait ProveHandler<Q, K, P> {}
+impl<Q, K, H, P> ProveHandler<Q, K, P> for H
+where
+    Q: Composition,
+    K: NodeKind,
+    Desc<K>: KindDesc<Q, Kind = K>,
+    H: HandleRequest<K, PriorityOf<Q>>,
+    P: Pos,
+    H::Needs: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, P>,
+{
+}
+
+/// The kinds of the children `Self` found among `Q`'s kinds, at the
+/// positions `I` (inferred).
+pub trait ProveChildren<Q, I> {
+    /// Their positions.
+    type Out;
+}
+impl<Q> ProveChildren<Q, HNil> for HNil {
+    type Out = HNil;
+}
+impl<Q, CK, S, T, IC, IT> ProveChildren<Q, HCons<IC, IT>> for HCons<Child<CK, S>, T>
+where
+    Q: Composition,
+    KindsOf<Q>: frunk_core::hlist::Selector<CK, IC>,
+    T: ProveChildren<Q, IT>,
+{
+    type Out = HCons<ChildPos<IC>, T::Out>;
 }
 
 /// The call `Self` can be lent its needs at the position `P` (inferred)
@@ -268,7 +315,8 @@ where
 
 // ------------------------------------------------------------------ what was proved, used
 
-impl<Q, K, PC, PO, IB, IS, IE> KindOps<Q, Desc<K>> for KindPositions<PC, PO, IB, IS, IE>
+impl<Q, K, PC, PO, IB, IS, IE, IH, PK> KindOps<Q, Desc<K>>
+    for KindPositions<PC, PO, IB, IS, IE, IH, PK>
 where
     Q: Composition,
     K: KindFor<PartsOf<Q>>,
@@ -286,9 +334,51 @@ where
         Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IE, Fk = FkOf<Q, K>>,
     RootOf<Q>: Locate<K, IlOf<Q, K>>,
     (RootOf<Q>, RouteOf<Q, K>): FkPlace<PartsOf<Q>, FkOf<Q, K>, Kind0 = RootOf<Q>, Target = K>,
+    K::Handler: HandleRequest<K, PriorityOf<Q>>,
+    IH: Pos,
+    HandlerNeeds<Q, K>:
+        Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IH, Fk = FkOf<Q, K>>,
+    PK: ChildOpsList<Q, FkOf<Q, K>, ChildrenOf<K>>,
 {
     type Calls = PC;
     type Comps = PO;
+    type Children = PK;
+    #[allow(private_interfaces)]
+    fn handle(core: &mut Core<Q>, number: u32, fk: FkOf<Q, K>, request: K::Request) {
+        let edit = Edit::<K, HandlerAt<Q, K, Self, IH>>::new(core, number, fk);
+        <K::Handler as HandleRequest<K, PriorityOf<Q>>>::handle(edit, request);
+    }
+    fn ident(root: &RootNode<Q>, at: &FkOf<Q, K>) -> Option<NodeIdent> {
+        <(RootOf<Q>, RouteOf<Q, K>) as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::ident(root, at)
+    }
+    fn transplant(
+        root: &mut RootNode<Q>,
+        from: &FkOf<Q, K>,
+        to: &FkOf<Q, K>,
+    ) -> Result<NodeIdent, MoveError> {
+        type Place<Q, K> = (RootOf<Q>, RouteOf<Q, K>);
+        match <Place<Q, K> as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::vacant(root, to) {
+            None => return Err(MoveError::NoDestination),
+            Some(false) => {
+                return Err(MoveError::Occupied {
+                    source: OccupiedError,
+                });
+            }
+            Some(true) => {}
+        }
+        let node = <Place<Q, K> as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::remove(root, from)
+            .ok_or(MoveError::NoSource)?;
+        match <Place<Q, K> as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::insert(root, to, node) {
+            Ok(parent) => Ok(parent),
+            Err(node) => {
+                // Invariant: the new parent was there and kept nothing
+                // under the key just above, and taking the node out of
+                // another parent changed neither; it goes back anyway.
+                let _ = <Place<Q, K> as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::insert(root, from, node);
+                Err(MoveError::NoDestination)
+            }
+        }
+    }
     fn build_at(
         root: &mut RootNode<Q>,
         at: &FkOf<Q, K>,

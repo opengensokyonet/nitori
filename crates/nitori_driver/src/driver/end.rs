@@ -7,16 +7,17 @@ use frunk_core::hlist::Selector;
 
 use super::{
     Core,
-    visit::{EndNode, Ending, end_one},
+    visit::{DropCalls, EndNode, Ending},
 };
 use crate::{
     call::{
-        __pack::{PackList, RequestQueues},
+        __pack::{CompList, KindDesc, KindOps, PackIndex, PackList, RequestQueues},
         Composition, KindsOf,
-        pack_at::{DescAt, EndReasonOf, KindPosAt, TableNth},
+        pack_at::{IxDesc, IxEndReason, IxOps, ix_table},
         request_lists, take_wakes,
     },
     component::EndCause,
+    structure::NodeKind,
 };
 
 impl<Q: Composition> Core<Q> {
@@ -89,27 +90,72 @@ impl<Q: Composition> Core<Q> {
     }
 
     /// End the subtree at the node `number` of the kind `K` (at `I`,
-    /// inferred) for `reason`: the nodes below it first, for
-    /// [`EndCause::Above`], then the node itself, for
-    /// [`EndCause::Reason`].
-    pub(crate) fn end_for<K, I>(&mut self, number: u32, reason: &EndReasonOf<Q, DescAt<Q, I>>)
+    /// inferred) for `reason`, as [`end_at`](Self::end_at) does.
+    pub(crate) fn end_for<K, I>(&mut self, number: u32, reason: &IxEndReason<Q, I>)
     where
         KindsOf<Q>: Selector<K, I>,
-        Q::Pack: TableNth<Q, KindsOf<Q>, I>,
+        I: PackIndex,
     {
+        self.end_at::<I>(number, reason);
+    }
+
+    /// End the subtree at the node `number` of the kind at `I` for
+    /// `reason`: the nodes below it first, for [`EndCause::Above`], then
+    /// the node itself, for [`EndCause::Reason`].
+    pub(crate) fn end_at<I: PackIndex>(&mut self, number: u32, reason: &IxEndReason<Q, I>) {
+        let Some(fk) = ix_table::<Q, I>(&mut self.tables)
+            .nodes
+            .get(&number)
+            .map(|e| e.fk.clone())
+        else {
+            return;
+        };
+        self.end_with::<IxDesc<Q, I>, IxOps<Q, I>>(number, &fk, EndCause::Reason(reason));
+    }
+
+    /// End the subtree at the node `number` of the kind `D`, proved as
+    /// `O`, at `fk`: the nodes below it first, for [`EndCause::Above`],
+    /// then the node itself, for `cause`.
+    pub(crate) fn end_with<D: KindDesc<Q>, O: KindOps<Q, D>>(
+        &mut self,
+        number: u32,
+        fk: &D::Fk,
+        cause: EndCause<'_, <D::Kind as NodeKind>::EndReason>,
+    ) {
         if self.nodes.live(number).is_none() {
             return;
         }
         self.end_below(number, Ending::Above);
-        let table = <Q::Pack as TableNth<Q, KindsOf<Q>, I>>::table(&mut self.tables);
-        end_one::<Q, DescAt<Q, I>, KindPosAt<Q, I>>(
-            &mut self.root,
-            &mut self.cx,
-            table,
-            number,
-            EndCause::Reason(reason),
+        let Some(kind) = self.nodes.live(number).map(|n| n.kind) else {
+            return;
+        };
+        // The node is in the tree: the reaction is fired there.
+        let _ = O::ending(&mut self.root, fk, &mut self.cx);
+        let _ = <Q::Pack as PackList<Q, KindsOf<Q>>>::visit(
+            &mut self.tables,
+            kind,
+            DropCalls { number },
         );
+        <O::Comps as CompList<Q, D, D::Comps>>::end_all(&mut self.root, fk, &mut self.cx, cause);
+        // The root stays: it is the driver's, and goes with it.
+        let _ = O::remove(&mut self.root, fk);
         self.forget(number);
+    }
+
+    /// The node `number` moved under `parent`.
+    pub(crate) fn reparent(&mut self, number: u32, parent: u32) {
+        let Some(old) = self.nodes.live(number).and_then(|n| n.parent) else {
+            return;
+        };
+        if let Some(old) = self.nodes.live_mut(old) {
+            old.children.retain(|&c| c != number);
+        }
+        if let Some(new) = self.nodes.live_mut(parent) {
+            new.children.push(number);
+        }
+        if let Some(n) = self.nodes.live_mut(number) {
+            n.parent = Some(parent);
+        }
     }
 
     /// The driver is dropped: every node ends, each after the nodes below

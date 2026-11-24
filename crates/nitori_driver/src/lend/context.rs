@@ -121,7 +121,6 @@ impl<C: MonotonicClock + 'static> Piece for LentClock<C> {
 pub struct RequestList<R> {
     requests: Vec<(u64, R)>,
     queue: VecDeque<(u64, R)>,
-    held: Vec<(u64, R)>,
 }
 impl<R> RequestList<R> {
     /// No requests.
@@ -129,7 +128,6 @@ impl<R> RequestList<R> {
         Self {
             requests: Vec::new(),
             queue: VecDeque::new(),
-            held: Vec::new(),
         }
     }
     /// The requests put in, each with its place in the order, leaving the
@@ -149,27 +147,14 @@ impl<R> RequestList<R> {
     pub(crate) fn queued(&self) -> impl Iterator<Item = u64> + '_ {
         self.queue.iter().map(|(order, _)| *order)
     }
-    /// How many requests are kept for the handler of their kind.
-    pub(crate) fn held_len(&self) -> usize {
-        self.held.len()
-    }
     /// Take the first request queued off the queue.
     pub(crate) fn pop(&mut self) -> Option<(u64, R)> {
         self.queue.pop_front()
     }
-    /// Keep `request` for the handler of its kind.
-    pub(crate) fn hold(&mut self, request: (u64, R)) {
-        self.held.push(request);
-    }
-    /// The requests kept for the handler of their kind, leaving none.
-    pub(crate) fn take_held(&mut self) -> Vec<(u64, R)> {
-        core::mem::take(&mut self.held)
-    }
-    /// Drop every request, put in, queued or kept.
+    /// Drop every request, put in or queued.
     pub(crate) fn clear(&mut self) {
         self.requests.clear();
         self.queue.clear();
-        self.held.clear();
     }
 }
 impl<R: 'static> Piece for RequestList<R> {

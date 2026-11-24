@@ -60,6 +60,17 @@ impl<Q: Composition> KindVisit<Q> for WakeComponent<'_, Q> {
     }
 }
 
+/// Drop the calls of the node `number`.
+pub(super) struct DropCalls {
+    pub(super) number: u32,
+}
+impl<Q: Composition> KindVisit<Q> for DropCalls {
+    type Out = ();
+    fn visit<D: KindDesc<Q>, O: KindOps<Q, D>>(self, table: &mut TableOf<Q, D, O>) {
+        drop(table.nodes.remove(&self.number));
+    }
+}
+
 /// Why a node ends, when it is not the one a request ended.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Ending {

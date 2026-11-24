@@ -9,19 +9,18 @@ use core::{
 use nitori_clock::MonotonicClock;
 
 use super::{
-    Core, ITEMS_PER_POLL,
+    AllTables, Core, ITEMS_PER_POLL,
     nodes::NodeSlot,
     ready::{Item, Target},
     visit::{PollCall, WakeComponent},
     wake::{CallWaker, NOT_NOTIFIED},
 };
-use crate::{
-    call::{
-        __pack::{PackList, RequestQueues, SlotPoll},
-        Composition, KindsOf, request_lists, set_now, take_wakes,
-    },
-    structure::resolve_node,
+use crate::call::{
+    __pack::{PackList, RequestLists, RequestQueues, SlotPoll},
+    Composition, KindsOf, RootOf, request_lists, set_now, take_wakes,
 };
+#[cfg(test)]
+use crate::structure::resolve_node;
 
 impl<Q: Composition> Core<Q> {
     /// One poll with the outer waker `waker`: at most [`ITEMS_PER_POLL`]
@@ -181,27 +180,33 @@ impl<Q: Composition> Core<Q> {
     }
 
     /// After a lending: the requests put in, in the order they were put
-    /// in across every kind, then the wakes, until neither was put in
-    /// again; then the calls that settled, each at its priority.
+    /// in across every kind, each handed to its kind's handler, then the
+    /// wakes, until neither was put in again; then the calls that settled,
+    /// each at its priority.
     ///
-    /// A request for a node that is not there is dropped. One for a node
-    /// that is there is kept for the handler of its kind.
+    /// A request for a node that is not there is dropped. What a handler
+    /// puts in is handled after the requests put in before it.
     pub(super) fn after_lend(&mut self) {
         loop {
+            let mut batch = core::mem::replace(
+                request_lists::<Q>(&mut self.cx),
+                <KindsOf<Q> as RequestLists<RootOf<Q>>>::lists(),
+            );
             let mut order = Vec::new();
-            request_lists::<Q>(&mut self.cx).enqueue_all(0, &mut order);
+            batch.enqueue_all(0, &mut order);
             order.sort_unstable();
             let mut any = !order.is_empty();
-            for (_, kind) in order {
-                let lists = request_lists::<Q>(&mut self.cx);
-                let Some((_, route)) = lists.first(kind) else {
-                    continue;
-                };
-                let there = resolve_node(&self.root, route).is_some();
+            for (_place, kind) in order {
                 #[cfg(test)]
-                self.trace
-                    .push((lists.first(kind).map_or(0, |f| f.0), kind, there));
-                lists.pop(kind, there);
+                {
+                    let there = batch
+                        .first(kind)
+                        .is_some_and(|(_, route)| resolve_node(&self.root, route).is_some());
+                    self.trace.push((_place, kind, there));
+                }
+                <Q::Pack as PackList<Q, KindsOf<Q>>>::handle_first::<AllTables>(
+                    self, &mut batch, kind,
+                );
             }
             let wakes = take_wakes::<Q>(&mut self.cx);
             any |= !wakes.is_empty();

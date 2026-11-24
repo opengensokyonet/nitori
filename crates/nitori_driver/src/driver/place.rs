@@ -30,6 +30,8 @@ pub trait FkPlace<P, F> {
     /// Take the node at its place out, with every node below it; `None`
     /// when it is not there, or the route is empty.
     fn remove(n: &mut Node<Self::Kind0, P>, full: &F) -> Option<Node<Self::Target, P>>;
+    /// Which node is at the place, when one is.
+    fn ident(n: &Node<Self::Kind0, P>, full: &F) -> Option<NodeIdent>;
 }
 impl<K: KindFor<P>, P> FkPlace<P, HNil> for (K, HNil) {
     type Kind0 = K;
@@ -42,6 +44,9 @@ impl<K: KindFor<P>, P> FkPlace<P, HNil> for (K, HNil) {
     }
     fn remove(_: &mut Node<K, P>, _: &HNil) -> Option<Node<K, P>> {
         None
+    }
+    fn ident(n: &Node<K, P>, _: &HNil) -> Option<NodeIdent> {
+        Some(n.ident)
     }
 }
 impl<K: KindFor<P>, P, F, J> FkPlace<P, F> for (K, HCons<J, HNil>)
@@ -75,6 +80,11 @@ where
         let store = <K::Children as ChildAt<J, P>>::store_mut(&mut n.children);
         let h = store.find(&key)?;
         store.remove(h)
+    }
+    fn ident(n: &Node<K, P>, full: &F) -> Option<NodeIdent> {
+        let (key, _) = <<K::Children as ChildIndex<J>>::Storage as SplitKey<F>>::split_key(full);
+        let store = <K::Children as ChildAt<J, P>>::store(&n.children);
+        store.find(&key).and_then(|h| store.get(h)).map(|c| c.ident)
     }
 }
 type Down<K, J> = KindAt<<K as crate::structure::NodeKind>::Children, J>;
@@ -111,5 +121,11 @@ where
         let store = <K::Children as ChildAt<J, P>>::store_mut(&mut n.children);
         let child = store.find(&key).and_then(|h| store.get_mut(h))?;
         <(Down<K, J>, HCons<J2, R>) as FkPlace<P, _>>::remove(child, rest)
+    }
+    fn ident(n: &Node<K, P>, full: &F) -> Option<NodeIdent> {
+        let (key, rest) = <<K::Children as ChildIndex<J>>::Storage as SplitKey<F>>::split_key(full);
+        let store = <K::Children as ChildAt<J, P>>::store(&n.children);
+        let child = store.find(&key).and_then(|h| store.get(h))?;
+        <(Down<K, J>, HCons<J2, R>) as FkPlace<P, _>>::ident(child, rest)
     }
 }

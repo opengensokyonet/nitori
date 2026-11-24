@@ -19,6 +19,7 @@ mod node;
 mod path;
 mod storage;
 
+pub(crate) use address::resolve_ident;
 pub use address::{Address, ChildAddresses, KeyAddress, KeyRoute, resolve_node};
 pub use edit::{
     InsertError, LastChildren, LastKind, MoveError, NoParentError, OccupiedError, ParentChildren,

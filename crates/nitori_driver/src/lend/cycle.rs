@@ -68,7 +68,7 @@ fires_nothing! {
     WakerOf<X> [X];
     This<X> [X];
     OwnKey<K> [K];
-    OwnAddress;
+    OwnAddress<F> [F];
     Clock<C> [C];
     Requests<R> [R];
     Wakes<P> [P];

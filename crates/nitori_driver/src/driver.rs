@@ -43,8 +43,10 @@ use crate::{
 };
 
 mod add;
+mod edit;
 mod end;
 mod nodes;
+mod operate;
 mod place;
 mod ready;
 mod run;
@@ -58,9 +60,16 @@ mod tests;
 #[allow(unused_imports)]
 pub(crate) use add::AddRefused;
 #[doc(hidden)]
+pub use edit::{
+    ChildEditAt, ChildOps, ChildOpsList, ChildPos, FkAppend, FkStep, HandlerAt, NoChildEdit,
+    NoChildOps, NthChildOps,
+};
+pub use edit::{Edit, EditPos, HandlerPos, NoChildError};
+pub use operate::OperateError;
+#[doc(hidden)]
 pub use place::FkPlace;
 #[doc(hidden)]
-pub use table::{KindEntry, KindTable};
+pub use table::{AllTables, KindEntry, KindTable, TablesAt, TailTables};
 pub(crate) use wake::NodeHead;
 
 use nodes::Nodes;
@@ -80,7 +89,7 @@ pub const ITEMS_PER_POLL: usize = 128;
 
 /// What the driver of a composition `Q` keeps tables of: what was proved
 /// of every kind.
-type Tables<Q> = <<Q as Composition>::Pack as PackList<Q, KindsOf<Q>>>::Tables;
+pub(crate) type Tables<Q> = <<Q as Composition>::Pack as PackList<Q, KindsOf<Q>>>::Tables;
 
 /// The driver of a tree of the composition `Q`: a future that runs its
 /// calls and components by priority until the root ended.
@@ -102,34 +111,34 @@ enum Phase<Q: Composition> {
 }
 
 /// What a live driver keeps.
-struct Core<Q: Composition> {
+pub(crate) struct Core<Q: Composition> {
     /// An entry runs: still set at the next entry, an operation or a call
     /// panicked through the last one.
-    running: bool,
+    pub(crate) running: bool,
     /// The root ended: the driver is done.
-    root_ended: bool,
-    root: RootNode<Q>,
+    pub(crate) root_ended: bool,
+    pub(crate) root: RootNode<Q>,
     /// The context every lending takes, kept for the driver's life.
-    cx: ContextOf<Q>,
+    pub(crate) cx: ContextOf<Q>,
     /// The clock the driver reads before each lending.
-    clock: ClockOf<Q>,
+    pub(crate) clock: ClockOf<Q>,
     /// What every new node's components are built with.
-    args: ArgsOf<PartsOf<Q>>,
-    tables: Tables<Q>,
-    nodes: Nodes<PriorityOf<Q>>,
-    ready: ReadyQueue<PriorityOf<Q>>,
+    pub(crate) args: ArgsOf<PartsOf<Q>>,
+    pub(crate) tables: Tables<Q>,
+    pub(crate) nodes: Nodes<PriorityOf<Q>>,
+    pub(crate) ready: ReadyQueue<PriorityOf<Q>>,
     /// The calls that settled in the lending being handled, at their
     /// priorities.
-    settles: Vec<(Item, PriorityOf<Q>)>,
-    shared: Arc<Shared>,
+    pub(crate) settles: Vec<(Item, PriorityOf<Q>)>,
+    pub(crate) shared: Arc<Shared>,
     /// The waker of the last poll.
-    outer: Option<Waker>,
+    pub(crate) outer: Option<Waker>,
     /// How many outer wakers the driver was polled with.
-    epoch: u64,
+    pub(crate) epoch: u64,
     /// The requests handled: each one's place in the order, its kind, and
     /// whether its node was there.
     #[cfg(test)]
-    trace: Vec<(u64, usize, bool)>,
+    pub(crate) trace: Vec<(u64, usize, bool)>,
 }
 
 impl<Q: Composition> Driver<Q> {

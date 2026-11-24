@@ -1,5 +1,5 @@
 //! Node kinds and their children.
-use core::{convert::Infallible, marker::PhantomData};
+use core::marker::PhantomData;
 
 use frunk_core::{
     coproduct::{CNil, Coproduct},
@@ -24,10 +24,15 @@ pub trait NodeKind: 'static + Sized {
     /// as a value that moves once, and the calls take what is left.
     type Start: 'static = ();
     /// What a node of this kind can be asked to change in its own subtree,
-    /// one closed type; `Infallible` by default, for nothing. A request
-    /// names its node by key address
-    /// ([`NodeRequest`](crate::request::NodeRequest)).
-    type Request: 'static = Infallible;
+    /// one closed type; `!` by default, for nothing. A request names its
+    /// node by key address ([`NodeRequest`](crate::request::NodeRequest)).
+    type Request: 'static = !;
+    /// What handles the requests of a node of this kind
+    /// ([`HandleRequest`](crate::request::HandleRequest)); by default
+    /// [`NoRequests`](crate::request::NoRequests), which handles only a
+    /// `Request` of `!`. The composition checks that it handles them at
+    /// its priority.
+    type Handler: 'static = crate::request::NoRequests;
 }
 
 /// The kind and the storage kind of the first child of an empty list of
@@ -37,40 +42,40 @@ pub trait NodeKind: 'static + Sized {
 pub enum NoChild {}
 impl NodeKind for NoChild {
     type Children = HNil;
-    type Start = Infallible;
+    type Start = !;
 }
 impl super::storage::sealed::Sealed for NoChild {}
 impl ChildStorage for NoChild {
-    type Key = Infallible;
-    type Handle = Infallible;
+    type Key = !;
+    type Handle = !;
     type Store<N> = NoStore;
 }
 /// The store of [`NoChild`]: it keeps nothing.
 #[derive(Default)]
 pub struct NoStore;
-impl<N> super::Store<N, Infallible, Infallible> for NoStore {
-    fn insert(&mut self, key: Infallible, _: N) -> Result<Infallible, super::Occupied<N>> {
+impl<N> super::Store<N, !, !> for NoStore {
+    fn insert(&mut self, key: !, _: N) -> Result<!, super::Occupied<N>> {
         match key {}
     }
-    fn remove(&mut self, at: Infallible) -> Option<N> {
+    fn remove(&mut self, at: !) -> Option<N> {
         match at {}
     }
-    fn get(&self, at: Infallible) -> Option<&N> {
+    fn get(&self, at: !) -> Option<&N> {
         match at {}
     }
-    fn get_mut(&mut self, at: Infallible) -> Option<&mut N> {
+    fn get_mut(&mut self, at: !) -> Option<&mut N> {
         match at {}
     }
-    fn key(&self, at: Infallible) -> Option<&Infallible> {
+    fn key(&self, at: !) -> Option<&!> {
         match at {}
     }
-    fn find(&self, key: &Infallible) -> Option<Infallible> {
+    fn find(&self, key: &!) -> Option<!> {
         match *key {}
     }
-    fn handles(&self) -> impl Iterator<Item = Infallible> {
+    fn handles(&self) -> impl Iterator<Item = !> {
         core::iter::empty()
     }
-    fn iter_mut<'s>(&'s mut self) -> impl Iterator<Item = (&'s Infallible, &'s mut N)>
+    fn iter_mut<'s>(&'s mut self) -> impl Iterator<Item = (&'s !, &'s mut N)>
     where
         N: 's,
     {

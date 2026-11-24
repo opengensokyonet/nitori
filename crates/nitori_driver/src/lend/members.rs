@@ -56,7 +56,7 @@ impl<B, T> MemberItem for At<B, T> {
 impl<K> MemberItem for OwnKey<K> {
     type Comps = HNil;
 }
-impl MemberItem for OwnAddress {
+impl<F> MemberItem for OwnAddress<F> {
     type Comps = HNil;
 }
 impl<C> MemberItem for Clock<C> {
@@ -191,7 +191,7 @@ macro_rules! as_at_member {
 }
 as_at_member! {
     [K: 'static] OwnKey<K>, KeyPos;
-    [A: 'static] OwnAddress, AddressPos<A>;
+    [A: 'static, F: crate::need::AddressForm] OwnAddress<F>, AddressPos<A>;
     [K: nitori_clock::MonotonicClock + 'static, I: 'static] Clock<K>, CxPos<I>;
     [R: 'static, I: 'static] Requests<R>, CxPos<I>;
     [P: 'static, I: 'static] Wakes<P>, CxPos<I>;

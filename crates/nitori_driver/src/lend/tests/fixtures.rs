@@ -90,16 +90,37 @@ pub struct Conn1;
 impl NodeKind for Conn1 {
     type Children = HList![Child<LogicalPath, SlotVec<PathKey>>];
     type Request = CloseConn;
+    type Handler = Closing;
 }
 #[derive(Numbered)]
 pub struct Conn2;
 impl NodeKind for Conn2 {
     type Children = HList![Child<Entry, SlotVec<LinkId>>, Child<LinkPath, SlotVec<LinkId>>];
     type Request = CloseConn;
+    type Handler = Closing;
 }
 /// What a connection is asked: to close, for a code.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CloseConn(pub u32);
+/// A connection's handler: it ends the connection.
+pub struct Closing;
+impl<K: NodeKind<Request = CloseConn, EndReason = ()>, Pr> crate::request::HandleRequest<K, Pr>
+    for Closing
+{
+    type Needs = HList![];
+    fn handle<
+        P: crate::driver::HandlerPos<
+                K,
+                Needs = Self::Needs,
+                Q: crate::call::Composition<Priority = Pr>,
+            >,
+    >(
+        edit: crate::driver::Edit<'_, K, P>,
+        _: CloseConn,
+    ) {
+        edit.end_self(());
+    }
+}
 
 /// The part with the connection's, the links' and the entries' state.
 pub struct Core;

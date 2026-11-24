@@ -12,9 +12,9 @@ use super::{
     wake::NodeHead,
 };
 use crate::call::{
-    __pack::{CallList, KindDesc, KindList, KindOps, PackList},
+    __pack::{CallList, KindDesc, KindList, KindOps, PackIndex, PackList},
     CallHost, Composition, KindsOf, PriorityOf,
-    pack_at::{CallKindsAt, CallsAt, DescAt, FkAt, IndexValue, KindPosAt, StartAt, TableNth},
+    pack_at::{IxDesc, IxFk, IxOps, IxStart, ix_table},
 };
 
 /// Why a node was not added.
@@ -103,28 +103,40 @@ impl<Q: Composition> Core<Q> {
         let _ = <O<Q> as KindOps<Q, D<Q>>>::started(&mut self.root, &HNil, &mut self.cx);
     }
 
-    /// Add a node of the kind `K` (at `I`, inferred) with the full key
-    /// `fk`, from `start`: its key checked, its shares built in the order
-    /// of the parts, put in the tree, given a number, its calls started
-    /// from what is left of `start` and woken at `p`, then `NodeStarted`
-    /// fired. Gives its number.
+    /// Add a node of the kind `K` (at `I`, inferred), as
+    /// [`add_at`](Self::add_at) does.
     pub(crate) fn add<K, I>(
         &mut self,
-        fk: FkAt<Q, I>,
-        mut start: StartAt<Q, I>,
+        fk: IxFk<Q, I>,
+        start: IxStart<Q, I>,
         p: PriorityOf<Q>,
     ) -> Result<u32, AddRefused>
     where
         KindsOf<Q>: Selector<K, I>,
-        Q::Pack: TableNth<Q, KindsOf<Q>, I>,
-        I: IndexValue,
+        I: PackIndex,
     {
-        match <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::vacant(&self.root, &fk) {
+        self.add_at::<I>(fk, start, p)
+    }
+
+    /// Add a node of the kind at `I` with the full key `fk`, from
+    /// `start`: its key checked, its shares built in the order of the
+    /// parts, put in the tree, given a number, its calls started from what
+    /// is left of `start` and woken at `p`, then `NodeStarted` fired.
+    /// Gives its number.
+    pub(crate) fn add_at<I: PackIndex>(
+        &mut self,
+        fk: IxFk<Q, I>,
+        mut start: IxStart<Q, I>,
+        p: PriorityOf<Q>,
+    ) -> Result<u32, AddRefused> {
+        type O<Q, I> = IxOps<Q, I>;
+        type D<Q, I> = IxDesc<Q, I>;
+        match <O<Q, I> as KindOps<Q, D<Q, I>>>::vacant(&self.root, &fk) {
             None => return Err(AddRefused::NoParent),
             Some(false) => return Err(AddRefused::Occupied),
             Some(true) => {}
         }
-        let data = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::build_at(
+        let data = <O<Q, I> as KindOps<Q, D<Q, I>>>::build_at(
             &mut self.root,
             &fk,
             &mut start,
@@ -133,33 +145,23 @@ impl<Q: Composition> Core<Q> {
         )
         .ok_or(AddRefused::NoParent)?;
         let number = self.nodes.free_number();
-        let (own, parent) = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::insert(
-            &mut self.root,
-            &fk,
-            data,
-            number,
-        )
-        .map_err(|_| AddRefused::Occupied)?;
-        let count = <CallsAt<Q, I> as CallList<Q, DescAt<Q, I>, CallKindsAt<Q, I>>>::COUNT;
+        let (own, parent) =
+            <O<Q, I> as KindOps<Q, D<Q, I>>>::insert(&mut self.root, &fk, data, number)
+                .map_err(|_| AddRefused::Occupied)?;
+        type Calls<Q, I> = <O<Q, I> as KindOps<Q, D<Q, I>>>::Calls;
+        type Cs<Q, I> = <D<Q, I> as KindDesc<Q>>::Calls;
+        let count = <Calls<Q, I> as CallList<Q, D<Q, I>, Cs<Q, I>>>::COUNT;
         self.keep(number, I::N, own.serial, Some(parent.number), count, p);
-        let calls = <CallsAt<Q, I> as CallList<Q, DescAt<Q, I>, CallKindsAt<Q, I>>>::start_slots(
-            &mut start,
+        let calls = <Calls<Q, I> as CallList<Q, D<Q, I>, Cs<Q, I>>>::start_slots(&mut start);
+        ix_table::<Q, I>(&mut self.tables).nodes.insert(
+            number,
+            KindEntry {
+                fk: fk.clone(),
+                calls,
+            },
         );
-        <Q::Pack as TableNth<Q, KindsOf<Q>, I>>::table(&mut self.tables)
-            .nodes
-            .insert(
-                number,
-                KindEntry {
-                    fk: fk.clone(),
-                    calls,
-                },
-            );
         self.wake_calls(number, count, p);
-        let _ = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::started(
-            &mut self.root,
-            &fk,
-            &mut self.cx,
-        );
+        let _ = <O<Q, I> as KindOps<Q, D<Q, I>>>::started(&mut self.root, &fk, &mut self.cx);
         Ok(number)
     }
 }

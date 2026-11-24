@@ -239,7 +239,42 @@ impl<K: 'static> Need for OwnKey<K> {
 
 /// The address of the lend point by keys, from the root
 /// ([`KeyAddress`](crate::structure::KeyAddress)).
-pub struct OwnAddress;
-impl Need for OwnAddress {
-    type View<'t, P: Pos> = P::Address;
+///
+/// `OwnAddress` is lent as the position gives it ([`PosAddress`]):
+/// code generic over the structure names no more of it. Code that knows
+/// the root and the kind of its lend point, such as a call or a
+/// component that knows its own kind, writes
+/// `OwnAddress<KeyAddress<Root, Kind>>` and is lent that address, so it
+/// can put in a request for its own node ([`NodeRequest::new`]); the
+/// composition checks that the lend point is of that kind. With
+/// [`OwnKey`], the last key of the address, such as a link path's
+/// `LinkId`, is read the same way.
+///
+/// [`NodeRequest::new`]: crate::request::NodeRequest::new
+///
+/// ```
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*, structure::KeyAddress};
+/// lends!(LinkPath, HList![OwnAddress<KeyAddress<Conn, LinkPath>>, OwnKey<LinkId>]);
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*, structure::KeyAddress};
+/// lends!(LinkPath, HList![OwnAddress<KeyAddress<Conn, LogicalPath>>]);
+/// ```
+pub struct OwnAddress<A = PosAddress>(PhantomData<fn() -> A>);
+impl<A: AddressForm> Need for OwnAddress<A> {
+    type View<'t, P: Pos> = A::View<P>;
+}
+/// [`OwnAddress`] lent as the position gives it ([`Pos::Address`]).
+pub struct PosAddress;
+/// What [`OwnAddress`]`<Self>` is lent as, at a position.
+pub trait AddressForm: 'static {
+    /// The view at the position `P`.
+    type View<P: Pos>;
+}
+impl AddressForm for PosAddress {
+    type View<P: Pos> = P::Address;
+}
+impl<R: crate::structure::NodeKind, T: 'static> AddressForm for crate::structure::KeyAddress<R, T> {
+    type View<P: Pos> = crate::structure::KeyAddress<R, T>;
 }

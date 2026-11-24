@@ -65,6 +65,19 @@ where
         <(C::Root, C::Route) as AddressOf<C::Fk>>::address(at)
     }
 }
+impl<C: Ctx> Lend<C, AddressPos<KeyAddress<C::Root, C::Kind>>>
+    for OwnAddress<KeyAddress<C::Root, C::Kind>>
+where
+    (C::Root, C::Route): AddressOf<C::Fk, Target = C::Kind, Kind0 = C::Root>,
+{
+    type Cols = ();
+    fn build<'a>(_: (), at: &C::Fk) -> KeyAddress<C::Root, C::Kind>
+    where
+        Self: 'a,
+    {
+        <(C::Root, C::Route) as AddressOf<C::Fk>>::address(at)
+    }
+}
 
 /// The address by keys of the node down the route `R` from a node of the
 /// kind `K` (`Self` is `(K, R)`), from what is left `F` of its full key.
