@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use frunk_core::hlist::HCons;
 
 use super::Tables;
-use crate::call::Composition;
+use crate::call::{Composition, ContextOf, RequestListsOf, request_lists};
 
 /// The nodes of one kind as the driver keeps them, by node number: their
 /// full keys `F` and their calls `S`.
@@ -48,5 +48,28 @@ impl<Q: Composition, A: TablesAt<Q, HCons<H, T>>, H: 'static, T: 'static> Tables
 {
     fn get(tables: &mut Tables<Q>) -> &mut T {
         &mut A::get(tables).tail
+    }
+}
+
+/// Reaching the request lists `T` of some kinds among the request lists
+/// of every kind of `Q`, in its context.
+pub trait ListsAt<Q: Composition, T> {
+    /// They.
+    fn get(cx: &mut ContextOf<Q>) -> &mut T;
+}
+/// Every request list.
+pub struct AllLists;
+impl<Q: Composition> ListsAt<Q, RequestListsOf<Q>> for AllLists {
+    fn get(cx: &mut ContextOf<Q>) -> &mut RequestListsOf<Q> {
+        request_lists::<Q>(cx)
+    }
+}
+/// The request lists after the first of those `L` that `A` reaches.
+pub struct TailLists<A, L>(PhantomData<fn() -> (A, L)>);
+impl<Q: Composition, A: ListsAt<Q, HCons<H, T>>, H: 'static, T: 'static> ListsAt<Q, T>
+    for TailLists<A, HCons<H, T>>
+{
+    fn get(cx: &mut ContextOf<Q>) -> &mut T {
+        &mut A::get(cx).tail
     }
 }

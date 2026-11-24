@@ -1,6 +1,6 @@
 //! A poll of the driver: what was woken, handled by priority, and after
 //! each item the requests, the wakes and the calls that settled.
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::{
     sync::atomic::Ordering::SeqCst,
     task::{Context, Poll, Waker},
@@ -9,15 +9,15 @@ use core::{
 use nitori_clock::MonotonicClock;
 
 use super::{
-    AllTables, Core, ITEMS_PER_POLL,
+    AllLists, AllTables, Core, ITEMS_PER_POLL,
     nodes::NodeSlot,
     ready::{Item, Target},
     visit::{PollCall, WakeComponent},
     wake::{CallWaker, NOT_NOTIFIED},
 };
 use crate::call::{
-    __pack::{PackList, RequestLists, RequestQueues, SlotPoll},
-    Composition, KindsOf, RootOf, request_lists, set_now, take_wakes,
+    __pack::{PackList, RequestQueues, SlotPoll},
+    Composition, KindsOf, request_lists, set_now, swap_wakes,
 };
 #[cfg(test)]
 use crate::structure::resolve_node;
@@ -186,31 +186,34 @@ impl<Q: Composition> Core<Q> {
     ///
     /// A request for a node that is not there is dropped. What a handler
     /// puts in is handled after the requests put in before it.
+    ///
+    /// The boxes, the order and the wakes keep their room from one lending
+    /// to the next.
     pub(super) fn after_lend(&mut self) {
+        let mut order = core::mem::take(&mut self.order);
+        let mut wakes = core::mem::take(&mut self.wakes);
         loop {
-            let mut batch = core::mem::replace(
-                request_lists::<Q>(&mut self.cx),
-                <KindsOf<Q> as RequestLists<RootOf<Q>>>::lists(),
-            );
-            let mut order = Vec::new();
-            batch.enqueue_all(0, &mut order);
+            // What a handler puts in stays in its box until the next
+            // round: only what is queued here is handled in this one.
+            order.clear();
+            request_lists::<Q>(&mut self.cx).enqueue_all(0, &mut order);
             order.sort_unstable();
             let mut any = !order.is_empty();
-            for (_place, kind) in order {
+            for &(_place, kind) in &order {
                 #[cfg(test)]
                 {
-                    let there = batch
+                    let there = request_lists::<Q>(&mut self.cx)
                         .first(kind)
                         .is_some_and(|(_, route)| resolve_node(&self.root, route).is_some());
                     self.trace.push((_place, kind, there));
                 }
-                <Q::Pack as PackList<Q, KindsOf<Q>>>::handle_first::<AllTables>(
-                    self, &mut batch, kind,
+                <Q::Pack as PackList<Q, KindsOf<Q>>>::handle_first::<AllTables, AllLists>(
+                    self, kind,
                 );
             }
-            let wakes = take_wakes::<Q>(&mut self.cx);
+            swap_wakes::<Q>(&mut self.cx, &mut wakes);
             any |= !wakes.is_empty();
-            for (waker, p) in wakes {
+            for (waker, p) in wakes.drain(..) {
                 let node = waker.node();
                 if self
                     .nodes
@@ -228,10 +231,14 @@ impl<Q: Composition> Core<Q> {
                 break;
             }
         }
-        for (item, p) in core::mem::take(&mut self.settles) {
+        self.order = order;
+        self.wakes = wakes;
+        let mut settles = core::mem::take(&mut self.settles);
+        for (item, p) in settles.drain(..) {
             if self.nodes.live(item.node).is_some() {
                 self.ready.wake(item, p);
             }
         }
+        self.settles = settles;
     }
 }

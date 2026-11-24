@@ -16,7 +16,7 @@ use crate::{
         Composition, PriorityOf,
         pack_at::{IxDesc, IxFk, IxOps, ix_table},
     },
-    driver::Core,
+    driver::{AddRefused, Core},
     structure::{
         AtMostOne, Child, ChildList, ChildStorage, MoveError, NoChild, NodeKind, OccupiedError,
         SlotVec,
@@ -184,7 +184,13 @@ where
         start: CK::Start,
         p: PriorityOf<Q>,
     ) -> Result<u32, OccupiedError> {
-        core.add_at::<IC>(fk, start, p).map_err(|_| OccupiedError)
+        core.add_at::<IC>(fk, start, p)
+            .map_err(|refused| match refused {
+                AddRefused::Occupied => OccupiedError,
+                // Invariant: the parent is the node of an edit handle, which
+                // is in the tree while the handle is.
+                AddRefused::NoParent => unreachable!("the parent of a child added is in the tree"),
+            })
     }
     #[allow(private_interfaces)]
     fn end(core: &mut Core<Q>, number: u32, reason: &CK::EndReason) {

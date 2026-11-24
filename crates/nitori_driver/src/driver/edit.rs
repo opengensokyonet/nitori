@@ -322,6 +322,8 @@ impl<'e, K: NodeKind, P: EditPos<K>> Edit<'e, K, P> {
     }
     /// The edit handle of the child of the kind `CK` kept under `key`;
     /// `None` when none is there. Its reach is still this node's subtree.
+    /// It lends nothing: the needs are the handler's, at its own node,
+    /// and reach the nodes below it from there.
     #[allow(clippy::type_complexity)]
     pub fn child<CK: NodeKind, I>(
         &mut self,

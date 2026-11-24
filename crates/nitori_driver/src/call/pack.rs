@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     component::{ArgsOf, EndCause},
-    driver::{ChildOpsList, Core, KindTable, TablesAt, TailTables},
+    driver::{ChildOpsList, Core, KindTable, ListsAt, TablesAt, TailLists, TailTables},
     id::Numbered,
     lend::{
         PointCx, PointFk,
@@ -197,13 +197,15 @@ pub trait PackList<Q: Composition, L: KindList<Q>> {
     /// there are fewer kinds.
     fn visit<V: KindVisit<Q>>(tables: &mut Self::Tables, kind: usize, v: V) -> Option<V::Out>;
     /// Take the first request queued in the box of the kind `kind`,
-    /// counted from the first, out of `lists`, and hand it to that kind's
-    /// handler when its node is there; `A` reaches these tables among the
-    /// driver's.
+    /// counted from the first, and hand it to that kind's handler when
+    /// its node is there; `A` reaches these tables among the driver's,
+    /// `LA` these boxes among the context's.
     #[allow(private_interfaces)]
-    fn handle_first<A: TablesAt<Q, Self::Tables>>(
+    fn handle_first<
+        A: TablesAt<Q, Self::Tables>,
+        LA: ListsAt<Q, <L as RequestLists<RootOf<Q>>>::Lists>,
+    >(
         core: &mut Core<Q>,
-        lists: &mut <L as RequestLists<RootOf<Q>>>::Lists,
         kind: usize,
     );
 }
@@ -224,7 +226,8 @@ impl<Q: Composition> PackList<Q, HNil> for HNil {
         None
     }
     #[allow(private_interfaces)]
-    fn handle_first<A: TablesAt<Q, Self::Tables>>(_: &mut Core<Q>, _: &mut HNil, _: usize) {}
+    fn handle_first<A: TablesAt<Q, Self::Tables>, LA: ListsAt<Q, HNil>>(_: &mut Core<Q>, _: usize) {
+    }
 }
 impl<Q: Composition, K: NodeKind + Numbered, T: KindList<Q>, P, PT> PackList<Q, HCons<K, T>>
     for HCons<P, PT>
@@ -255,16 +258,21 @@ where
         }
     }
     #[allow(private_interfaces)]
-    fn handle_first<A: TablesAt<Q, Self::Tables>>(
+    fn handle_first<
+        A: TablesAt<Q, Self::Tables>,
+        LA: ListsAt<Q, <HCons<K, T> as RequestLists<RootOf<Q>>>::Lists>,
+    >(
         core: &mut Core<Q>,
-        lists: &mut <HCons<K, T> as RequestLists<RootOf<Q>>>::Lists,
         kind: usize,
     ) {
+        type Lists<Q, K, T> = <HCons<K, T> as RequestLists<RootOf<Q>>>::Lists;
         if let Some(rest) = kind.checked_sub(1) {
-            PT::handle_first::<TailTables<A, Self::Tables>>(core, &mut lists.tail, rest);
+            PT::handle_first::<TailTables<A, Self::Tables>, TailLists<LA, Lists<Q, K, T>>>(
+                core, rest,
+            );
             return;
         }
-        let Some((_, request)) = lists.head.pop() else {
+        let Some((_, request)) = LA::get(&mut core.cx).head.pop() else {
             return;
         };
         // A request for a node not there is dropped.

@@ -181,6 +181,10 @@ impl<P> WakeList<P> {
     pub(crate) fn take(&mut self) -> Vec<(ComponentWaker, P)> {
         core::mem::take(&mut self.wakes)
     }
+    /// The wakes put in, in order, swapped with those in `other`.
+    pub(crate) fn swap(&mut self, other: &mut Vec<(ComponentWaker, P)>) {
+        core::mem::swap(&mut self.wakes, other);
+    }
 }
 impl<P: 'static> Piece for WakeList<P> {
     type Hs<'a> = WakeBox<'a, P>;

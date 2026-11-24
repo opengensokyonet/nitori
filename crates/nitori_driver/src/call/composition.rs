@@ -120,10 +120,11 @@ where
     cx.pieces_mut().tail.tail.get_mut().take()
 }
 
+/// The request lists of every kind of `Q`.
+pub(crate) type RequestListsOf<Q> = <KindsOf<Q> as RequestLists<RootOf<Q>>>::Lists;
+
 /// The request boxes of every kind of `Q` in `cx`.
-pub(crate) fn request_lists<Q: Composition>(
-    cx: &mut ContextOf<Q>,
-) -> &mut <KindsOf<Q> as RequestLists<RootOf<Q>>>::Lists {
+pub(crate) fn request_lists<Q: Composition>(cx: &mut ContextOf<Q>) -> &mut RequestListsOf<Q> {
     &mut cx.pieces_mut().tail.tail
 }
 
@@ -133,6 +134,15 @@ pub(crate) fn take_wakes<Q: Composition>(
     cx: &mut ContextOf<Q>,
 ) -> Vec<(crate::need::ComponentWaker, PriorityOf<Q>)> {
     cx.pieces_mut().tail.head.take()
+}
+
+/// The wakes put in the lendings of `cx`, in order, swapped with those
+/// in `buf`: `buf`, empty, keeps its room for the lendings after.
+pub(crate) fn swap_wakes<Q: Composition>(
+    cx: &mut ContextOf<Q>,
+    buf: &mut Vec<(crate::need::ComponentWaker, PriorityOf<Q>)>,
+) {
+    cx.pieces_mut().tail.head.swap(buf);
 }
 
 /// Read the clock of `cx` again, at `now`.

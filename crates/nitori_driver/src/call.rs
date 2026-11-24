@@ -90,7 +90,9 @@ pub use composition::{
     ClockOf, Composition, ContextOf, KindsOf, PartsOf, PriorityOf, RootNode, RootOf,
 };
 #[allow(unused_imports)]
-pub(crate) use composition::{context, request_lists, set_now, take_requests, take_wakes};
+pub(crate) use composition::{
+    RequestListsOf, context, request_lists, set_now, swap_wakes, take_requests, take_wakes,
+};
 #[allow(unused_imports)]
 pub(crate) use host::CallHost;
 pub use host::Settle;

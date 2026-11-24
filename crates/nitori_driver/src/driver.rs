@@ -69,7 +69,9 @@ pub use operate::OperateError;
 #[doc(hidden)]
 pub use place::FkPlace;
 #[doc(hidden)]
-pub use table::{AllTables, KindEntry, KindTable, TablesAt, TailTables};
+pub use table::{
+    AllLists, AllTables, KindEntry, KindTable, ListsAt, TablesAt, TailLists, TailTables,
+};
 pub(crate) use wake::NodeHead;
 
 use nodes::Nodes;
@@ -93,6 +95,13 @@ pub(crate) type Tables<Q> = <<Q as Composition>::Pack as PackList<Q, KindsOf<Q>>
 
 /// The driver of a tree of the composition `Q`: a future that runs its
 /// calls and components by priority until the root ended.
+///
+/// A component's operation or a call that panics unwinds through the
+/// entry it ran in (`poll`, [`operate`](Driver::operate)) to whoever
+/// called it. Nothing of a component runs after that: when the panic is
+/// caught, the driver is ready on its next poll, as when the root ended,
+/// and [`operate`](Driver::operate) gives
+/// [`OperateError::Panicked`]; dropping it ends nothing.
 pub struct Driver<Q: Composition> {
     phase: Phase<Q>,
 }
@@ -130,6 +139,11 @@ pub(crate) struct Core<Q: Composition> {
     /// The calls that settled in the lending being handled, at their
     /// priorities.
     pub(crate) settles: Vec<(Item, PriorityOf<Q>)>,
+    /// The requests queued after a lending, each with its place in the
+    /// order and its kind; kept for its room.
+    pub(crate) order: Vec<(u64, usize)>,
+    /// The wakes taken after a lending; kept for its room.
+    pub(crate) wakes: Vec<(crate::need::ComponentWaker, PriorityOf<Q>)>,
     pub(crate) shared: Arc<Shared>,
     /// The waker of the last poll.
     pub(crate) outer: Option<Waker>,
@@ -164,6 +178,8 @@ impl<Q: Composition> Driver<Q> {
             nodes: Nodes::new(),
             ready: ReadyQueue::new(),
             settles: Vec::new(),
+            order: Vec::new(),
+            wakes: Vec::new(),
             shared: Arc::new(Shared::default()),
             outer: None,
             epoch: 0,
@@ -172,10 +188,13 @@ impl<Q: Composition> Driver<Q> {
         });
         core.add_root(start, p);
         core.after_lend();
-        core.running = false;
-        Self {
+        let mut driver = Self {
             phase: Phase::Live(core),
-        }
+        };
+        // The root may have ended in what its start put in: the driver is
+        // done then.
+        driver.leave();
+        driver
     }
 
     /// The live core, for an entry: `None` once the driver is done, or
