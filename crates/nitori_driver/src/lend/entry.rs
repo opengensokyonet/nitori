@@ -23,8 +23,8 @@ use super::{
 use crate::{
     component::{ArgsOf, Component, EndCause, PartList},
     id::Numbered,
-    need::{Cap, EmptyPos, Need, Pos, View},
-    react::{AboveLendPoint, NodeEnding, NodeStarted, Reactions},
+    need::{EmptyPos, Need, Pos, View},
+    react::{AboveLendPoint, NodeEnding, NodeStarted, Reactions, WithLendPoint},
     structure::{KindFor, Node, NodeKind, Share},
 };
 
@@ -385,11 +385,15 @@ where
 
 // ------------------------------------------------------------------ the driver's points
 
+/// What [`NodeStarted<K>`] takes: the reactions of `K` and of the kinds
+/// above it.
+pub(crate) type StartedReactions<K> = Reactions<NodeStarted<K>, WithLendPoint>;
+
 /// Fire [`NodeStarted<K>`] at the node of the kind `K` with the full key
 /// `at`, just added; `None` when no node has that full key.
 pub(crate) fn node_started<R, Pt, K, IK, P, X>(
     root: &mut Node<R, Pt>,
-    at: &<Cap<NodeStarted<K>> as Lends<R, Pt, K, IK, X, P>>::Fk,
+    at: &<StartedReactions<K> as Lends<R, Pt, K, IK, X, P>>::Fk,
     cx: &mut X,
 ) -> Option<()>
 where
@@ -397,9 +401,9 @@ where
     K: NodeKind,
     NodeStarted<K>: Numbered,
     P: Pos,
-    Cap<NodeStarted<K>>: Lends<R, Pt, K, IK, X, P>,
+    StartedReactions<K>: Lends<R, Pt, K, IK, X, P>,
 {
-    <Cap<NodeStarted<K>> as Lends<R, Pt, K, IK, X, P>>::lend_to(root, at, cx, |mut reactions| {
+    <StartedReactions<K> as Lends<R, Pt, K, IK, X, P>>::lend_to(root, at, cx, |mut reactions| {
         reactions.fire(())
     })
 }

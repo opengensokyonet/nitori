@@ -85,25 +85,42 @@ mod prove;
 pub(crate) mod tests;
 
 pub use composition::{
-    ClockOf, Composition, ContextOf, KindsOf, PartsOf, PriorityOf, RootNode, RootOf, new_root,
+    ClockOf, Composition, ContextOf, KindsOf, PartsOf, PriorityOf, RootNode, RootOf,
 };
 #[allow(unused_imports)]
 pub(crate) use composition::{context, take_requests};
 pub use kind::{CallFamily, CallKind, CallView, Lent, Loan, LoanNeeds, RunsOn};
-pub use kinds::{
-    AllKinds, AnyIs, CallsOf, Comp, CompsOf, FindAt, FindInKids, FindKind, HasKind, InPart,
-    KidKinds, KindNotIn, KindsOnce, ListRest, Or, OtherKind, PartsCalls, PartsComps, PickKid,
-    RequestLists, kinds_once,
-};
-pub use pack::{
-    CallKindsAt, CallKindsFrom, CallList, CallPosAt, CallsAt, CompKindsAt, CompList, CompsAt, Desc,
-    DescAt, EndReasonOf, FkAt, FkOf, IlOf, KindDesc, KindList, KindOps, KindPosAt, NewAt, NoKind,
-    NoKindPos, NthCall, NthComp, PackList, PackNth, RunningAt, RunningCalls, StartAt, StartCalls,
-    StartOf,
-};
+pub use kinds::OtherKind;
 #[allow(unused_imports)]
 pub(crate) use pack::{build, end, node_ending, node_started, poll_call, start_calls, wake};
-pub use prove::{
-    BuildAt, KindPositions, Prove, ProveCall, ProveCalls, ProveComponent, ProveComps, ProveKind,
-    RootBuild, prove,
+pub use prove::{BuildAt, ProveCall, ProveComponent, ProveKind};
+// The submodules name one another's items through here.
+#[allow(unused_imports)]
+use self::{
+    __pack::*,
+    kinds::{CallsOf, CompsOf, KindNotIn},
+    pack::{
+        CallKindsAt, CallKindsFrom, CallPosAt, CallsAt, CompKindsAt, CompsAt, DescAt, EndReasonOf,
+        FkAt, FkOf, IlOf, KindPosAt, NthCall, NthComp, PackNth, RunningAt, RunningCalls, StartAt,
+        StartCalls, StartOf,
+    },
 };
+
+/// What a composition proves and packs, kind by kind: the items its proof
+/// and the driver's lending go through, which
+/// [`composition!`](crate::composition!) names. Not for use otherwise.
+#[doc(hidden)]
+pub mod __pack {
+    pub use super::{
+        composition::new_root,
+        kinds::{
+            AllKinds, AnyIs, Comp, FindAt, FindInKids, FindKind, HasKind, InPart, KidKinds,
+            KindsOnce, ListRest, Or, PartsCalls, PartsComps, PickKid, RequestLists,
+        },
+        pack::{
+            CallList, CompList, Desc, KindDesc, KindList, KindOps, NewAt, NoKind, NoKindPos,
+            PackList,
+        },
+        prove::{KindPositions, Prove, ProveCalls, ProveComps, RootBuild, prove},
+    };
+}

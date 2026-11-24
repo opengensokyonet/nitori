@@ -52,6 +52,28 @@
 //! # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 //! lends!(LinkPath, HList![Cap<Echo>]);
 //! ```
+//!
+//! A reaction to [`Tick`](crate::__private::doc::Tick) fires
+//! [`Tock`](crate::__private::doc::Tock), whose reaction fires `Tick`:
+//!
+//! ```compile_fail,E0277
+//! # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+//! lends!(Conn, HList![Cap<Tick>]);
+//! ```
+//!
+//! The driver's own points are not capabilities:
+//!
+//! ```compile_fail,E0277
+//! # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+//! # use nitori_driver::react::NodeEnding;
+//! lends!(Conn, HList![Cap<NodeEnding<LinkPath>>]);
+//! ```
+//!
+//! ```compile_fail,E0277
+//! # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+//! # use nitori_driver::react::NodeStarted;
+//! lends!(LinkPath, HList![Cap<NodeStarted<LinkPath>>]);
+//! ```
 use core::marker::PhantomData;
 
 use crate::{
@@ -63,14 +85,46 @@ use crate::{
 
 /// A point an action has, that other parts react to: its type-level
 /// number tells it apart, and the payload is what the action tells them.
+///
+/// A part defines its points with it; they are capabilities, taken with
+/// [`Cap`](crate::need::Cap) by the one that acts. The driver's own
+/// points, [`NodeStarted<K>`] and [`NodeEnding<K>`], are not: only the
+/// driver fires them.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a reaction point",
+    note = "a part defines a reaction point by implementing `ReactionPoint`; taken with `Cap`, a type is a capability when it implements `Capability` or `ReactionPoint`, and the driver's own points `NodeStarted` and `NodeEnding` are fired by the driver only"
+)]
 pub trait ReactionPoint: Numbered + 'static {
     /// What a firing carries to every reaction, borrowed for `'a`.
     type Payload<'a>: Copy;
 }
 
+/// A point reactions can be listed for: every [`ReactionPoint`], and the
+/// driver's own two. Not written by a part: what [`Reaction`] and the
+/// lending of reactions need of a point.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a reaction point",
+    note = "a part defines a reaction point by implementing `ReactionPoint`"
+)]
+pub trait Point: sealed::Sealed + Numbered + 'static {
+    /// What a firing carries to every reaction, borrowed for `'a`.
+    type Payload<'a>: Copy;
+}
+impl<R: ReactionPoint> Point for R {
+    type Payload<'a> = R::Payload<'a>;
+}
+mod sealed {
+    /// Only this crate says what a [`Point`](super::Point) is.
+    pub trait Sealed {}
+    impl<R: super::ReactionPoint> Sealed for R {}
+    impl<K> Sealed for super::NodeStarted<K> {}
+    impl<K> Sealed for super::NodeEnding<K> {}
+}
+
 /// A part's reaction to the point `P`: its needs, taken around the lend
 /// point the point is fired at, and what it does.
-pub trait Reaction<P: ReactionPoint>: 'static {
+pub trait Reaction<P: Point>: 'static {
     /// The needs.
     type Needs: Need;
     /// The point was fired with `payload`; the view of the needs is at the
@@ -85,18 +139,15 @@ pub struct ReactsTo<P, R>(PhantomData<fn() -> (P, R)>);
 /// What [`Cap<P>`](crate::need::Cap) of a reaction point `R` is lent as
 /// for `'t`, at the position `P`: what every reaction takes, fired in
 /// turn.
-pub struct LentReactions<'t, R: ReactionPoint, P: Pos> {
+pub struct LentReactions<'t, R: Point, P: Pos> {
     held: P::Held<'t>,
     run: Run<'t, R, P>,
 }
 /// How [`LentReactions`] runs its reactions; the last argument binds the
 /// payload's lifetime, which a projection alone does not.
-type Run<'t, R, P> = for<'b, 'p> fn(
-    &'b mut <P as Pos>::Held<'t>,
-    <R as ReactionPoint>::Payload<'p>,
-    PhantomData<&'p ()>,
-);
-impl<'t, R: ReactionPoint, P: Pos> LentReactions<'t, R, P> {
+type Run<'t, R, P> =
+    for<'b, 'p> fn(&'b mut <P as Pos>::Held<'t>, <R as Point>::Payload<'p>, PhantomData<&'p ()>);
+impl<'t, R: Point, P: Pos> LentReactions<'t, R, P> {
     /// The reactions held by `held`, run by `run`.
     pub(crate) fn new(held: P::Held<'t>, run: Run<'t, R, P>) -> Self {
         Self { held, run }
@@ -113,7 +164,7 @@ impl<'t, R: ReactionPoint, P: Pos> LentReactions<'t, R, P> {
 /// point takes.
 #[doc(hidden)]
 pub struct Reactions<R, W>(PhantomData<fn() -> (R, W)>);
-impl<R: ReactionPoint, W: 'static> Need for Reactions<R, W> {
+impl<R: Point, W: 'static> Need for Reactions<R, W> {
     type View<'t, P: Pos> = LentReactions<'t, R, P>;
 }
 /// The kinds of the lend point and every kind above it.
@@ -123,7 +174,8 @@ pub struct WithLendPoint;
 #[doc(hidden)]
 pub struct AboveLendPoint;
 
-/// A reaction point is the capability of firing it.
+/// A reaction point is the capability of firing it; the driver's own
+/// points are not.
 impl<R: ReactionPoint> Capability for R {
     type Needs = Reactions<R, WithLendPoint>;
     type Object<'t, P: Pos> = LentReactions<'t, R, P>;
@@ -133,10 +185,11 @@ impl<R: ReactionPoint> Capability for R {
 }
 
 /// A node of the kind `K` was added: the driver fires it at the node, with
-/// the reactions of `K` and of the kinds above it.
+/// the reactions of `K` and of the kinds above it. Only the driver fires
+/// it: it is not a capability.
 #[derive(Numbered)]
 pub struct NodeStarted<K>(PhantomData<fn() -> K>);
-impl<K: NodeKind> ReactionPoint for NodeStarted<K>
+impl<K: NodeKind> Point for NodeStarted<K>
 where
     Self: Numbered,
 {
@@ -145,9 +198,10 @@ where
 
 /// A node of the kind `K` is to end: the driver fires it at the node,
 /// still in the tree, with the reactions of the kinds above `K` only.
+/// Only the driver fires it: it is not a capability.
 #[derive(Numbered)]
 pub struct NodeEnding<K>(PhantomData<fn() -> K>);
-impl<K: NodeKind> ReactionPoint for NodeEnding<K>
+impl<K: NodeKind> Point for NodeEnding<K>
 where
     Self: Numbered,
 {

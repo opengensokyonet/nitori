@@ -19,9 +19,7 @@ use super::{
 use crate::{
     id::{False, NumberEq, Numbered, True},
     need::Pos,
-    react::{
-        AboveLendPoint, LentReactions, Reaction, ReactionPoint, Reactions, ReactsTo, WithLendPoint,
-    },
+    react::{AboveLendPoint, LentReactions, Point, Reaction, Reactions, ReactsTo, WithLendPoint},
     structure::{Child, NodeKind, Share},
 };
 
@@ -159,14 +157,14 @@ where
 }
 
 /// The needs of a list of reactions to `P`, one list per reaction.
-pub trait ReactionNeeds<P: ReactionPoint> {
+pub trait ReactionNeeds<P: Point> {
     /// The needs.
     type Needs;
 }
-impl<P: ReactionPoint> ReactionNeeds<P> for HNil {
+impl<P: Point> ReactionNeeds<P> for HNil {
     type Needs = HNil;
 }
-impl<P: ReactionPoint, R: Reaction<P>, T: ReactionNeeds<P>> ReactionNeeds<P> for HCons<R, T> {
+impl<P: Point, R: Reaction<P>, T: ReactionNeeds<P>> ReactionNeeds<P> for HCons<R, T> {
     type Needs = HCons<R::Needs, T::Needs>;
 }
 
@@ -180,7 +178,7 @@ pub type NeedsAt<C, P, W> = <RsAt<C, P, W> as ReactionNeeds<P>>::Needs;
 
 /// Running a list of reactions to `P` lent at `C`, their needs at the
 /// positions `Ps` in the union `U`, one after another.
-pub trait RunAll<C: Ctx, P: ReactionPoint, Ps, U: Union> {
+pub trait RunAll<C: Ctx, P: Point, Ps, U: Union> {
     /// Run every reaction with `payload`, each taking its branch of what
     /// is held.
     fn run_all<'p>(
@@ -189,11 +187,10 @@ pub trait RunAll<C: Ctx, P: ReactionPoint, Ps, U: Union> {
         _: PhantomData<&'p ()>,
     );
 }
-impl<C: Ctx, P: ReactionPoint, U: Union> RunAll<C, P, HNil, U> for HNil {
+impl<C: Ctx, P: Point, U: Union> RunAll<C, P, HNil, U> for HNil {
     fn run_all<'p>(_: &mut PlusHeld<'_, U, C::Fk>, _: P::Payload<'p>, _: PhantomData<&'p ()>) {}
 }
-impl<C: Ctx, P: ReactionPoint, U: Union, R, T, PR: Pos, PT> RunAll<C, P, HCons<PR, PT>, U>
-    for HCons<R, T>
+impl<C: Ctx, P: Point, U: Union, R, T, PR: Pos, PT> RunAll<C, P, HCons<PR, PT>, U> for HCons<R, T>
 where
     R: Reaction<P>,
     R::Needs: Lend<C, PR>,
@@ -216,7 +213,7 @@ impl<C, P, W, Ps: Pos, U, F> Lend<C, PlusPos<Ps, U, F>> for Reactions<P, W>
 where
     C: Ctx<Fk = F>,
     F: Clone + PartialEq + 'static,
-    P: ReactionPoint,
+    P: Point,
     W: ReactionKinds<C::Chain>,
     C::Parts: ListReactions<P, W::Kinds>,
     RsAt<C, P, W>: ReactionNeeds<P> + RunAll<C, P, Ps, U>,
@@ -237,7 +234,7 @@ where
 }
 impl<C: Ctx, P, W, Ps, U, F> Check<C, PlusPos<Ps, U, F>> for Reactions<P, W>
 where
-    P: ReactionPoint,
+    P: Point,
     W: ReactionKinds<C::Chain>,
     C::Parts: ListReactions<P, W::Kinds>,
     RsAt<C, P, W>: ReactionNeeds<P>,
@@ -246,7 +243,7 @@ where
 }
 impl<C: Ctx, P, W, Ps, U, F> Takes<C, PlusPos<Ps, U, F>> for Reactions<P, W>
 where
-    P: ReactionPoint,
+    P: Point,
     W: ReactionKinds<C::Chain>,
     C::Parts: ListReactions<P, W::Kinds>,
     RsAt<C, P, W>: ReactionNeeds<P>,

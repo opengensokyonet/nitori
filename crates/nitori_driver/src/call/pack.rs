@@ -107,13 +107,13 @@ impl<Q: Composition> KindDesc<Q> for NoKind {
 }
 
 /// The way down to the kind `K` of `Q`'s structure.
-pub type IlOf<Q, K> = <Desc<K> as KindDesc<Q>>::Il;
+pub(crate) type IlOf<Q, K> = <Desc<K> as KindDesc<Q>>::Il;
 /// The full key of the nodes of the kind `K` of `Q`'s tree.
-pub type FkOf<Q, K> = <Desc<K> as KindDesc<Q>>::Fk;
+pub(crate) type FkOf<Q, K> = <Desc<K> as KindDesc<Q>>::Fk;
 /// What the kind `D` of the pack starts from.
-pub type StartOf<Q, D> = <<D as KindDesc<Q>>::Kind as NodeKind>::Start;
+pub(crate) type StartOf<Q, D> = <<D as KindDesc<Q>>::Kind as NodeKind>::Start;
 /// Why the kind `D` of the pack ends.
-pub type EndReasonOf<Q, D> = <<D as KindDesc<Q>>::Kind as NodeKind>::EndReason;
+pub(crate) type EndReasonOf<Q, D> = <<D as KindDesc<Q>>::Kind as NodeKind>::EndReason;
 
 /// A list of kinds of `Q`'s structure as head and tail (the empty list:
 /// [`NoKind`] and itself).
@@ -127,7 +127,7 @@ impl<Q: Composition> KindList<Q> for HNil {
     type Head = NoKind;
     type Tail = HNil;
 }
-impl<Q: Composition, K, T: KindList<Q>> KindList<Q> for HCons<K, T>
+impl<Q: Composition, K: Numbered, T: KindList<Q>> KindList<Q> for HCons<K, T>
 where
     Desc<K>: KindDesc<Q>,
 {
@@ -148,7 +148,7 @@ impl<Q: Composition> PackList<Q, HNil> for HNil {
     type Head = NoKindPos;
     type Tail = HNil;
 }
-impl<Q: Composition, K, T: KindList<Q>, P, PT> PackList<Q, HCons<K, T>> for HCons<P, PT>
+impl<Q: Composition, K: Numbered, T: KindList<Q>, P, PT> PackList<Q, HCons<K, T>> for HCons<P, PT>
 where
     Desc<K>: KindDesc<Q>,
     P: KindOps<Q, Desc<K>>,
@@ -274,7 +274,7 @@ impl<Q: Composition, D: KindDesc<Q>> CompList<Q, D, HNil> for HNil {
 // ------------------------------------------------------------------ walking the pack
 
 /// The item of the pack `Self` at the position `I` of the kinds `L`.
-pub trait PackNth<Q: Composition, L: KindList<Q>, I> {
+pub(crate) trait PackNth<Q: Composition, L: KindList<Q>, I> {
     /// The kinds from that position on.
     type List: KindList<Q>;
     /// The item.
@@ -293,7 +293,7 @@ where
 }
 
 /// The calls `Self` from the position `J` of the calls `Cs` on.
-pub trait NthCall<Q: Composition, D: KindDesc<Q>, Cs: ListRest, J> {
+pub(crate) trait NthCall<Q: Composition, D: KindDesc<Q>, Cs: ListRest, J> {
     /// The kinds of the calls from that position on.
     type Cs: ListRest;
     /// What was proved of them.
@@ -316,7 +316,7 @@ where
 
 /// The components `Self` from the position `J` of the components `Cs`
 /// on.
-pub trait NthComp<Q: Composition, D: KindDesc<Q>, Cs: ListRest, J> {
+pub(crate) trait NthComp<Q: Composition, D: KindDesc<Q>, Cs: ListRest, J> {
     /// The components from that position on.
     type Cs: ListRest;
     /// What was proved of them.
@@ -338,7 +338,9 @@ where
 }
 
 /// Every call `Cs` of a new node of the kind `D` started, in order.
-pub trait StartCalls<Q: Composition, D: KindDesc<Q>, Cs: ListRest>: CallList<Q, D, Cs> {
+pub(crate) trait StartCalls<Q: Composition, D: KindDesc<Q>, Cs: ListRest>:
+    CallList<Q, D, Cs>
+{
     /// The calls as they run, an `HList`.
     type Running;
     /// Start them all from what is left of the start, in order.
@@ -368,34 +370,34 @@ where
 // ------------------------------------------------------------------ the entries
 
 /// What `Q` proved of the kind at the position `I` of its structure.
-pub type KindPosAt<Q, I> = <<Q as Composition>::Pack as PackNth<Q, KindsOf<Q>, I>>::Out;
+pub(crate) type KindPosAt<Q, I> = <<Q as Composition>::Pack as PackNth<Q, KindsOf<Q>, I>>::Out;
 /// The kind at the position `I` of `Q`'s structure.
-pub type DescAt<Q, I> =
+pub(crate) type DescAt<Q, I> =
     <<<Q as Composition>::Pack as PackNth<Q, KindsOf<Q>, I>>::List as KindList<Q>>::Head;
 /// The full key of the nodes of the kind at `I`.
-pub type FkAt<Q, I> = <DescAt<Q, I> as KindDesc<Q>>::Fk;
+pub(crate) type FkAt<Q, I> = <DescAt<Q, I> as KindDesc<Q>>::Fk;
 /// What the kind at `I` starts from.
-pub type StartAt<Q, I> = StartOf<Q, DescAt<Q, I>>;
+pub(crate) type StartAt<Q, I> = StartOf<Q, DescAt<Q, I>>;
 /// The kinds of the calls of the kind at `I`.
-pub type CallKindsAt<Q, I> = <DescAt<Q, I> as KindDesc<Q>>::Calls;
+pub(crate) type CallKindsAt<Q, I> = <DescAt<Q, I> as KindDesc<Q>>::Calls;
 /// The components of the kind at `I`.
-pub type CompKindsAt<Q, I> = <DescAt<Q, I> as KindDesc<Q>>::Comps;
+pub(crate) type CompKindsAt<Q, I> = <DescAt<Q, I> as KindDesc<Q>>::Comps;
 /// What `Q` proved of the calls of the kind at `I`.
-pub type CallsAt<Q, I> = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::Calls;
+pub(crate) type CallsAt<Q, I> = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::Calls;
 /// What `Q` proved of the components of the kind at `I`.
-pub type CompsAt<Q, I> = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::Comps;
+pub(crate) type CompsAt<Q, I> = <KindPosAt<Q, I> as KindOps<Q, DescAt<Q, I>>>::Comps;
 /// The calls of a new node of the kind at `I` as they run, an `HList`.
-pub type RunningCalls<Q, I> =
+pub(crate) type RunningCalls<Q, I> =
     <CallsAt<Q, I> as StartCalls<Q, DescAt<Q, I>, CallKindsAt<Q, I>>>::Running;
 /// What `Q` proved of the calls of the kind at `I` from the position `J`
 /// on.
-pub type CallPosAt<Q, I, J> =
+pub(crate) type CallPosAt<Q, I, J> =
     <CallsAt<Q, I> as NthCall<Q, DescAt<Q, I>, CallKindsAt<Q, I>, J>>::Pos;
 /// The kinds of the calls of the kind at `I` from the position `J` on.
-pub type CallKindsFrom<Q, I, J> =
+pub(crate) type CallKindsFrom<Q, I, J> =
     <CallsAt<Q, I> as NthCall<Q, DescAt<Q, I>, CallKindsAt<Q, I>, J>>::Cs;
 /// The call at the position `J` of the kind at `I` as it runs.
-pub type RunningAt<Q, I, J> =
+pub(crate) type RunningAt<Q, I, J> =
     <CallPosAt<Q, I, J> as CallList<Q, DescAt<Q, I>, CallKindsFrom<Q, I, J>>>::HeadRunning;
 type CompPosAt<Q, I, J> = <CompsAt<Q, I> as NthComp<Q, DescAt<Q, I>, CompKindsAt<Q, I>, J>>::Pos;
 type CompKindsFrom<Q, I, J> = <CompsAt<Q, I> as NthComp<Q, DescAt<Q, I>, CompKindsAt<Q, I>, J>>::Cs;

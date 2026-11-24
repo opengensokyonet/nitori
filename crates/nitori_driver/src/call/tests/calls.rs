@@ -1,7 +1,8 @@
 //! The kinds of call of the link paths, written for any structure: a send
 //! with a reaction point beside a branch, two calls that take what is left
-//! of the start, a call that waits for a gate outside the tree, and a call
-//! that asks the connection to close.
+//! of the start, a call that waits for a gate outside the tree and first
+//! doubles what is left of the start, and a call that asks the connection
+//! to close.
 extern crate std;
 
 use alloc::format;
@@ -99,16 +100,21 @@ pub fn set_gate(open: bool) {
 }
 
 /// A call that waits for the gate, outside the tree, then counts a
-/// hundred in its link's core and returns.
-impl<Q: Composition, K: NodeKind> CallKind<Q, K> for Waiting {
+/// hundred in its link's core and returns. It starts after the core's
+/// budget, in the same part, and doubles what that left of the start.
+impl<Q: Composition, K: NodeKind<Start = u64>> CallKind<Q, K> for Waiting {
     type Needs = HList![Mut<LinkCore>];
     type Op = Self;
-    fn start(_: &mut K::Start) -> Self {
+    fn start(start: &mut u64) -> Self {
+        log(format!("start waiting {start}"));
+        *start *= 2;
         Waiting::new()
     }
 }
 #[call]
-pub async fn waiting<W: CallFamily<C = Waiting>>(host: &mut impl LentAccess<Family = W>) {
+pub async fn waiting<W: CallFamily<C = Waiting, K: NodeKind<Start = u64>>>(
+    host: &mut impl LentAccess<Family = W>,
+) {
     poll_fn(|_| {
         if GATE.with(Cell::get) {
             Poll::Ready(())

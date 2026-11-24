@@ -221,25 +221,96 @@ where
 /// struct Q;
 /// composition!(impl for Q: Top, HList![One], StillClock, u8);
 /// ```
+///
+/// Written out by hand, the composition is refused the same way, by the
+/// proof of the pack:
+///
+/// ```compile_fail,E0277
+/// # #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_driver::{
+/// #     __private::calls::{Count, StillClock, Total},
+/// #     component::Part,
+/// #     composition,
+/// #     frunk_core::HList,
+/// #     id::Numbered,
+/// #     structure::{Child, NodeKind, Share, SlotVec},
+/// # };
+/// # #[derive(Numbered)]
+/// # struct Top;
+/// # impl NodeKind for Top {
+/// #     type Children = HList![Child<Left, SlotVec<u32>>, Child<Right, SlotVec<u32>>];
+/// # }
+/// # #[derive(Numbered)]
+/// # struct Left;
+/// # impl NodeKind for Left {
+/// #     type Children = HList![Child<Leaf, SlotVec<u32>>];
+/// # }
+/// # #[derive(Numbered)]
+/// # struct Right;
+/// # impl NodeKind for Right {
+/// #     type Children = HList![Child<Leaf, SlotVec<u32>>];
+/// # }
+/// # /// Below the left and below the right.
+/// # #[derive(Numbered)]
+/// # struct Leaf;
+/// # impl NodeKind for Leaf {
+/// #     type Children = HList![];
+/// # }
+/// # struct One;
+/// # impl<L> Part<L> for One {
+/// #     type Args = ();
+/// # }
+/// # impl Share<Top> for One {
+/// #     type Data = HList![Total];
+/// # }
+/// # impl Share<Left> for One {
+/// #     type Data = HList![];
+/// # }
+/// # impl Share<Right> for One {
+/// #     type Data = HList![];
+/// # }
+/// # impl Share<Leaf> for One {
+/// #     type Data = HList![Count];
+/// # }
+/// use nitori_driver::call::{
+///     Composition, KindsOf, RootNode,
+///     __pack::{PackList, new_root, prove},
+/// };
+/// struct Q;
+/// impl Composition for Q {
+///     type Root = Top;
+///     type Parts = HList![One];
+///     type Clock = StillClock;
+///     type Priority = u8;
+///     type Pack = impl PackList<Self, KindsOf<Self>>;
+///     fn pack() -> core::marker::PhantomData<Self::Pack> {
+///         prove::<Self, KindsOf<Self>, _>()
+///     }
+///     fn root(
+///         start: &mut <Top as NodeKind>::Start,
+///         args: &nitori_driver::component::ArgsOf<HList![One]>,
+///     ) -> RootNode<Self> {
+///         new_root::<Top, HList![One]>(start, args)
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! composition {
     (impl for $q:ty: $root:ty, $parts:ty, $clock:ty, $priority:ty $(,)?) => {
-        // a kind at two places of the structure fails here, naming it
-        const _: () = $crate::call::kinds_once::<$root>();
         impl $crate::call::Composition for $q {
             type Root = $root;
             type Parts = $parts;
             type Clock = $clock;
             type Priority = $priority;
-            type Pack = impl $crate::call::PackList<Self, $crate::call::KindsOf<Self>>;
+            type Pack = impl $crate::call::__pack::PackList<Self, $crate::call::KindsOf<Self>>;
             fn pack() -> ::core::marker::PhantomData<Self::Pack> {
-                $crate::call::prove::<Self, $crate::call::KindsOf<Self>, _>()
+                $crate::call::__pack::prove::<Self, $crate::call::KindsOf<Self>, _>()
             }
             fn root(
                 start: &mut <$root as $crate::structure::NodeKind>::Start,
                 args: &$crate::component::ArgsOf<$parts>,
             ) -> $crate::call::RootNode<Self> {
-                $crate::call::new_root::<$root, $parts>(start, args)
+                $crate::call::__pack::new_root::<$root, $parts>(start, args)
             }
         }
     };

@@ -15,7 +15,7 @@ use nitori_call::{LentAccess, call};
 use super::{Q1, Q2, cx, noop};
 use crate::{
     call::{CallFamily, CallKind, Composition, LoanNeeds, PartsOf, poll_call, start_calls},
-    capability::{Contribute, ContributedBy, DispatchRun, DispatchSum, PieceList},
+    capability::{Contribute, Contributed, DispatchRun, DispatchSum, PieceList},
     frunk_core::hlist,
     lend::tests::{
         fixtures::{
@@ -24,7 +24,7 @@ use crate::{
         },
         parts::{log, take_log},
     },
-    need::{Cap, Mut, Pos, Ref, View},
+    need::{Mut, Pos, Ref, View},
     structure::NodeKind,
 };
 
@@ -148,7 +148,7 @@ impl<Q> DispatchesFrames for Q where
 /// and what the piece answered noted; a type byte no part has is noted as
 /// unknown.
 impl<Q: DispatchesFrames, K: NodeKind> CallKind<Q, K> for Receiving {
-    type Needs = HList![Cap<ContributedBy<Frames, PartsOf<Q>>>];
+    type Needs = HList![Contributed<Frames, PartsOf<Q>>];
     type Op = Self;
     fn start(_: &mut K::Start) -> Self {
         Receiving::new()

@@ -1,6 +1,7 @@
 //! A new node's calls start after its components are built, from what
 //! the components left of its start, in the order of the parts and then
-//! of each part's calls.
+//! of each part's calls: the core's budget, then its waiting call, then
+//! the loss part's budget.
 use alloc::{string::String, vec::Vec};
 
 use frunk_core::{HList, hlist, hlist_pat};
@@ -99,13 +100,16 @@ fn components_first_then_calls() {
     let two: Started = (log, start, pn);
 
     // The planner counts from the start and takes one of it; the core's
-    // budget gets what is left and takes ten, the loss part's after it.
+    // budget gets what is left and takes ten, the core's waiting call
+    // doubles what is left after it, and the loss part's budget comes last.
     same_on_both(
         one,
         two,
         (
-            ["start a 6", "start b 16"].map(String::from).to_vec(),
-            16,
+            ["start a 6", "start waiting 16", "start b 32"]
+                .map(String::from)
+                .to_vec(),
+            32,
             Some(711),
         ),
     );

@@ -10,6 +10,7 @@ use super::{
         Check, CountChain, CountTree, Deep, DeepIf, ExactlyOneBelow, ExactlyOneUp, Spell, Takes,
         TakesExclusive, Touch, UpCount,
     },
+    input::InputNeed,
     list::{Append, Len, Prefix},
     plan::{NodeSet, Plan},
     tree::{Collect, Ctx, Cx, FindBelow, FindUp, ToShape},
@@ -153,6 +154,7 @@ where
     UpKind<C, A, IA>: FindBelow<C::Parts, X, IK, Sh = Sh>,
     Sh: ToShape,
     L::Key: PicksBy<L, <<Sh as ToShape>::Shape as Shape>::Key>,
+    L::Input: InputNeed,
     L::Input: Check<C, PI>,
     L::Input: Takes<C, PI>,
     <L::Input as Takes<C, PI>>::Touches: OnlyReads,
@@ -182,7 +184,7 @@ impl<I, Sd, W, T: OnlyReads> OnlyReads for HCons<Deep<I, Sd, W>, T> {}
 #[diagnostic::on_unimplemented(
     message = "the input of a locator takes `{X}` exclusive; it may only read",
     label = "the input takes exclusive",
-    note = "`Locator::Input` is lent to pick the node, beside what is taken there; it takes `Ref` and the context, never `Mut`"
+    note = "`Locator::Input` is lent to pick the node, beside what is taken there: it only reads, taking `Ref`, `OwnKey`, `OwnAddress`, `Clock` and `WakerOf`, never `Mut`"
 )]
 pub trait InputReads<X> {}
 impl<X> InputReads<X> for False {}

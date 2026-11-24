@@ -47,6 +47,11 @@ pub use nitori_driver_macros::Numbered;
 /// the second, and tells apart the types derived in the body of a
 /// `macro_rules!` macro by the places it is expanded. Across crates two numbers are the same by chance about once
 /// in 2⁶⁴, which nothing checks.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` has no type-level number: derive `Numbered`",
+    label = "`{Self}` is not `#[derive(Numbered)]`",
+    note = "every node kind of a composition, every component and every reaction point is told apart by its number; `#[derive(Numbered)]` gives it one"
+)]
 pub trait Numbered {
     /// The number: [`BCons`] of [`B0`] and [`B1`], ending in [`BNil`].
     type Number;
@@ -162,6 +167,12 @@ impl<T: And<U>, U> And<BCons<B0, U>> for BCons<B1, T> {
 /// Exclusive-or and rotation alone are linear, so the parameters of a
 /// nested generic type could cancel out: `Pair<Wrap<A>, A>` would have
 /// one number whatever `A` is. The and keeps them from it.
+///
+/// It is not one to one (all zeros and all ones both give zeros, for
+/// one), but exhausted at 12, 16 and 20 bits, two inputs give one output
+/// less often than under a random function, and less often the wider the
+/// bits; at 64 bits that is negligible beside the chance of two numbers
+/// alike across crates.
 #[doc(hidden)]
 pub trait Scramble {
     /// The mixed list.

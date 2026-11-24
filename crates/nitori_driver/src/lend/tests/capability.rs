@@ -219,7 +219,7 @@ macro_rules! contributions {
                 lend!(
                     $root,
                     LinkPath,
-                    HList![Contributed<Counts>],
+                    HList![Contributed<Counts, Parts>],
                     $at,
                     |hlist_pat![mut pieces]| {
                         let mut n = 0;
@@ -233,7 +233,7 @@ macro_rules! contributions {
         let frames = lend!(
             $root,
             LinkPath,
-            HList![Contributed<Frames>],
+            HList![Contributed<Frames, Parts>],
             $at,
             |hlist_pat![mut pieces]| {
                 let mut take = |frame: FrameSum, by| {

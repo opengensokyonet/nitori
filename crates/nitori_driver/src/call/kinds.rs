@@ -114,9 +114,9 @@ impl<B> Or<B> for False {
 /// are each at one place.
 pub trait KindsOnce {}
 impl KindsOnce for HNil {}
-impl<K, T: KindsOnce + KindNotIn<K>> KindsOnce for HCons<K, T> {}
+impl<K: Numbered, T: KindsOnce + KindNotIn<K>> KindsOnce for HCons<K, T> {}
 /// The kind `K` is none of the kinds `Self`.
-pub trait KindNotIn<K> {}
+pub(crate) trait KindNotIn<K> {}
 impl<K> KindNotIn<K> for HNil {}
 impl<K: Numbered, H: Numbered, T: KindNotIn<K>> KindNotIn<K> for HCons<H, T>
 where
@@ -132,15 +132,6 @@ where
 )]
 pub trait OtherKind<K> {}
 impl<K> OtherKind<K> for False {}
-
-/// Check that no kind is at two places of the structure whose root is
-/// `R`; [`composition!`](crate::composition!) evaluates it, and its
-/// error names the kind.
-pub const fn kinds_once<R: AllKinds>()
-where
-    R::Kinds: KindsOnce,
-{
-}
 
 // ------------------------------------------------------------------ lists
 
@@ -173,7 +164,7 @@ where
     type Calls = <O::Calls as Add<Os::Calls>>::Output;
 }
 /// The calls of the parts `Pt` at the kind `K`.
-pub type CallsOf<Pt, K> = <Pt as PartsCalls<K>>::Calls;
+pub(crate) type CallsOf<Pt, K> = <Pt as PartsCalls<K>>::Calls;
 
 /// The component `C` in the share of the part `O`.
 pub struct Comp<O, C>(core::marker::PhantomData<fn() -> (O, C)>);
@@ -204,7 +195,7 @@ where
     type Comps = <<O::Data as InPart<O>>::Out as Add<Os::Comps>>::Output;
 }
 /// The components of the parts `Pt` at the kind `K`.
-pub type CompsOf<Pt, K> = <Pt as PartsComps<K>>::Comps;
+pub(crate) type CompsOf<Pt, K> = <Pt as PartsComps<K>>::Comps;
 
 // ------------------------------------------------------------------ request boxes
 

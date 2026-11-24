@@ -10,7 +10,6 @@ use super::{
 };
 use crate::{
     capability::{Capability, Contributed, PieceList},
-    id::True,
     need::{Cap, Pos},
 };
 
@@ -46,40 +45,37 @@ where
     type Out = <X::Needs as TakesExclusive>::Out;
 }
 
-/// The position of a [`Contributed`]: the parts `Pt`, whose pieces for
-/// the family `F` it holds, and their needs at `Ps`.
-pub struct ContribPos<Pt, F, Ps>(PhantomData<fn() -> (Pt, F, Ps)>);
-impl<Pt: PieceList<F>, F: 'static, Ps: Pos> Pos for ContribPos<Pt, F, Ps> {
+/// The position of a [`Contributed`]: the pieces' needs at `Ps`.
+pub struct ContribPos<Ps>(PhantomData<fn() -> Ps>);
+impl<Ps: Pos> Pos for ContribPos<Ps> {
     type Inner = Ps;
-    type Held<'t> = Pt::Pieces<'t>;
 }
 
-impl<C, Pt, F: 'static, Ps: Pos> Lend<C, ContribPos<Pt, F, Ps>> for Contributed<F>
+impl<C: Ctx, F: 'static, L: PieceList<F>, Ps: Pos> Lend<C, ContribPos<Ps>> for Contributed<F, L>
 where
-    C: Ctx<Parts = Pt>,
-    Pt: PieceList<F>,
-    Pt::Needs: Lend<C, Ps>,
+    L::Needs: Lend<C, Ps>,
 {
-    type Cols = <Pt::Needs as Lend<C, Ps>>::Cols;
-    fn build<'a>(hs: <Self::Cols as Plan>::Hs<'a>, at: &C::Fk) -> Pt::Pieces<'a>
+    type Cols = <L::Needs as Lend<C, Ps>>::Cols;
+    fn build<'a>(hs: <Self::Cols as Plan>::Hs<'a>, at: &C::Fk) -> L::Pieces<'a>
     where
         Self: 'a,
     {
-        Pt::assemble::<Ps>(<Pt::Needs as Lend<C, Ps>>::build(hs, at))
+        L::assemble::<Ps>(<L::Needs as Lend<C, Ps>>::build(hs, at))
     }
 }
-impl<C: Ctx<Parts = Pt>, Pt: PieceList<F>, F, Ps> Check<C, ContribPos<Pt, F, Ps>> for Contributed<F> where
-    Pt::Needs: Check<C, Ps>
+impl<C, F, L: PieceList<F>, Ps> Check<C, ContribPos<Ps>> for Contributed<F, L> where
+    L::Needs: Check<C, Ps>
 {
 }
-impl<C: Ctx<Parts = Pt>, Pt: PieceList<F>, F, Ps> Takes<C, ContribPos<Pt, F, Ps>> for Contributed<F>
+impl<C, F, L: PieceList<F>, Ps> Takes<C, ContribPos<Ps>> for Contributed<F, L>
 where
-    Pt::Needs: Takes<C, Ps>,
+    L::Needs: Takes<C, Ps>,
 {
-    type Touches = <Pt::Needs as Takes<C, Ps>>::Touches;
+    type Touches = <L::Needs as Takes<C, Ps>>::Touches;
 }
-/// What the pieces take follows from the parts, not from the need: taken
-/// as exclusive.
-impl<F> TakesExclusive for Contributed<F> {
-    type Out = True;
+impl<F, L: PieceList<F>> TakesExclusive for Contributed<F, L>
+where
+    L::Needs: TakesExclusive,
+{
+    type Out = <L::Needs as TakesExclusive>::Out;
 }

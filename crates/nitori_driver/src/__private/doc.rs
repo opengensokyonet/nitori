@@ -2,14 +2,15 @@
 //! ConnCore, Label; [LogicalPath by PathKey { SentRecords; [LinkPath by
 //! LinkId { LinkCore, Planner, Label; Recovery? { Congestion } }] }] }`,
 //! all of it in the one part `V1`; the requests `Ping` and `Close`; the
-//! capability [`Planning`] and the reaction points [`Sent`] and [`Echo`];
+//! capability [`Planning`] and the reaction points [`Sent`], [`Echo`],
+//! [`Tick`], [`Tock`] and [`Loop`], with the locator [`PickByLoop`];
 //! and [`lends!`], [`lends_in!`] and [`component_lends!`], which prove
 //! needs on it.
 use crate::{
     capability::Capability,
     frunk_core::{HList, hlist_pat},
     id::Numbered,
-    need::{Cap, Mut, Pos, Ref, View},
+    need::{At, Cap, Locator, Mut, OneOrNone, Pos, Ref, Under, View},
     react::{Reaction, ReactionPoint, ReactsTo},
     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
 };
@@ -64,7 +65,12 @@ impl NodeKind for Recovery {
 pub struct V1;
 impl Share<Conn> for V1 {
     type Data = HList![ConnCore, Label];
-    type Reacts = HList![ReactsTo<Echo, Repeat>];
+    type Reacts = HList![
+        ReactsTo<Echo, Repeat>,
+        ReactsTo<Tick, TickToTock>,
+        ReactsTo<Tock, TockToTick>,
+        ReactsTo<Loop, LoopBack>,
+    ];
 }
 impl Share<LogicalPath> for V1 {
     type Data = HList![SentRecords];
@@ -121,6 +127,64 @@ impl ReactionPoint for Echo {
 pub struct Repeat;
 impl Reaction<Echo> for Repeat {
     type Needs = HList![Cap<Echo>];
+    fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, _: ()) {
+        let _ = view;
+    }
+}
+
+/// A point whose reaction, at the connection, fires [`Tock`].
+#[derive(Numbered)]
+pub struct Tick;
+impl ReactionPoint for Tick {
+    type Payload<'a> = ();
+}
+/// A point whose reaction, at the connection, fires [`Tick`].
+#[derive(Numbered)]
+pub struct Tock;
+impl ReactionPoint for Tock {
+    type Payload<'a> = ();
+}
+/// The reaction to [`Tick`]: firing [`Tock`].
+pub struct TickToTock;
+impl Reaction<Tick> for TickToTock {
+    type Needs = HList![Cap<Tock>];
+    fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, _: ()) {
+        let _ = view;
+    }
+}
+/// The reaction to [`Tock`]: firing [`Tick`].
+pub struct TockToTick;
+impl Reaction<Tock> for TockToTick {
+    type Needs = HList![Cap<Tick>];
+    fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, _: ()) {
+        let _ = view;
+    }
+}
+
+/// A point whose reaction, at the connection, takes the link of a
+/// logical path that [`PickByLoop`] picks, whose input fires the point
+/// again.
+#[derive(Numbered)]
+pub struct Loop;
+impl ReactionPoint for Loop {
+    type Payload<'a> = ();
+}
+/// A locator whose input fires [`Loop`], which an input may not.
+pub struct PickByLoop;
+impl Locator for PickByLoop {
+    type Among = Under<SentRecords, LinkCore>;
+    type Input = Cap<Loop>;
+    type Count = OneOrNone;
+    type Key = LinkId;
+    fn pick<'t, P: Pos>(_: View<'t, Cap<Loop>, P>, among: &[LinkId]) -> Option<LinkId> {
+        among.first().cloned()
+    }
+}
+/// The reaction to [`Loop`]: a link's core, at the link [`PickByLoop`]
+/// picks.
+pub struct LoopBack;
+impl Reaction<Loop> for LoopBack {
+    type Needs = HList![At<PickByLoop, HList![Ref<LinkCore>]>];
     fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, _: ()) {
         let _ = view;
     }

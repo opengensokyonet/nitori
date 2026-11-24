@@ -18,7 +18,7 @@ use nitori_call::LentCall;
 
 use super::{
     CallKind, Comp, Composition, ContextOf, Lent, Loan, PartsOf, RootNode, RootOf, RunsOn,
-    kinds::ListRest,
+    kinds::{KindsOnce, ListRest},
     pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindOps},
 };
 use crate::{
@@ -27,12 +27,12 @@ use crate::{
     lend::{
         build::{NewPointCx, NewPointFk},
         entry::{
-            self, BuildRootShares, BuildShares, EndingReactions, Lends, OwnNeeds, build_node,
-            build_root,
+            self, BuildRootShares, BuildShares, EndingReactions, Lends, OwnNeeds, StartedReactions,
+            build_node, build_root,
         },
         tree::{Ctx, InKid, IsSelf, Locate},
     },
-    need::{Cap, Pos},
+    need::Pos,
     react::{NodeEnding, NodeStarted},
     structure::{KindFor, NodeKind},
 };
@@ -63,7 +63,7 @@ where
 }
 /// The pack of the kinds `L` of `Q`; [`composition!`](crate::composition!)
 /// defines the opaque pack with it.
-pub fn prove<Q: Composition, L: Prove<Q, I>, I>() -> PhantomData<L::Out> {
+pub fn prove<Q: Composition, L: Prove<Q, I> + KindsOnce, I>() -> PhantomData<L::Out> {
     PhantomData
 }
 
@@ -92,7 +92,7 @@ where
     NodeEnding<K>: Numbered,
     IS: Pos,
     IE: Pos,
-    Cap<NodeStarted<K>>: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IS>,
+    StartedReactions<K>: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IS>,
     EndingReactions<K>: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IE>,
 {
     type Pos = KindPositions<
@@ -254,7 +254,7 @@ where
     NodeEnding<K>: Numbered,
     IS: Pos,
     IE: Pos,
-    Cap<NodeStarted<K>>:
+    StartedReactions<K>:
         Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IS, Fk = FkOf<Q, K>>,
     EndingReactions<K>:
         Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IE, Fk = FkOf<Q, K>>,

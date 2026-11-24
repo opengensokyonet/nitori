@@ -17,7 +17,7 @@ use crate::{
     capability::{Capability, Contributed, PieceList},
     id::{False, NumberEq},
     need::{At, Clock, Mut, OneAtATime, OwnAddress, OwnKey, Plus, Ref, Requests, Under, WakerOf},
-    react::{ReactionPoint, Reactions},
+    react::{Point, Reactions},
 };
 
 /// The point `Self` differs from the point `P` a chain went through.
@@ -37,7 +37,7 @@ impl<P> Differs<P> for False {}
 )]
 pub trait NotIn<Seen> {}
 impl<P> NotIn<HNil> for P {}
-impl<P: ReactionPoint, Q: ReactionPoint, T> NotIn<HCons<Q, T>> for P
+impl<P: Point, Q: Point, T> NotIn<HCons<Q, T>> for P
 where
     P::Number: NumberEq<Q::Number>,
     <P::Number as NumberEq<Q::Number>>::Out: Differs<P>,
@@ -47,6 +47,11 @@ where
 
 /// The need `Self` fires no point that the chain `Seen` went through, in a
 /// tree whose root is `Rt` for the parts `Pt`.
+#[diagnostic::on_unimplemented(
+    message = "reaction points chain into a cycle: `{Self}` fires a point the chain `{Seen}` went through",
+    label = "the chain comes back here",
+    note = "firing a point takes its reactions, and a reaction that fires a point the chain went through expands without end"
+)]
 pub trait NoCycle<Rt, Pt, Seen> {}
 impl<Rt, Pt, S> NoCycle<Rt, Pt, S> for HNil {}
 impl<Rt, Pt, S, N: NoCycle<Rt, Pt, S>, T: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for HCons<N, T> {}
@@ -69,19 +74,34 @@ impl<Rt, Pt, S, B, T: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for At<B, T> {}
 impl<Rt, Pt, S, A, T: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for Under<A, T> {}
 impl<Rt, Pt, S, T: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for OneAtATime<T> {}
 impl<Rt, Pt, S, Bs: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for Plus<Bs> {}
-impl<Rt, Pt, S, X: Capability> NoCycle<Rt, Pt, S> for crate::need::Cap<X> where
-    X::Needs: NoCycle<Rt, Pt, S>
-{
-}
-impl<Rt, Pt, S, F> NoCycle<Rt, Pt, S> for Contributed<F>
+impl<Rt, Pt, S, X> NoCycle<Rt, Pt, S> for crate::need::Cap<X> where X: CapNoCycle<Rt, Pt, S> {}
+/// The capability `Self` fires no point that the chain `Seen` went
+/// through. Its own bound, so that a type that is not a capability is
+/// reported as such rather than as a cycle.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a capability",
+    note = "a capability taken with `Cap` is a composed one, implementing `Capability`, or a part's reaction point, implementing `ReactionPoint`; the driver's own points `NodeStarted` and `NodeEnding` are fired by the driver only"
+)]
+pub trait CapNoCycle<Rt, Pt, Seen> {}
+impl<Rt, Pt, S, X: Capability> CapNoCycle<Rt, Pt, S> for X where X::Needs: NoCycle<Rt, Pt, S> {}
+impl<Rt, Pt, S, F, L> NoCycle<Rt, Pt, S> for Contributed<F, L> where L: PiecesNoCycle<F, Rt, Pt, S> {}
+/// The pieces of the parts `Self` for the family `F` fire no point that
+/// the chain `Seen` went through. Its own bound, so that a part that does
+/// not contribute is reported as such rather than as a cycle.
+#[diagnostic::on_unimplemented(
+    message = "a part of `{Self}` does not say what it contributes to the family `{F}`",
+    note = "every part writes `Contribute<{F}>` when a need of the composition takes `Contributed<{F}, _>`; `Needs = HNil` and `Piece<'t> = ()` for nothing"
+)]
+pub trait PiecesNoCycle<F, Rt, Pt, Seen> {}
+impl<Rt, Pt, S, F, L> PiecesNoCycle<F, Rt, Pt, S> for L
 where
-    Pt: PieceList<F>,
-    Pt::Needs: NoCycle<Rt, Pt, S>,
+    L: PieceList<F>,
+    L::Needs: NoCycle<Rt, Pt, S>,
 {
 }
 impl<Rt, Pt, S, P, W> NoCycle<Rt, Pt, S> for Reactions<P, W>
 where
-    P: ReactionPoint + NotIn<S>,
+    P: Point + NotIn<S>,
     Rt: AllKinds,
     Pt: ListReactions<P, Rt::Kinds>,
     <Pt as ListReactions<P, Rt::Kinds>>::Rs: ReactionNeeds<P>,

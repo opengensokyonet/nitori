@@ -10,8 +10,10 @@
 //! [`At`](crate::need::At). Every [`ReactionPoint`](crate::react::ReactionPoint)
 //! is a capability too, whose object fires the reactions.
 //!
-//! A contributed capability (taken with [`Contributed<F>`](Contributed)) is
-//! made of every part's piece for the family `F`. Each part writes
+//! A contributed capability (taken with [`Contributed<F, L>`](Contributed)) is
+//! made of every part's piece for the family `F`, the parts being the list
+//! `L`: the parts of the composition, written out where they are known or
+//! as [`PartsOf<Q>`](crate::call::PartsOf) in code generic over it. Each part writes
 //! [`Contribute<F>`] for every family a call of the composition uses,
 //! `Needs = HNil` and `Piece<'t> = ()` when it gives nothing. The pieces
 //! are lined up in the order of the parts, as an `HList` ([`PiecesOf`]);
@@ -52,7 +54,7 @@
 //!
 //! ```
 //! # use nitori_driver::{__private::doc::*, frunk_core::{HList, hlist_pat}, need::*};
-//! use nitori_driver::capability::{Contribute, Contributed, EachRun};
+//! use nitori_driver::capability::{Contribute, Contributed, EachPiece, EachRun, PiecesOf};
 //!
 //! /// The family: every part's label, counted.
 //! struct Labels;
@@ -70,7 +72,14 @@
 //!         LabelPiece(label)
 //!     }
 //! }
-//! lends!(Conn, HList![Contributed<Labels>, Ref<ConnCore>]);
+//! lends!(Conn, HList![Contributed<Labels, Parts>, Ref<ConnCore>]);
+//!
+//! // The view is the list of the pieces, whatever the position.
+//! fn count(mut pieces: PiecesOf<'_, Parts, Labels>) -> u32 {
+//!     let mut n = 0;
+//!     pieces.each_piece(&mut n);
+//!     n
+//! }
 //! ```
 //!
 //! A part's piece and another need taking the same component, one of them
@@ -88,7 +97,7 @@
 //! #         label
 //! #     }
 //! # }
-//! lends!(Conn, HList![Contributed<Labels>, Mut<Label>]);
+//! lends!(Conn, HList![Contributed<Labels, Parts>, Mut<Label>]);
 //! ```
 use core::marker::PhantomData;
 
@@ -108,6 +117,10 @@ use crate::need::{Need, Pos, View};
 /// capabilities, and `+`. The object depends on the position `P` of the
 /// needs only as their view does, so code generic over the structure uses
 /// it through what it declares.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a capability",
+    note = "a capability is a composed one, implementing `Capability`, or a part's reaction point, implementing `ReactionPoint`; the driver's own points `NodeStarted` and `NodeEnding` are fired by the driver only"
+)]
 pub trait Capability: 'static {
     /// The needs.
     type Needs: Need;
@@ -119,32 +132,18 @@ pub trait Capability: 'static {
 
 // ---------------------------------------------------------------- contributed capabilities
 
-/// Every part's piece for the family `F`, in the order of the parts: an
-/// `HList` of them ([`PiecesOf`]).
+/// Every part's piece for the family `F`, the parts being `L`, in their
+/// order: an `HList` of them, [`PiecesOf`]`<'t, L, F>`.
 ///
-/// What it is lent as follows from the parts of the composition, not from
-/// the need: where they are known, the list of the pieces.
-pub struct Contributed<F>(PhantomData<fn() -> F>);
-impl<F: 'static> Need for Contributed<F> {
-    type View<'t, P: Pos> = P::Held<'t>;
-}
-
-/// Every part's piece for the family `F`, for code that names the list of
-/// parts `L` the pieces come from: a composed capability, taken with
-/// [`Cap`](crate::need::Cap)`<ContributedBy<F, L>>`.
-///
-/// Its object is the list of the pieces, [`PiecesOf`]`<'t, L, F>`, which
-/// does not depend on where it is lent: a call generic over the structure
-/// names `L` as the parts of its composition and uses the pieces through
-/// what a bound of the composition says of them. Where the parts are
-/// known, [`Contributed<F>`](Contributed) is the same.
-pub struct ContributedBy<F, L>(PhantomData<fn() -> (F, L)>);
-impl<F: 'static, L: PieceList<F>> Capability for ContributedBy<F, L> {
-    type Needs = L::Needs;
-    type Object<'t, P: Pos> = L::Pieces<'t>;
-    fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> L::Pieces<'t> {
-        L::assemble::<P>(view)
-    }
+/// `L` is the list of the parts of the composition: written out where it
+/// is known, [`PartsOf<Q>`](crate::call::PartsOf) in a call generic over
+/// the structure, which uses the pieces through what a bound of the
+/// composition says of them. The view does not depend on where it is
+/// lent. The pieces' needs are taken around the lend point and proved with
+/// the other needs; that `L` is the composition's parts is not checked.
+pub struct Contributed<F, L>(PhantomData<fn() -> (F, L)>);
+impl<F: 'static, L: PieceList<F>> Need for Contributed<F, L> {
+    type View<'t, P: Pos> = L::Pieces<'t>;
 }
 
 /// What the part `Self` contributes to the family `F`: needs, and the
@@ -157,7 +156,7 @@ impl<F: 'static, L: PieceList<F>> Capability for ContributedBy<F, L> {
 /// does not depend on their position.
 #[diagnostic::on_unimplemented(
     message = "the part `{Self}` does not say what it contributes to the family `{F}`",
-    note = "every part writes `Contribute<{F}>` when a need of the composition takes `Contributed<{F}>`; `Needs = HNil` and `Piece<'t> = ()` for nothing"
+    note = "every part writes `Contribute<{F}>` when a need of the composition takes `Contributed<{F}, _>`; `Needs = HNil` and `Piece<'t> = ()` for nothing"
 )]
 pub trait Contribute<F> {
     /// The needs.

@@ -52,10 +52,39 @@ use super::{Need, Pos, View};
 /// }
 /// lends!(LinkPath, HList![At<NextLink, HList![Mut<LinkCore>]>]);
 /// ```
+///
+/// Nor does an input that puts requests or fires a reaction point:
+///
+/// ```compile_fail,E0277
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// struct FirstLink;
+/// impl Locator for FirstLink {
+///     type Among = Under<SentRecords, LinkCore>;
+///     type Input = Requests<Ping>;
+///     type Count = OneOrNone;
+///     type Key = LinkId;
+///     fn pick<'t, P: Pos>(_: View<'t, Requests<Ping>, P>, among: &[LinkId]) -> Option<LinkId> {
+///         among.first().cloned()
+///     }
+/// }
+/// lends_in!(HList![RequestList<Ping>], LinkPath, HList![At<FirstLink, HList![Mut<LinkCore>]>]);
+/// ```
+///
+/// [`PickByLoop`](crate::__private::doc::PickByLoop)'s input is
+/// `Cap<Loop>`, and the reaction to [`Loop`](crate::__private::doc::Loop)
+/// takes a link it picks:
+///
+/// ```compile_fail,E0277
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends!(LinkPath, HList![Cap<Loop>]);
+/// ```
 pub trait Locator: 'static {
     /// The candidates: `Under<A, X>`.
     type Among;
-    /// What the rule reads, lent at the lend point; it takes only shared.
+    /// What the rule reads, lent at the lend point: it only reads, taking
+    /// `Ref`, `OwnKey`, `OwnAddress`, `Clock`, `WakerOf` and capabilities
+    /// made of them; never `Mut`, `Requests`, a reaction point or
+    /// `Contributed`.
     type Input: Need;
     /// The contract: [`ExactlyOne`] or [`OneOrNone`].
     type Count: Count;
