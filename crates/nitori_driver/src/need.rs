@@ -6,7 +6,8 @@
 //! and [`At`] moves the lend point, to a node found by component or picked
 //! by a [`Locator`]. [`WakerOf`] takes a component's waker. [`OwnKey`] and
 //! [`OwnAddress`] read the lend point itself, [`Clock`] and [`Requests`]
-//! the lending. A list of needs is an `HList` of them, taken at once and
+//! the lending. [`Cap`] takes a capability, or the reactions to a reaction
+//! point. A list of needs is an `HList` of them, taken at once and
 //! disjoint.
 //!
 //! The view of a need ([`Need::View`]) depends on the need and on a
@@ -51,6 +52,7 @@
 //! ```
 use core::marker::PhantomData;
 
+mod cap;
 mod context;
 mod locator;
 mod one_at_a_time;
@@ -58,6 +60,7 @@ mod plus;
 mod view;
 mod waker;
 
+pub use cap::Cap;
 pub use context::{Clock, LentClock, RequestBox, Requests};
 pub use locator::{AtTarget, Count, ExactlyOne, Locator, OneOrNone};
 pub use one_at_a_time::{OneAtATime, OneView};

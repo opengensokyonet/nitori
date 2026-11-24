@@ -1,11 +1,16 @@
 //! The structure the examples of the documentation lend from, `Conn {
 //! ConnCore, Label; [LogicalPath by PathKey { SentRecords; [LinkPath by
 //! LinkId { LinkCore, Planner, Label; Recovery? { Congestion } }] }] }`,
-//! all of it in the one part `V1`; the requests `Ping` and `Close`; and
-//! [`lends!`] and [`lends_in!`], which prove needs on it.
+//! all of it in the one part `V1`; the requests `Ping` and `Close`; the
+//! capability [`Planning`] and the reaction points [`Sent`] and [`Echo`];
+//! and [`lends!`], [`lends_in!`] and [`component_lends!`], which prove
+//! needs on it.
 use crate::{
-    frunk_core::HList,
+    capability::Capability,
+    frunk_core::{HList, hlist_pat},
     id::Numbered,
+    need::{Cap, Mut, Pos, Ref, View},
+    react::{Reaction, ReactionPoint, ReactsTo},
     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
 };
 
@@ -59,18 +64,67 @@ impl NodeKind for Recovery {
 pub struct V1;
 impl Share<Conn> for V1 {
     type Data = HList![ConnCore, Label];
+    type Reacts = HList![ReactsTo<Echo, Repeat>];
 }
 impl Share<LogicalPath> for V1 {
     type Data = HList![SentRecords];
 }
 impl Share<LinkPath> for V1 {
     type Data = HList![LinkCore, Planner, Label];
+    type Reacts = HList![ReactsTo<Sent, CountSent>];
 }
 impl Share<Recovery> for V1 {
     type Data = HList![Congestion];
 }
 /// The parts.
 pub type Parts = HList![V1];
+
+/// Planning a packet: a link's planner, exclusive, and its core.
+pub struct Planning;
+/// What [`Planning`] is lent as.
+pub struct Plan<'t> {
+    /// The planner.
+    pub planner: &'t mut Planner,
+    /// The link's core.
+    pub core: &'t LinkCore,
+}
+impl Capability for Planning {
+    type Needs = HList![Mut<Planner>, Ref<LinkCore>];
+    type Object<'t, P: Pos> = Plan<'t>;
+    fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> Plan<'t> {
+        let hlist_pat![planner, core] = view;
+        Plan { planner, core }
+    }
+}
+
+/// A packet was sent on a link, with its number.
+#[derive(Numbered)]
+pub struct Sent;
+impl ReactionPoint for Sent {
+    type Payload<'a> = u64;
+}
+/// The link's reaction to a packet sent: its core, exclusive.
+pub struct CountSent;
+impl Reaction<Sent> for CountSent {
+    type Needs = HList![Mut<LinkCore>];
+    fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, _: u64) {
+        let _ = view;
+    }
+}
+/// A point whose reaction, at the connection, fires it again.
+#[derive(Numbered)]
+pub struct Echo;
+impl ReactionPoint for Echo {
+    type Payload<'a> = ();
+}
+/// The reaction to [`Echo`]: firing it again.
+pub struct Repeat;
+impl Reaction<Echo> for Repeat {
+    type Needs = HList![Cap<Echo>];
+    fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, _: ()) {
+        let _ = view;
+    }
+}
 
 /// A request to probe a link.
 pub struct Ping;
@@ -109,7 +163,24 @@ macro_rules! __doc_lends_in {
         >()
     };
 }
+/// Prove what the component `$c` at the kind `$l` of [`Conn`] is lent
+/// with the needs `$n`: itself, then `$n`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doc_component_lends {
+    ($l:ty, $c:ty, $n:ty) => {
+        $crate::__private::assert_component_lends::<
+            $crate::__private::doc::Conn,
+            $crate::__private::doc::Parts,
+            $l,
+            $c,
+            $n,
+            _,
+            _,
+        >()
+    };
+}
 pub use crate::{
-    __doc_lends as lends, __doc_lends_in as lends_in,
+    __doc_component_lends as component_lends, __doc_lends as lends, __doc_lends_in as lends_in,
     lend::context::{Context, RequestList},
 };

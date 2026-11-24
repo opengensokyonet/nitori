@@ -15,9 +15,12 @@ extern crate self as nitori_driver;
 /// this one.
 pub use frunk_core;
 
+pub mod capability;
+pub mod component;
 pub mod id;
 pub(crate) mod lend;
 pub mod need;
+pub mod react;
 pub mod structure;
 
 /// What the examples of the documentation prove needs with. Not for use;

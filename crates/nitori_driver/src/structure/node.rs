@@ -17,6 +17,10 @@ pub trait Share<K> {
     /// What the part keeps of its share after the root of the tree ended;
     /// `()` by default. Only the root's is kept.
     type Remains: Default + 'static = ();
+    /// The reactions of the part at the nodes of this kind: a list of
+    /// [`ReactsTo`](crate::react::ReactsTo)`<point, reaction>`, none by
+    /// default.
+    type Reacts: 'static = HNil;
 }
 
 /// What the parts `Self` keep of their shares in a node of the kind `K`

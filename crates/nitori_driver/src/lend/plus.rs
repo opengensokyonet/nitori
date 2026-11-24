@@ -496,10 +496,16 @@ pub struct PlusHeld<'t, U: Plan, F> {
     hs: U::Hs<'t>,
     at: F,
 }
+impl<'t, U: Plan, F> PlusHeld<'t, U, F> {
+    /// What holds the handles `hs` of the union, lent at `at`.
+    pub(super) fn new(hs: U::Hs<'t>, at: F) -> Self {
+        Self { hs, at }
+    }
+}
 
 /// The view of the branch `B`, at the position `PB`, from what a `Plus`
 /// lent at `C` holds.
-fn branch<'t, 'b, C: Ctx, B: Lend<C, PB>, PB: Pos, U: Union>(
+pub(super) fn branch<'t, 'b, C: Ctx, B: Lend<C, PB>, PB: Pos, U: Union>(
     held: &'b mut PlusHeld<'t, U, C::Fk>,
 ) -> B::View<'b, PB>
 where

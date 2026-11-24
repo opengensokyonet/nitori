@@ -2,7 +2,7 @@
 //! from its needs and uses only what the traits of the views declare. The
 //! two trees hold the same state, so each call gives the same results on
 //! both, which one check compares.
-use core::{fmt::Debug, time::Duration};
+use core::time::Duration;
 
 use frunk_core::{HList, hlist, hlist_pat};
 
@@ -11,13 +11,6 @@ use crate::{
     lend::{Visit, lend_visit},
     need::{At, Clock, Members, Mut, OwnKey, Pos, Ref, Requests, Under, View, WakerOf},
 };
-
-/// The results of one call on structure one and on structure two are the
-/// same, and are `want`.
-fn same_on_both<O: PartialEq + Debug>(one: O, two: O, want: O) {
-    assert_eq!(one, two, "structure one and structure two differ");
-    assert_eq!(one, want);
-}
 
 type RecvNeeds = HList![Under<ConnCore, Mut<LinkCore>>, Mut<SentRecords>];
 

@@ -4,12 +4,16 @@
 //! PathKey { SentRecords; [Entry by LinkId], [LinkPath by LinkId {
 //! LinkCore, Planner; Recovery? { Congestion } }] }] }`. Structure two:
 //! `Conn2 { ConnCore, Keys, SentRecords, RecoveryFactory; [Entry by
-//! LinkId], [LinkPath by LinkId] }`. The components are split between two
-//! parts, `Core` and `Loss`.
+//! LinkId], [LinkPath by LinkId] }`. The components are split between
+//! three parts, `Core`, `Loss` and `Watch`; the last keeps only a held
+//! estimator on the link paths. What the parts react to is in [`parts`].
 use frunk_core::{HList, hlist};
 
+use super::parts::*;
 use crate::{
+    component::Held,
     id::Numbered,
+    react::{NodeEnding, NodeStarted, ReactsTo},
     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, insert},
 };
 
@@ -56,26 +60,36 @@ pub struct Congestion {
     pub in_flight: u32,
 }
 
+#[derive(Numbered)]
 pub struct Entry;
 impl NodeKind for Entry {
     type Children = HList![];
 }
+#[derive(Numbered)]
 pub struct Recovery;
 impl NodeKind for Recovery {
     type Children = HList![];
 }
+/// A link path starts from a number its planner counts from, and ends
+/// for a code.
+#[derive(Numbered)]
 pub struct LinkPath;
 impl NodeKind for LinkPath {
     type Children = HList![Child<Recovery, AtMostOne>];
+    type Start = u64;
+    type EndReason = u8;
 }
+#[derive(Numbered)]
 pub struct LogicalPath;
 impl NodeKind for LogicalPath {
     type Children = HList![Child<Entry, SlotVec<LinkId>>, Child<LinkPath, SlotVec<LinkId>>];
 }
+#[derive(Numbered)]
 pub struct Conn1;
 impl NodeKind for Conn1 {
     type Children = HList![Child<LogicalPath, SlotVec<PathKey>>];
 }
+#[derive(Numbered)]
 pub struct Conn2;
 impl NodeKind for Conn2 {
     type Children = HList![Child<Entry, SlotVec<LinkId>>, Child<LinkPath, SlotVec<LinkId>>];
@@ -85,19 +99,38 @@ impl NodeKind for Conn2 {
 pub struct Core;
 /// The part with what is sent and the recovery.
 pub struct Loss;
-pub type Parts = HList![Core, Loss];
+/// The part that keeps an estimator on the link paths.
+pub struct Watch;
+pub type Parts = HList![Core, Loss, Watch];
+
+/// What the core reacts to at the connection, of either structure.
+type CoreAtConnReacts = HList![
+    ReactsTo<Probe, CoreAtConn>,
+    ReactsTo<NodeStarted<LinkPath>, StartedAtConn>,
+    ReactsTo<NodeEnding<LinkPath>, EndingAtConn>,
+];
+/// What the loss part reacts to at the connection, of either structure.
+type LossAtConnReacts = HList![
+    ReactsTo<PacketsSent, RA2>,
+    ReactsTo<P2, RC2>,
+    ReactsTo<Probe, LossAtConn>,
+];
 
 impl Share<Conn1> for Core {
     type Data = HList![ConnCore, Keys];
+    type Reacts = CoreAtConnReacts;
 }
 impl Share<Conn1> for Loss {
     type Data = HList![RecoveryFactory];
+    type Reacts = LossAtConnReacts;
 }
 impl Share<Conn2> for Core {
     type Data = HList![ConnCore, Keys];
+    type Reacts = CoreAtConnReacts;
 }
 impl Share<Conn2> for Loss {
     type Data = HList![SentRecords, RecoveryFactory];
+    type Reacts = LossAtConnReacts;
 }
 impl Share<Entry> for Core {
     type Data = HList![Credit, LinkLimit];
@@ -113,9 +146,18 @@ impl Share<LogicalPath> for Loss {
 }
 impl Share<LinkPath> for Core {
     type Data = HList![LinkCore, Planner];
+    type Reacts = HList![
+        ReactsTo<PacketsSent, RA1>,
+        ReactsTo<P1, RC1>,
+        ReactsTo<Probe, CoreAtLink>,
+        ReactsTo<NodeStarted<LinkPath>, StartedAtLink>,
+        ReactsTo<NodeEnding<LinkPath>, EndingAtLink>,
+        ReactsTo<Pinged, PingIt>,
+    ];
 }
 impl Share<LinkPath> for Loss {
     type Data = HList![];
+    type Reacts = HList![ReactsTo<Probe, LossAtLink>];
 }
 impl Share<Recovery> for Core {
     type Data = HList![];
@@ -123,10 +165,30 @@ impl Share<Recovery> for Core {
 impl Share<Recovery> for Loss {
     type Data = HList![Congestion];
 }
+impl Share<Conn1> for Watch {
+    type Data = HList![];
+}
+impl Share<Conn2> for Watch {
+    type Data = HList![];
+}
+impl Share<Entry> for Watch {
+    type Data = HList![];
+}
+impl Share<LogicalPath> for Watch {
+    type Data = HList![];
+}
+impl Share<LinkPath> for Watch {
+    type Data = HList![Held<Rtt>];
+    type Reacts = HList![ReactsTo<Unrelated, RZ>];
+}
+impl Share<Recovery> for Watch {
+    type Data = HList![];
+}
 
 fn entry(l: u32) -> Node<Entry, Parts> {
     Node::new(hlist![
         hlist![Credit { available: 10 * l }, LinkLimit { max: 100 * l }],
+        hlist![],
         hlist![]
     ])
 }
@@ -138,11 +200,12 @@ fn link_path(l: u32) -> Node<LinkPath, Parts> {
                 next_pn: 100 * u64::from(l)
             }
         ],
-        hlist![]
+        hlist![],
+        hlist![Held(Rtt::default())]
     ])
 }
 fn recovery() -> Node<Recovery, Parts> {
-    Node::new(hlist![hlist![], hlist![Congestion::default()]])
+    Node::new(hlist![hlist![], hlist![Congestion::default()], hlist![]])
 }
 
 /// Structure one: logical paths 10 (entries and links 1 and 2) and 20
@@ -150,14 +213,19 @@ fn recovery() -> Node<Recovery, Parts> {
 pub fn tree_one() -> Node<Conn1, Parts> {
     let mut root = Node::new(hlist![
         hlist![ConnCore::default(), Keys { epoch: 7 }],
-        hlist![RecoveryFactory { made: 5 }]
+        hlist![RecoveryFactory { made: 5 }],
+        hlist![]
     ]);
     for (p, links) in [(10, &[1, 2][..]), (20, &[3][..])] {
         let path = insert(
             &mut root,
             End,
             PathKey(p),
-            Node::<LogicalPath, Parts>::new(hlist![hlist![], hlist![SentRecords::default()]]),
+            Node::<LogicalPath, Parts>::new(hlist![
+                hlist![],
+                hlist![SentRecords::default()],
+                hlist![]
+            ]),
         )
         .ok()
         .expect("the parent is there and the key is free");
@@ -184,13 +252,14 @@ pub fn tree_one() -> Node<Conn1, Parts> {
 pub fn tree_one_as_two() -> Node<Conn1, Parts> {
     let mut root = Node::new(hlist![
         hlist![ConnCore::default(), Keys { epoch: 3 }],
-        hlist![RecoveryFactory { made: 7 }]
+        hlist![RecoveryFactory { made: 7 }],
+        hlist![]
     ]);
     let path = insert(
         &mut root,
         End,
         PathKey(10),
-        Node::<LogicalPath, Parts>::new(hlist![hlist![], hlist![SentRecords::default()]]),
+        Node::<LogicalPath, Parts>::new(hlist![hlist![], hlist![SentRecords::default()], hlist![]]),
     )
     .ok()
     .expect("the parent is there and the key is free");
@@ -214,7 +283,8 @@ pub fn tree_one_as_two() -> Node<Conn1, Parts> {
 pub fn tree_two() -> Node<Conn2, Parts> {
     let mut root = Node::new(hlist![
         hlist![ConnCore::default(), Keys { epoch: 3 }],
-        hlist![SentRecords::default(), RecoveryFactory { made: 7 }]
+        hlist![SentRecords::default(), RecoveryFactory { made: 7 }],
+        hlist![]
     ]);
     for l in [1, 2] {
         insert(&mut root, End, LinkId(l), entry(l))
@@ -312,4 +382,11 @@ pub fn test_cx() -> TestCx {
 pub fn requests(cx: &mut TestCx) -> (alloc::vec::Vec<(u64, Ping)>, alloc::vec::Vec<(u64, Close)>) {
     let frunk_core::hlist_pat![_, pings, closes] = cx.pieces_mut();
     (pings.take(), closes.take())
+}
+
+/// The results of one test on structure one and on structure two are the
+/// same, and are `want`.
+pub fn same_on_both<O: PartialEq + core::fmt::Debug>(one: O, two: O, want: O) {
+    assert_eq!(one, two, "structure one and structure two differ");
+    assert_eq!(one, want);
 }

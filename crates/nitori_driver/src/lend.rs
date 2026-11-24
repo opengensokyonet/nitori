@@ -15,8 +15,12 @@ use crate::{
     structure::{KindFor, Node, NodeKind},
 };
 
+pub(crate) mod build;
+pub(crate) mod cap;
 pub(crate) mod check;
 pub(crate) mod context;
+pub(crate) mod cycle;
+pub(crate) mod entry;
 pub(crate) mod list;
 pub(crate) mod locator;
 pub(crate) mod members;
@@ -24,7 +28,9 @@ pub(crate) mod one_at_a_time;
 pub(crate) mod own;
 pub(crate) mod plan;
 pub(crate) mod plus;
+pub(crate) mod react;
 pub(crate) mod table;
+pub(crate) mod this;
 pub(crate) mod tree;
 pub(crate) mod under;
 pub(crate) mod up;
@@ -35,6 +41,7 @@ mod tests;
 
 use check::{Check, DeepEnoughAll, Disjoint, Takes};
 pub(crate) use context::LendContext;
+use cycle::NoCycle;
 use plan::{Plan, Run};
 use table::{KindTab, TabAt};
 use tree::{Ctx, Cx, Locate};
@@ -82,6 +89,7 @@ pub(crate) fn lend<R, Pt: 'static, L, IL, N, P, X, F, O>(
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
     PointCx<R, Pt, L, IL, X>: Ctx,
+    N: NoCycle<R, Pt, frunk_core::hlist::HNil>,
     N: Check<PointCx<R, Pt, L, IL, X>, P>,
     N: Takes<PointCx<R, Pt, L, IL, X>, P>,
     <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
@@ -119,6 +127,7 @@ pub(crate) fn lend_visit<R, Pt: 'static, L, IL, N, P, X, V>(
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
     PointCx<R, Pt, L, IL, X>: Ctx,
+    N: NoCycle<R, Pt, frunk_core::hlist::HNil>,
     N: Check<PointCx<R, Pt, L, IL, X>, P>,
     N: Takes<PointCx<R, Pt, L, IL, X>, P>,
     <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
@@ -146,6 +155,7 @@ pub fn assert_lends<R, Pt, L, N, IL, P>()
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
     PointCx<R, Pt, L, IL, ()>: Ctx,
+    N: NoCycle<R, Pt, frunk_core::hlist::HNil>,
     N: Check<PointCx<R, Pt, L, IL, ()>, P>,
     N: Takes<PointCx<R, Pt, L, IL, ()>, P>,
     <N as Takes<PointCx<R, Pt, L, IL, ()>, P>>::Touches: Disjoint + DeepEnoughAll,
@@ -163,6 +173,7 @@ pub fn assert_lends_in<R, Pt, X, L, N, IL, P>()
 where
     R: KindFor<Pt> + NodeKind + Locate<L, IL>,
     PointCx<R, Pt, L, IL, X>: Ctx,
+    N: NoCycle<R, Pt, frunk_core::hlist::HNil>,
     N: Check<PointCx<R, Pt, L, IL, X>, P>,
     N: Takes<PointCx<R, Pt, L, IL, X>, P>,
     <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
