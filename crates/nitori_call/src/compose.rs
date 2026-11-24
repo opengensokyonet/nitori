@@ -59,33 +59,39 @@ where
     }
 }
 
-/// An access adapted by composition state. It borrows its parent mutably,
-/// so the parent is unavailable while the adapted access exists. On each
-/// access the state composes on a [`ViewLoan`] of the parent's view, a view
-/// of [`Lent`], so the child view ends with that access; what must last
-/// longer is kept in the state.
+/// An access adapted by composition state. It holds its parent access by
+/// value: [`ReceiverAccess::compose`] gives it a `&mut` borrow of the
+/// parent, so the parent is unavailable while the adapted access exists, and
+/// [`Composed::new`] takes whatever access it is given, such as one passed
+/// into a function that returns the adapted access. On each access the state
+/// composes on a [`ViewLoan`] of the parent's view, a view of [`Lent`], so
+/// the child view ends with that access; what must last longer is kept in the
+/// state.
 #[derive(Debug)]
-pub struct Composed<'p, A: ?Sized, S> {
-    parent: &'p mut A,
+pub struct Composed<A, S> {
+    parent: A,
     state: S,
 }
-impl<'p, A: ?Sized, S> Composed<'p, A, S> {
-    pub(crate) fn new(parent: &'p mut A, state: S) -> Self {
+impl<A, S> Composed<A, S> {
+    /// Adapt the access `parent` by `state`. The state composes on [`Lent`]
+    /// views of the parent's family; pass `pin!(state)` for state that is not
+    /// `Unpin`.
+    pub fn new(parent: A, state: S) -> Self {
         Self { parent, state }
     }
-    /// Recover the composition state and end the parent borrow.
+    /// Recover the composition state, dropping the parent access; when that
+    /// is a `&mut` borrow, the borrow ends.
     pub fn into_state(self) -> S {
         self.state
     }
+    /// End the adaptation, returning the parent access and the state.
+    pub fn into_parts(self) -> (A, S) {
+        (self.parent, self.state)
+    }
 }
-impl<A: ReceiverAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> Sealed
-    for Composed<'_, A, S>
-{
-}
+impl<A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> Sealed for Composed<A, S> {}
 #[allow(private_bounds)]
-impl<A: ReceiverAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> ReceiverAccess
-    for Composed<'_, A, S>
-{
+impl<A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> ReceiverAccess for Composed<A, S> {
     type Family = S::Family;
     fn visit_view<V: ViewVisitor<S::Family>>(&mut self, visitor: V) -> V::Output {
         self.parent.visit_view(ComposeChild {
@@ -98,10 +104,7 @@ impl<A: ReceiverAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> ReceiverAc
         self.parent.release_point()
     }
 }
-impl<A: LentAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> LentAccess
-    for Composed<'_, A, S>
-{
-}
+impl<A: LentAccess, S: Compose<Lent<A::Family>> + Unpin> LentAccess for Composed<A, S> {}
 
 /// Builds the child view from a loan of the parent view before visiting it.
 struct ComposeChild<'q, F, S, V> {

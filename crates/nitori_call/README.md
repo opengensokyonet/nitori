@@ -449,7 +449,10 @@ fn main() {
 `io.compose(state)` returns a `Composed` access that borrows its parent
 mutably; on each access it builds the child view from the parent view and the
 state. The state must be `Unpin`; pass `pin!(state)` otherwise. `into_state`
-recovers it and ends the borrow. `Compose::compose` takes the parent view by
+recovers it and ends the borrow. `Composed` holds its parent by value, so
+`Composed::new(io, state)` adapts an access passed in by value, such as the `I`
+of a function `fn(io: I) -> Composed<I, S>` that wraps the access it is given;
+`into_parts` returns the parent and the state. `Compose::compose` takes the parent view by
 value. On an access the parent view is only borrowed for that access, so the
 state composes on `Lent<F>`, whose view is a `ViewLoan<'view, F>` that hides
 the parent view's inner lifetime: `loan.with(|access| ..)` lends it back for
