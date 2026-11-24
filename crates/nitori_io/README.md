@@ -214,7 +214,9 @@ Slices, `Bytes`, `BytesMut`, `VecDeque<u8>`, and the standard-library
 most `n` more bytes; past the budget a read reports EOF and a write accepts
 nothing, which `write_all` reports as zero progress; the composed access
 answers there without polling the parent. The budget survives Pending and cancellation, and `into_state` returns
-what remains. A read budget forwards the parent's read capabilities and can
+what remains. A budget kept with a receiver,
+`nitori_call::ComposedReceiver::new(receiver, ReadLimit(n))`, bounds every
+call on that receiver together and outlives each of them. A read budget forwards the parent's read capabilities and can
 also report an exact length when the parent supplies one. A write budget
 forwards `Write`.
 

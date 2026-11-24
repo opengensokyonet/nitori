@@ -458,6 +458,11 @@ pinned borrow of a place in the view, such as the value behind a lock guard.
 A capability reaches `Lent<F>` where it is implemented for it; `nitori_io`
 forwards its own.
 
+A state that composes on every family, as `ReadLimit` does, can also live
+with a receiver: `ComposedReceiver::new(receiver, state)` is a receiver whose
+view is the state composed on the inner receiver's view. Its state outlives
+each call on it, a cancelled call included, and calls on it can compose again.
+
 ## Receiver access
 
 `ReceiverAccess` is implemented by the slot a root operation receives, by

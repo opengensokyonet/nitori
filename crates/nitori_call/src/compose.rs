@@ -1,6 +1,6 @@
 //! Scoped adaptation of the current view into another family.
 use crate::{
-    LentAccess, ReceiverAccess, ReceiverFamily, ViewLoan, ViewOperation,
+    LentAccess, Receiver, ReceiverAccess, ReceiverFamily, ViewLoan, ViewOperation,
     access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
     loan::Lent,
 };
@@ -16,7 +16,9 @@ use core::{
 /// the state's borrow, for `'v`. Where the parent view is only borrowed for
 /// one access, as in [`ReceiverAccess::compose`] and
 /// [`drive_composed`](crate::drive_composed), the state composes on
-/// [`Lent<F>`](Lent), whose view is a [`ViewLoan`] of the parent's view.
+/// [`Lent<F>`](Lent), whose view is a [`ViewLoan`] of the parent's view; on
+/// a [`ComposedReceiver`], it composes on the inner receiver's family itself.
+/// A state written for every `F` serves both.
 pub trait Compose<F: ReceiverFamily> {
     type Family: ReceiverFamily;
     fn compose<'v>(
@@ -125,5 +127,49 @@ impl<F: ReceiverFamily, S: Compose<Lent<F>>, V: ViewVisitor<S::Family>> ViewVisi
 {
     fn absent(self, request: ViewRequest<'_>) -> V::Output {
         self.inner.absent(request)
+    }
+}
+
+pin_project_lite::pin_project! {
+    /// A receiver adapted by composition state that lives as long as the
+    /// receiver.
+    ///
+    /// Its view is the state composed on the inner receiver's view, which the
+    /// state takes by value. Unlike the state of [`Composed`], which an
+    /// operation holds, this state belongs to the receiver: it survives every
+    /// call on the receiver, a call dropped midway included, and stays
+    /// consistent with the inner receiver as long as the state records each
+    /// poll's progress in that poll. Operations on it can compose again, on
+    /// [`Lent`] views of its family.
+    #[derive(Debug)]
+    pub struct ComposedReceiver<T, S> {
+        #[pin]
+        inner: T,
+        #[pin]
+        state: S,
+    }
+}
+impl<T, S> ComposedReceiver<T, S> {
+    /// Adapt `inner` by `state`.
+    pub fn new(inner: T, state: S) -> Self {
+        Self { inner, state }
+    }
+    /// The inner receiver and the state.
+    pub fn get_ref(&self) -> (&T, &S) {
+        (&self.inner, &self.state)
+    }
+    /// End the adaptation, returning the inner receiver and the state.
+    pub fn into_parts(self) -> (T, S) {
+        (self.inner, self.state)
+    }
+}
+impl<T: Receiver, S: Compose<T::Family>> Receiver for ComposedReceiver<T, S> {
+    type Family = S::Family;
+    fn view<'v>(self: Pin<&'v mut Self>) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
+    where
+        Self::Family: 'v,
+    {
+        let this = self.project();
+        this.state.compose(this.inner.view())
     }
 }

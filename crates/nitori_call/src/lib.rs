@@ -190,7 +190,7 @@ pub use access::{Access, ReceiverAccess, ReceiverSlot, ReleaseView};
 mod lent;
 pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;
-pub use compose::{Compose, Composed};
+pub use compose::{Compose, Composed, ComposedReceiver};
 mod receivers;
 pub use receivers::{Accesses, Receivers};
 mod call;

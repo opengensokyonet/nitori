@@ -143,7 +143,9 @@ nitori_call::direct_receiver!(impl [T] for Chunked<T>);
 /// A read budget for a composed access: `io.compose(ReadLimit(n))` reads at
 /// most `n` more bytes from `io`, then reports EOF, so a child operation
 /// cannot read past a record boundary. The budget is retained across polls;
-/// `into_state` returns what remains.
+/// `into_state` returns what remains. It composes on any family, so it can
+/// also be kept with a receiver in a [`ComposedReceiver`], where it outlives
+/// each call on that receiver.
 ///
 /// At the boundary the composed access answers EOF itself, without polling the
 /// parent; within the budget, requests (empty ones included) reach the parent.
@@ -151,19 +153,23 @@ nitori_call::direct_receiver!(impl [T] for Chunked<T>);
 /// implements [`crate::ExactLen`] and its length can be bounded by this
 /// quota, the composed access reports their minimum. Use a typed literal
 /// such as `ReadLimit(6u8)` when there is no expected quota type.
+///
+/// [`ComposedReceiver`]: nitori_call::ComposedReceiver
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadLimit<L = usize>(pub L);
 
 /// A write budget for a composed access: `io.compose(WriteLimit(n))` accepts
 /// at most `n` more bytes, then accepts none, which [`write_all`] reports as
 /// zero progress. The budget is retained across polls; `into_state` returns
-/// what remains.
+/// what remains. Like [`ReadLimit`], it can be kept with a receiver in a
+/// [`ComposedReceiver`].
 ///
 /// At the boundary the composed access accepts nothing itself, without polling
 /// the parent; within the budget, requests (empty ones included) reach the
 /// parent. Only [`Write`] is available through the composed access.
 ///
 /// [`write_all`]: crate::calls::write_all
+/// [`ComposedReceiver`]: nitori_call::ComposedReceiver
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteLimit(pub usize);
 
