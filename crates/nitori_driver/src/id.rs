@@ -134,9 +134,52 @@ impl<H, B, T: PushBit<H>> PushBit<H> for BCons<B, T> {
     type Out = BCons<B, T::Out>;
 }
 
+/// Two lists of bits of one length, bit by bit and.
+#[doc(hidden)]
+pub trait And<B> {
+    /// The list of the bits set in both.
+    type Out;
+}
+impl And<BNil> for BNil {
+    type Out = BNil;
+}
+impl<T: And<U>, U> And<BCons<B0, U>> for BCons<B0, T> {
+    type Out = BCons<B0, T::Out>;
+}
+impl<T: And<U>, U> And<BCons<B1, U>> for BCons<B1, T> {
+    type Out = BCons<B1, T::Out>;
+}
+impl<T: And<U>, U> And<BCons<B1, U>> for BCons<B0, T> {
+    type Out = BCons<B0, T::Out>;
+}
+impl<T: And<U>, U> And<BCons<B0, U>> for BCons<B1, T> {
+    type Out = BCons<B0, T::Out>;
+}
+
+/// A list of bits `x` mixed with itself, not linearly:
+/// `x ⊕ (rotate₁(x) ∧ rotate₂(x))`.
+///
+/// Exclusive-or and rotation alone are linear, so the parameters of a
+/// nested generic type could cancel out: `Pair<Wrap<A>, A>` would have
+/// one number whatever `A` is. The and keeps them from it.
+#[doc(hidden)]
+pub trait Scramble {
+    /// The mixed list.
+    type Out;
+}
+impl<N, R1, R2> Scramble for N
+where
+    N: RotateLeft<Out = R1>,
+    R1: RotateLeft<Out = R2> + And<R2>,
+    N: Xor<<R1 as And<R2>>::Out>,
+{
+    type Out = <N as Xor<<R1 as And<R2>>::Out>>::Out;
+}
+
 /// The numbers of the type parameters of a generic type, one per
-/// position, as they are mixed into its own number: the first rotated by
-/// one, the second by two, and so on, then all of them exclusive-or.
+/// position, as they are mixed into its own number: each scrambled
+/// ([`Scramble`]), the first then rotated by one, the second by two, and
+/// so on, then all of them exclusive-or.
 ///
 /// What the derive mixes numbers with; not for use otherwise.
 #[doc(hidden)]
@@ -144,24 +187,30 @@ pub trait MixParams {
     /// The mixed numbers.
     type Out;
 }
-impl<N: RotateLeft> MixParams for HCons<N, HNil> {
-    type Out = N::Out;
+impl<N: Scramble> MixParams for HCons<N, HNil>
+where
+    N::Out: RotateLeft,
+{
+    type Out = <N::Out as RotateLeft>::Out;
 }
 impl<N, M, T> MixParams for HCons<N, HCons<M, T>>
 where
     HCons<M, T>: MixParams,
-    N: Xor<<HCons<M, T> as MixParams>::Out>,
-    <N as Xor<<HCons<M, T> as MixParams>::Out>>::Out: RotateLeft,
+    N: Scramble,
+    N::Out: Xor<<HCons<M, T> as MixParams>::Out>,
+    <N::Out as Xor<<HCons<M, T> as MixParams>::Out>>::Out: RotateLeft,
 {
-    type Out = <<N as Xor<<HCons<M, T> as MixParams>::Out>>::Out as RotateLeft>::Out;
+    type Out = <<N::Out as Xor<<HCons<M, T> as MixParams>::Out>>::Out as RotateLeft>::Out;
 }
 
 /// The number of a generic type: its own number `Own` exclusive-or the
-/// numbers of its type parameters `Params` (an `HList`), each rotated by
-/// its position.
+/// numbers of its type parameters `Params` (an `HList`), each scrambled
+/// and rotated by its position ([`MixParams`]).
 ///
 /// Rotating keeps the parameters' places apart, so `Pair<A, B>` and
-/// `Pair<B, A>` differ, and so do `Wrap<Wrap<X>>` and `X`.
+/// `Pair<B, A>` differ, and so do `Wrap<Wrap<X>>` and `X`; scrambling
+/// keeps a parameter that comes in twice from cancelling out, so
+/// `Pair<Wrap<A>, A>` and `Pair<Wrap<B>, B>` differ.
 pub type Mixed<Own, Params> = <Own as Xor<<Params as MixParams>::Out>>::Out;
 
 #[cfg(test)]

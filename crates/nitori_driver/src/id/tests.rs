@@ -56,3 +56,11 @@ fn derived_numbers_tell_types_apart() {
     differ::<Wrap<Credit>, Credit>();
     differ::<Pair<Credit, Credit>, Pair<Keys, Keys>>();
 }
+
+/// A parameter that comes in twice at one rotation does not cancel out.
+#[test]
+fn repeated_parameters_do_not_cancel() {
+    differ::<Pair<Wrap<Credit>, Credit>, Pair<Wrap<Keys>, Keys>>();
+    differ::<Pair<Pair<Credit, Keys>, Credit>, Pair<Pair<Keys, Keys>, Keys>>();
+    differ::<Pair<Wrap<Wrap<Credit>>, Wrap<Credit>>, Pair<Wrap<Wrap<Keys>>, Wrap<Keys>>>();
+}
