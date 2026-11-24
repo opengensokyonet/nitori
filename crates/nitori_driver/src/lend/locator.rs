@@ -7,12 +7,13 @@ use frunk_core::hlist::{HCons, HNil};
 use super::{
     Lend,
     check::{
-        Check, CountChain, CountTree, ExactlyOneBelow, ExactlyOneUp, Spell, Takes, Touch, UpCount,
+        Check, CountChain, CountTree, Deep, DeepIf, ExactlyOneBelow, ExactlyOneUp, Spell, Takes,
+        TakesExclusive, Touch, UpCount,
     },
     context::Asks,
     list::{Append, Len, Prefix},
     plan::{NodeSet, Plan},
-    tree::{Collect, Ctx, Cx, DepthGe, FindBelow, FindUp, ToShape},
+    tree::{Collect, Ctx, Cx, FindBelow, FindUp, ToShape},
     under::MRoute,
     up::{UpFk, UpKind, UpPre},
 };
@@ -81,7 +82,6 @@ where
     PI: Pos,
     PT: Pos,
     C::Chain: FindUp<A, IA>,
-    IA: DepthGe<C::Depth>,
     UpKind<C, A, IA>: FindBelow<C::Parts, X, IK, Sh = Sh>,
     Sh: ToShape + Collect<UpFk<C, A, IA>, LocFk<C, A, IA, X, IK>, C::Fk>,
     <Sh as ToShape>::Shape: Shape<Key = L::Key>,
@@ -107,7 +107,7 @@ where
     {
         let input = <L::Input as Lend<C, PI>>::build(ins, at);
         let anchor: UpFk<C, A, IA> = at.prefix();
-        let all = Sh::collect(rows, &anchor, at, |m| m.clone());
+        let all = Sh::collect(rows, &anchor, at, false, |m| m.clone());
         let (keys, members): (Vec<L::Key>, Vec<LocFk<C, A, IA, X, IK>>) =
             all.iter().map(|(k, m)| (k.clone(), m.clone())).unzip();
         let picked = L::pick::<PI>(input, &keys)
@@ -127,7 +127,6 @@ where
     C::Chain: CountChain<A>,
     <C::Chain as CountChain<A>>::N: Spell,
     UpCount<C, A>: ExactlyOneUp<A>,
-    IA: DepthGe<C::Depth>,
     Self: CheckAmong<C, IA, IK, Sh, PI, PT>,
 {
 }
@@ -179,6 +178,7 @@ impl<L, K> PicksBy<L, K> for K {}
 pub trait OnlyReads {}
 impl OnlyReads for HNil {}
 impl<Rt, X, E: InputReads<X>, T: OnlyReads> OnlyReads for HCons<Touch<Rt, X, E>, T> {}
+impl<I, Sd, W, T: OnlyReads> OnlyReads for HCons<Deep<I, Sd, W>, T> {}
 impl<I, R, T: OnlyReads> OnlyReads for HCons<Asks<I, R>, T> where
     True: InputReads<crate::need::RequestBox<R>>
 {
@@ -201,8 +201,17 @@ where
     UpKind<C, A, IA>: FindBelow<C::Parts, X, IK, Sh = Sh>,
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, X, IK>>::Rel>,
     LocCx<C, A, IA, X, IK>: Ctx,
-    T: Takes<LocCx<C, A, IA, X, IK>, PT>,
+    T: Takes<LocCx<C, A, IA, X, IK>, PT> + TakesExclusive,
+    T::Out: DeepIf<Deep<IA, C::Depth, Self>>,
     <L::Input as Takes<C, PI>>::Touches: Append<T::Touches>,
+    <T::Out as DeepIf<Deep<IA, C::Depth, Self>>>::Out:
+        Append<<<L::Input as Takes<C, PI>>::Touches as Append<T::Touches>>::Out>,
 {
-    type Touches = <<L::Input as Takes<C, PI>>::Touches as Append<T::Touches>>::Out;
+    /// The anchor's depth, when what is taken at the node picked is
+    /// exclusive, since the candidates below an anchor above the members
+    /// are not all in one member; what the input and the need at the node
+    /// picked take.
+    type Touches = <<T::Out as DeepIf<Deep<IA, C::Depth, Self>>>::Out as Append<
+        <<L::Input as Takes<C, PI>>::Touches as Append<T::Touches>>::Out,
+    >>::Out;
 }

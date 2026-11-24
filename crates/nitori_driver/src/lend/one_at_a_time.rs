@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use super::{
-    check::{CheckBody, TakesBody},
-    list::{Len, Z},
+    check::{CheckBody, TakesBody, TakesExclusive},
+    list::Len,
     plan::{Plan, Rebor},
     tree::{Collect, Ctx, UnderPos},
     under::{Body, Gather, UnderBody},
@@ -41,10 +41,11 @@ where
     T::build(<T::Cols as Rebor>::rebor(hs), &members[i])
 }
 
-/// The members, lent one at a time, may take exclusive what they share.
+/// The members, lent one at a time, may take exclusive what they share,
+/// but not what the members of an `Under` around them share.
 impl<T: UnderBody> UnderBody for OneAtATime<T> {
     type B = T::B;
-    type Depth<Rt: Len> = Z;
+    type Depth<Rt: Len, Sd> = Sd;
 }
 
 impl<MC, AF, LF, IA: 'static, IK: 'static, Sh, T, PT: Pos, Cs, MF>
@@ -62,11 +63,12 @@ where
         hs: Cs::Hs<'a>,
         anchor: &AF,
         at: &LF,
+        line: bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, OnePos<PT, Cs, MF>>>
     where
         Self: 'a,
     {
-        let all = Sh::collect(rows, anchor, at, |m| m.clone());
+        let all = Sh::collect(rows, anchor, at, line, |m| m.clone());
         let (keys, members) = <<Sh::Shape as Shape>::Out<MF> as Members<MF>>::iter(&all)
             .map(|(k, m)| (k.clone(), m.clone()))
             .unzip();
@@ -75,6 +77,9 @@ where
 }
 
 impl<MC, T: CheckBody<MC, PT>, PT, Cs, MF> CheckBody<MC, OnePos<PT, Cs, MF>> for OneAtATime<T> {}
+impl<T: TakesExclusive> TakesExclusive for OneAtATime<T> {
+    type Out = T::Out;
+}
 impl<MC, T: TakesBody<MC, PT>, PT, Cs, MF> TakesBody<MC, OnePos<PT, Cs, MF>> for OneAtATime<T> {
     type Touches = T::Touches;
 }

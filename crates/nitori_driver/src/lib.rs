@@ -23,6 +23,4 @@ pub mod structure;
 /// What the examples of the documentation prove needs with. Not for use;
 /// nothing here is stable.
 #[doc(hidden)]
-pub mod __private {
-    pub use crate::lend::{assert_lends, assert_lends_in};
-}
+pub mod __private;

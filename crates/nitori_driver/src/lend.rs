@@ -19,6 +19,7 @@ pub(crate) mod check;
 pub(crate) mod context;
 pub(crate) mod list;
 pub(crate) mod locator;
+pub(crate) mod members;
 pub(crate) mod one_at_a_time;
 pub(crate) mod own;
 pub(crate) mod plan;
@@ -32,7 +33,7 @@ pub(crate) mod waker;
 #[cfg(test)]
 mod tests;
 
-use check::{Check, Disjoint, Takes};
+use check::{Check, DeepEnoughAll, Disjoint, Takes};
 pub(crate) use context::LendContext;
 use plan::{Plan, Run};
 use table::{KindTab, TabAt};
@@ -72,7 +73,6 @@ pub trait Visit<N: Need> {
 ///
 /// The position `P` is inferred, or given by the caller that proved it
 /// elsewhere.
-#[allow(clippy::type_complexity)]
 pub(crate) fn lend<R, Pt: 'static, L, IL, N, P, X, F, O>(
     root: &mut Node<R, Pt>,
     at: &PointFk<R, Pt, L, IL, X>,
@@ -84,7 +84,7 @@ where
     PointCx<R, Pt, L, IL, X>: Ctx,
     N: Check<PointCx<R, Pt, L, IL, X>, P>,
     N: Takes<PointCx<R, Pt, L, IL, X>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint,
+    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
     R: TabAt<
@@ -110,7 +110,6 @@ where
 }
 
 /// [`lend`], handing the view to code generic over its position.
-#[allow(clippy::type_complexity)]
 pub(crate) fn lend_visit<R, Pt: 'static, L, IL, N, P, X, V>(
     root: &mut Node<R, Pt>,
     at: &PointFk<R, Pt, L, IL, X>,
@@ -122,7 +121,7 @@ where
     PointCx<R, Pt, L, IL, X>: Ctx,
     N: Check<PointCx<R, Pt, L, IL, X>, P>,
     N: Takes<PointCx<R, Pt, L, IL, X>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint,
+    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
     R: TabAt<
@@ -149,7 +148,7 @@ where
     PointCx<R, Pt, L, IL, ()>: Ctx,
     N: Check<PointCx<R, Pt, L, IL, ()>, P>,
     N: Takes<PointCx<R, Pt, L, IL, ()>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL, ()>, P>>::Touches: Disjoint,
+    <N as Takes<PointCx<R, Pt, L, IL, ()>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, ()>, P>,
     P: Pos,
 {
@@ -166,7 +165,7 @@ where
     PointCx<R, Pt, L, IL, X>: Ctx,
     N: Check<PointCx<R, Pt, L, IL, X>, P>,
     N: Takes<PointCx<R, Pt, L, IL, X>, P>,
-    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint,
+    <N as Takes<PointCx<R, Pt, L, IL, X>, P>>::Touches: Disjoint + DeepEnoughAll,
     N: Lend<PointCx<R, Pt, L, IL, X>, P>,
     P: Pos,
     X: LendContext,

@@ -11,10 +11,11 @@ use core::marker::PhantomData;
 use frunk_core::hlist::{HCons, HNil};
 
 use super::{
-    list::{Append, IncIf, Len, Or, RouteEq, S, Sum, Z},
+    list::{And, Append, IncIf, Len, NonZero, Or, RouteEq, S, Sum, Z},
+    members::AllOf,
     own::KeyIs,
     tree::{
-        AddressPos, AtMember, AtPos, Ctx, DepthGe, FindBelow, FindUp, KeyPos, MemberPos, On,
+        AddressPos, AtMember, AtPos, Ctx, FindBelow, FindUp, Found, KeyPos, MemberPos, Next, On,
         UnderPos, UpPos,
     },
     under::{MCx, MRoute, UnderBody},
@@ -60,6 +61,40 @@ where
     type N = <Cs::N as Sum<T::N>>::Out;
 }
 
+/// How many times a kind whose components are `Cs` counts as having
+/// `Self`: a component, or all the components of a list.
+pub trait CountKind<Cs> {
+    /// The count.
+    type N;
+}
+impl<X: Numbered, Cs: CountIn<X>> CountKind<Cs> for X {
+    type N = Cs::N;
+}
+impl<L: AllIn<Cs>, Cs> CountKind<Cs> for AllOf<L>
+where
+    L::Out: IncIf<Z>,
+{
+    type N = <L::Out as IncIf<Z>>::Out;
+}
+/// Whether every component of the list `Self` is among the components
+/// `Cs`.
+pub trait AllIn<Cs> {
+    /// [`True`] or [`False`].
+    type Out;
+}
+impl<Cs> AllIn<Cs> for HNil {
+    type Out = True;
+}
+impl<Cs, X, T> AllIn<Cs> for HCons<X, T>
+where
+    Cs: CountIn<X>,
+    T: AllIn<Cs>,
+    <Cs as CountIn<X>>::N: NonZero,
+    <<Cs as CountIn<X>>::N as NonZero>::Out: And<T::Out>,
+{
+    type Out = <<<Cs as CountIn<X>>::N as NonZero>::Out as And<T::Out>>::Out;
+}
+
 /// How many kinds at or below the kind `Self` have `X`, for the parts `Pt`.
 pub trait CountTree<Pt, X> {
     /// The count.
@@ -69,11 +104,11 @@ impl<Pt, X, K: NodeKind> CountTree<Pt, X> for K
 where
     Pt: Shares<K>,
     Pt::Data: super::tree::FlatData,
-    super::tree::Comps<K, Pt>: CountIn<X>,
+    X: CountKind<super::tree::Comps<K, Pt>>,
     K::Children: CountKids<Pt, X>,
-    <super::tree::Comps<K, Pt> as CountIn<X>>::N: Sum<<K::Children as CountKids<Pt, X>>::N>,
+    <X as CountKind<super::tree::Comps<K, Pt>>>::N: Sum<<K::Children as CountKids<Pt, X>>::N>,
 {
-    type N = <<super::tree::Comps<K, Pt> as CountIn<X>>::N as Sum<
+    type N = <<X as CountKind<super::tree::Comps<K, Pt>>>::N as Sum<
         <K::Children as CountKids<Pt, X>>::N,
     >>::Out;
 }
@@ -132,7 +167,7 @@ impl<X> ExactlyOneUp<X> for One {}
 #[diagnostic::on_unimplemented(
     message = "taking `{X}` below the anchor: `{Self}` of the kinds at or below it have it, and exactly one must",
     label = "no kind, or more than one, below the anchor has this component",
-    note = "the members of `Under<A, T>` are the nodes of the one kind, at or below the anchor, that has the component `T` takes"
+    note = "the members of `Under<A, T>` are the nodes of the one kind, at or below the anchor, that has the component `T` takes, or, `T` being a list, all the components its needs take (`AllOf`)"
 )]
 pub trait ExactlyOneBelow<X> {}
 impl<X> ExactlyOneBelow<X> for One {}
@@ -205,7 +240,6 @@ where
     C::Chain: CountChain<X>,
     <C::Chain as CountChain<X>>::N: Spell,
     UpCount<C, X>: ExactlyOneUp<X>,
-    I: DepthGe<C::Depth>,
 {
 }
 impl<C: Ctx, X, I> Check<C, UpPos<I>> for Ref<X>
@@ -235,10 +269,10 @@ where
 }
 impl<C: Ctx, A, Bd, IA, IK, Sh, PB> Check<C, UnderPos<IA, IK, Sh, PB>> for Under<A, Bd>
 where
+    Bd: UnderBody,
     C::Chain: CountChain<A>,
     <C::Chain as CountChain<A>>::N: Spell,
     UpCount<C, A>: ExactlyOneUp<A>,
-    IA: DepthGe<C::Depth>,
     Self: CheckBelow<C, IA, IK, Sh, PB>,
 {
 }
@@ -268,6 +302,89 @@ where
     Bd: CheckBody<MCx<C, A, IA, Bd, IK>, PB>,
 {
 }
+
+/// Whether the need `Self` takes anything exclusive: a component, or a
+/// request box. It follows from the need alone, wherever it is lent.
+pub trait TakesExclusive {
+    /// [`True`] or [`False`].
+    type Out;
+}
+impl TakesExclusive for HNil {
+    type Out = False;
+}
+impl<N: TakesExclusive, T: TakesExclusive> TakesExclusive for HCons<N, T>
+where
+    N::Out: Or<T::Out>,
+{
+    type Out = <N::Out as Or<T::Out>>::Out;
+}
+impl<X> TakesExclusive for Mut<X> {
+    type Out = True;
+}
+impl<X> TakesExclusive for Ref<X> {
+    type Out = False;
+}
+impl<B, T: TakesExclusive> TakesExclusive for At<B, T> {
+    type Out = T::Out;
+}
+impl<A, T: TakesExclusive> TakesExclusive for Under<A, T> {
+    type Out = T::Out;
+}
+impl<K> TakesExclusive for OwnKey<K> {
+    type Out = False;
+}
+impl TakesExclusive for OwnAddress {
+    type Out = False;
+}
+// ------------------------------------------------------------------ depth
+
+/// What `W` takes, found up the chain at `I`, where the depth of the
+/// members being lent is `Sd`: it is taken exclusive, so it is at or below
+/// the members ([`DeepAt`]). A `Mut`, and a nested `Under` or a locator
+/// that takes anything exclusive, whose anchor it is, are taken so.
+///
+/// It is among what the needs take, so that the check runs where the
+/// overlaps are checked, on the whole list, and gives its reason however
+/// deep the need is.
+pub struct Deep<I, Sd, W>(PhantomData<fn() -> (I, Sd, W)>);
+
+/// `HCons<M, HNil>` when `Self` is [`True`], what is taken being
+/// exclusive, `HNil` otherwise.
+pub trait DeepIf<M> {
+    /// The list.
+    type Out;
+}
+impl<M> DeepIf<M> for True {
+    type Out = HCons<M, HNil>;
+}
+impl<M> DeepIf<M> for False {
+    type Out = HNil;
+}
+
+/// The node found up the chain at `Self` is at or below the depth `Sd` of
+/// the members being lent, so that `W`, which takes there exclusive, does
+/// not take what the members share.
+#[diagnostic::on_unimplemented(
+    message = "`{W}` inside `Under` takes exclusive above the members, which share it",
+    label = "every member would borrow the same node",
+    note = "inside `Under<A, ..>`, `Mut` is taken at each member or below it, and so is the anchor of a nested `Under` or of a locator that takes anything exclusive; what the members share above them is only read; `OneAtATime` lends the members one at a time"
+)]
+pub trait DeepAt<W, Sd> {}
+impl<J, W> DeepAt<W, Z> for Found<J> {}
+impl<I, W> DeepAt<W, Z> for Next<I> {}
+impl<I: DeepAt<W, Sd>, W, Sd> DeepAt<W, S<Sd>> for Next<I> {}
+
+/// Everything a list of takings takes exclusive up the chain is at or
+/// below the members ([`Deep`]).
+pub trait DeepEnoughAll {}
+impl DeepEnoughAll for HNil {}
+impl<R, X, E, T: DeepEnoughAll> DeepEnoughAll for HCons<Touch<R, X, E>, T> {}
+impl<I: DeepAt<W, Sd>, Sd, W, T: DeepEnoughAll> DeepEnoughAll for HCons<Deep<I, Sd, W>, T> {}
+
+impl<R, X, E, I, Sd, W> Clash<Deep<I, Sd, W>> for Touch<R, X, E> {
+    type Out = False;
+}
+impl<I, Sd, W, H, T> DisjointFrom<Deep<I, Sd, W>> for HCons<H, T> {}
 impl<C: Ctx, K> Check<C, KeyPos> for OwnKey<K> where C::Storage: KeyIs<K> {}
 impl<C: Ctx, A> Check<C, AddressPos<A>> for OwnAddress {}
 
@@ -299,7 +416,7 @@ impl<C: Ctx, X, I> Takes<C, UpPos<I>> for Mut<X>
 where
     C::Chain: FindUp<X, I>,
 {
-    type Touches = HCons<Touch<UpPre<C, X, I>, X, True>, HNil>;
+    type Touches = HCons<Touch<UpPre<C, X, I>, X, True>, HCons<Deep<I, C::Depth, Self>, HNil>>;
 }
 impl<C: Ctx, X, I> Takes<C, UpPos<I>> for Ref<X>
 where
@@ -323,9 +440,17 @@ where
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, Bd::B, IK>>::Rel>,
     MRoute<C, A, IA, Bd::B, IK>: Len,
     MCx<C, A, IA, Bd, IK>: Ctx,
-    Bd: TakesBody<MCx<C, A, IA, Bd, IK>, PB>,
+    Bd: TakesBody<MCx<C, A, IA, Bd, IK>, PB> + TakesExclusive,
+    // The anchor's depth, when the members take anything exclusive: the
+    // nodes below an anchor above the members of an `Under` around it are
+    // not all in one of them.
+    Bd::Out: DeepIf<Deep<IA, C::Depth, Self>>,
+    <Bd::Out as DeepIf<Deep<IA, C::Depth, Self>>>::Out:
+        Append<<Bd as TakesBody<MCx<C, A, IA, Bd, IK>, PB>>::Touches>,
 {
-    type Touches = <Bd as TakesBody<MCx<C, A, IA, Bd, IK>, PB>>::Touches;
+    type Touches = <<Bd::Out as DeepIf<Deep<IA, C::Depth, Self>>>::Out as Append<
+        <Bd as TakesBody<MCx<C, A, IA, Bd, IK>, PB>>::Touches,
+    >>::Out;
 }
 impl<C: Ctx, K> Takes<C, KeyPos> for OwnKey<K> {
     type Touches = HNil;

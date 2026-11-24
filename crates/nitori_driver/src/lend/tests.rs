@@ -7,6 +7,7 @@ mod fixtures;
 mod generic;
 mod locator;
 mod logged;
+mod member_list;
 mod one_at_a_time;
 mod overlap;
 mod plus;

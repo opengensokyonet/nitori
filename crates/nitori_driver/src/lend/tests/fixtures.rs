@@ -178,6 +178,38 @@ pub fn tree_one() -> Node<Conn1, Parts> {
     root
 }
 
+/// Structure one holding what structure two does: logical path 10 with
+/// entries and links 1 and 2, recovery on 1, and the connection's state of
+/// structure two.
+pub fn tree_one_as_two() -> Node<Conn1, Parts> {
+    let mut root = Node::new(hlist![
+        hlist![ConnCore::default(), Keys { epoch: 3 }],
+        hlist![RecoveryFactory { made: 7 }]
+    ]);
+    let path = insert(
+        &mut root,
+        End,
+        PathKey(10),
+        Node::<LogicalPath, Parts>::new(hlist![hlist![], hlist![SentRecords::default()]]),
+    )
+    .ok()
+    .expect("the parent is there and the key is free");
+    for l in [1, 2] {
+        insert(&mut root, path, LinkId(l), entry(l))
+            .ok()
+            .expect("the parent is there and the key is free");
+        let link = insert(&mut root, path, LinkId(l), link_path(l))
+            .ok()
+            .expect("the parent is there and the key is free");
+        if l == 1 {
+            insert(&mut root, link, (), recovery())
+                .ok()
+                .expect("the parent is there and the key is free");
+        }
+    }
+    root
+}
+
 /// Structure two: entries 1 and 2; link paths 1 and 2; recovery on 1.
 pub fn tree_two() -> Node<Conn2, Parts> {
     let mut root = Node::new(hlist![

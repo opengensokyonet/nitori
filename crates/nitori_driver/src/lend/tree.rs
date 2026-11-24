@@ -8,7 +8,7 @@ use frunk_core::{
     indices::{Here, There},
 };
 
-use super::list::{Append, Concat, KeyTuple, PushKey, S, SameBranch, ShiftFirst, Z};
+use super::list::{Append, Concat, KeyTuple, PushKey, SameBranch, ShiftFirst};
 use crate::{
     need::{KeyedBy, Optional, Pos, Shape, Single},
     structure::{
@@ -92,6 +92,15 @@ pub type Comps<K, Pt> = <<Pt as Shares<K>>::Data as FlatData>::Flat;
 pub trait Elem<X, J> {}
 impl<X, T> Elem<X, Here> for HCons<X, T> {}
 impl<X, H, T: Elem<X, J>, J> Elem<X, There<J>> for HCons<H, T> {}
+
+/// A kind whose components are `Cs` has `Self`, a component or all the
+/// components of a list ([`AllOf`](super::members::AllOf)), at the
+/// positions `J` (inferred).
+///
+/// What is looked for is `Self`, so that, not known yet, it leaves the
+/// search undecided rather than searching every list.
+pub trait FoundIn<Cs, J> {}
+impl<X: crate::id::Numbered, Cs: Elem<X, J>, J> FoundIn<Cs, J> for X {}
 
 // ------------------------------------------------------------------ storage kinds
 
@@ -343,18 +352,6 @@ impl<X, H, T: FindUp<X, I>, I> FindUp<X, Next<I>> for HCons<H, T> {
     type Col = T::Col;
 }
 
-/// The node found up the chain is at or below the depth `Sd` of the
-/// members being lent, so the members do not share it.
-#[diagnostic::on_unimplemented(
-    message = "an exclusive need or an anchor inside `Under` is above the members, which share it",
-    label = "every member would borrow the same node",
-    note = "inside `Under<A, ..>`, `Mut` and the anchor of a nested `Under` are taken at each member or below it; what the members share above them can only be `Ref`"
-)]
-pub trait DepthGe<Sd> {}
-impl<J> DepthGe<Z> for Found<J> {}
-impl<I> DepthGe<Z> for Next<I> {}
-impl<I: DepthGe<Sd>, Sd> DepthGe<S<Sd>> for Next<I> {}
-
 // ------------------------------------------------------------------ down
 
 /// The members are the anchor itself.
@@ -422,7 +419,7 @@ impl<Pt, X, K: NodeKind, J> FindBelow<Pt, X, AtSelf<J>> for K
 where
     Pt: Shares<K>,
     Pt::Data: FlatData,
-    Comps<K, Pt>: Elem<X, J>,
+    X: FoundIn<Comps<K, Pt>, J>,
 {
     type Rel = HNil;
     type Col = J;
@@ -465,11 +462,15 @@ where
 /// keys `rows` of the nodes of the members' kind: the anchor's full key is
 /// `AF`, a member's `MF`, the lend point's `LF`.
 pub trait Collect<AF, MF, LF>: ToShape {
-    /// The result, `f` called for each member.
+    /// The result, `f` called for each member; `line` is whether the
+    /// members' kind and the lend point's are on one line from the root
+    /// ([`RouteLine`](super::list::RouteLine)), without which no member is
+    /// in the lend point's own branch.
     fn collect<V>(
         rows: &[&MF],
         anchor: &AF,
         at: &LF,
+        line: bool,
         f: impl FnMut(&MF) -> V,
     ) -> <Self::Shape as Shape>::Out<V>;
 }
@@ -478,6 +479,7 @@ impl<AF, LF> Collect<AF, AF, LF> for ShSelf {
         _: &[&AF],
         anchor: &AF,
         _: &LF,
+        _: bool,
         mut f: impl FnMut(&AF) -> V,
     ) -> crate::need::SingleView<V> {
         // The anchor is on the chain of the lend point, which is there.
@@ -485,7 +487,13 @@ impl<AF, LF> Collect<AF, AF, LF> for ShSelf {
     }
 }
 impl<AF: PartialEq, LF> Collect<AF, AF, LF> for ShOpt {
-    fn collect<V>(rows: &[&AF], anchor: &AF, _: &LF, mut f: impl FnMut(&AF) -> V) -> Option<V> {
+    fn collect<V>(
+        rows: &[&AF],
+        anchor: &AF,
+        _: &LF,
+        _: bool,
+        mut f: impl FnMut(&AF) -> V,
+    ) -> Option<V> {
         rows.contains(&anchor).then(|| f(anchor))
     }
 }
@@ -497,12 +505,14 @@ where
         rows: &[&AF::Out],
         anchor: &AF,
         at: &LF,
+        line: bool,
         mut f: impl FnMut(&AF::Out) -> V,
     ) -> crate::need::KeyedView<KL::Tuple, V> {
         crate::need::KeyedView::new(
             rows.iter()
                 .filter_map(|r| {
-                    AF::strip(r, anchor).map(|keys| (keys.to_tuple(), f(r), r.same_branch(at)))
+                    AF::strip(r, anchor)
+                        .map(|keys| (keys.to_tuple(), f(r), line && r.same_branch(at)))
                 })
                 .collect(),
         )

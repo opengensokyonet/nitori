@@ -16,46 +16,16 @@ use super::{Need, Pos};
 /// Each branch is checked as a list of its own, so needs inside one branch
 /// still must not overlap; the branches are not checked against one
 /// another. Against the other needs of the list, a `Plus` takes every
-/// component any branch takes, all of them exclusive. [`needs!`](crate::needs!) writes it
-/// as `(A + B)`.
+/// component any branch takes: exclusive when a branch takes it exclusive,
+/// shared when every branch only reads it. [`needs!`](crate::needs!)
+/// writes it as `(A + B)`.
 ///
 /// From a link path, every link core of the connection or the lend
 /// point's own, beside the sent records and the planner:
 ///
 /// ```
 /// # use nitori_driver::needs;
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(
 ///     LinkPath,
 ///     needs![
@@ -70,125 +40,49 @@ use super::{Need, Pos};
 ///
 /// ```compile_fail,E0277
 /// # use nitori_driver::needs;
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(
 ///     LinkPath,
 ///     needs![(HList![Mut<LinkCore>, Under<ConnCore, Ref<LinkCore>>] + Ref<Planner>)]
 /// );
 /// ```
 ///
-/// and neither does a need beside the `Plus` that takes a component one of
-/// its branches takes, even shared by both:
+/// A need beside the `Plus` that reads a component every branch only
+/// reads does not overlap it:
 ///
-/// ```compile_fail,E0277
+/// ```
 /// # use nitori_driver::needs;
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(LinkPath, needs![Ref<Planner>, (Ref<Planner> + Ref<LinkCore>)]);
 /// ```
 ///
-/// Inside an [`Under`](super::Under), a `Plus` takes at each member or
-/// below it only, since what it takes is exclusive: the recoveries of one
-/// logical path share its sent records.
+/// but one beside a branch that takes it exclusive does:
 ///
 /// ```compile_fail,E0277
 /// # use nitori_driver::needs;
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends!(LinkPath, needs![Ref<Planner>, (Mut<Planner> + Ref<LinkCore>)]);
+/// ```
+///
+/// Inside an [`Under`](super::Under), what a branch takes exclusive is at
+/// each member or below it, and what it takes above only read: the
+/// recoveries of one logical path share its sent records.
+///
+/// ```
+/// # use nitori_driver::needs;
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(
 ///     Conn,
 ///     HList![Under<ConnCore, At<Congestion, needs![(Mut<Congestion> + Ref<SentRecords>)]>>]
+/// );
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use nitori_driver::needs;
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends!(
+///     Conn,
+///     HList![Under<ConnCore, At<Congestion, needs![(Mut<Congestion> + Mut<SentRecords>)]>>]
 /// );
 /// ```
 pub struct Plus<Bs>(PhantomData<fn() -> Bs>);
@@ -287,38 +181,7 @@ impl<'t, Bs: BranchAt<T, I>, T: Need, I, P: Pos> Take<T, I> for PlusView<'t, Bs,
 ///
 /// ```
 /// # use nitori_driver::needs;
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(LinkPath, needs![Mut<Planner>, (Ref<LinkCore> + Under<ConnCore, Ref<LinkCore>>)]);
 /// ```
 #[macro_export]

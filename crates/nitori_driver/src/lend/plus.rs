@@ -1,11 +1,12 @@
 //! `+`: what the branches take, lent once as one union, and the handles of
 //! a branch picked out of it each time the branch is taken.
 //!
-//! The union is a flat list of exclusive columns and node sets, each once
-//! ([`Norm`], [`Dedup`]); a column any branch takes, exclusive or shared,
-//! is in it exclusive. Taking a branch borrows the union again: first the
-//! branch's exclusive columns, each lent again for the branch, then the
-//! rest read through for its shared columns and node sets ([`Pick`]).
+//! The union is a flat list of columns and node sets, each once ([`Norm`],
+//! [`Dedup`]); a column some branch takes exclusive is in it exclusive, one
+//! every branch only reads is in it shared. Taking a branch borrows the
+//! union again: first the branch's exclusive columns, each lent again for
+//! the branch, then the rest read through for its shared columns and node
+//! sets ([`Pick`]).
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
@@ -16,8 +17,8 @@ use frunk_core::{
 
 use super::{
     Lend,
-    check::{Check, Disjoint, Takes, Touch},
-    list::{And, Append, FirstTrue, IndexEq, Len, Nowhere, Or, RouteEq, S, Z},
+    check::{Check, Deep, Disjoint, Takes, TakesExclusive, Touch},
+    list::{And, Append, FirstTrue, IndexEq, Nowhere, Or, RouteEq},
     plan::{ExCol, NodeSet, Plan, ShCol, Shared},
     tree::Ctx,
 };
@@ -28,7 +29,7 @@ use crate::{
 
 // ------------------------------------------------------------------ the union
 
-/// A plan as the flat list of what it takes, a column as an exclusive one.
+/// A plan as the flat list of what it takes.
 pub trait Norm {
     /// The flat list.
     type Out;
@@ -55,23 +56,37 @@ impl<Rt, J, F, X> Norm for ExCol<Rt, J, F, X> {
     type Out = HCons<ExCol<Rt, J, F, X>, HNil>;
 }
 impl<Rt, J, F, X> Norm for ShCol<Rt, J, F, X> {
-    type Out = HCons<ExCol<Rt, J, F, X>, HNil>;
+    type Out = HCons<ShCol<Rt, J, F, X>, HNil>;
 }
 impl<Rt, F> Norm for NodeSet<Rt, F> {
     type Out = HCons<NodeSet<Rt, F>, HNil>;
 }
 
-/// Whether two items of a flat plan are the same column or node set.
+/// Whether two items of a flat plan are the same column, exclusive or
+/// shared, or the same node set.
 pub trait SameItem<B> {
     /// [`True`] or [`False`].
     type Out;
 }
-impl<R1: RouteEq<R2>, J1: IndexEq<J2>, F1, X1, R2, J2, F2, X2> SameItem<ExCol<R2, J2, F2, X2>>
-    for ExCol<R1, J1, F1, X1>
-where
-    R1::Out: And<J1::Out>,
-{
-    type Out = <R1::Out as And<J1::Out>>::Out;
+/// Whether two columns are the same: of the kind at one route, at one
+/// position of its components.
+pub type SameCol<R1, J1, R2, J2> = <<R1 as RouteEq<R2>>::Out as And<<J1 as IndexEq<J2>>::Out>>::Out;
+macro_rules! same_col {
+    ($($a:ident $b:ident;)*) => {$(
+        impl<R1: RouteEq<R2>, J1: IndexEq<J2>, F1, X1, R2, J2, F2, X2> SameItem<$b<R2, J2, F2, X2>>
+            for $a<R1, J1, F1, X1>
+        where
+            R1::Out: And<J1::Out>,
+        {
+            type Out = SameCol<R1, J1, R2, J2>;
+        }
+    )*};
+}
+same_col! {
+    ExCol ExCol;
+    ExCol ShCol;
+    ShCol ExCol;
+    ShCol ShCol;
 }
 impl<R1, J1, F1, X1, R2, F2> SameItem<NodeSet<R2, F2>> for ExCol<R1, J1, F1, X1> {
     type Out = False;
@@ -79,38 +94,37 @@ impl<R1, J1, F1, X1, R2, F2> SameItem<NodeSet<R2, F2>> for ExCol<R1, J1, F1, X1>
 impl<R1, F1, R2, J2, F2, X2> SameItem<ExCol<R2, J2, F2, X2>> for NodeSet<R1, F1> {
     type Out = False;
 }
+impl<R1, J1, F1, X1, R2, F2> SameItem<NodeSet<R2, F2>> for ShCol<R1, J1, F1, X1> {
+    type Out = False;
+}
+impl<R1, F1, R2, J2, F2, X2> SameItem<ShCol<R2, J2, F2, X2>> for NodeSet<R1, F1> {
+    type Out = False;
+}
 impl<R1: RouteEq<R2>, F1, R2, F2> SameItem<NodeSet<R2, F2>> for NodeSet<R1, F1> {
     type Out = R1::Out;
 }
 
-/// Whether a flat plan has the item `X`.
-pub trait HasItem<X> {
-    /// [`True`] or [`False`].
+/// One item of a flat plan for two that are the same: a column exclusive
+/// when either is.
+pub trait Merge<B> {
+    /// The item.
     type Out;
 }
-impl<X> HasItem<X> for HNil {
-    type Out = False;
+impl<Rt, J, F, X, B> Merge<B> for ExCol<Rt, J, F, X> {
+    type Out = Self;
 }
-impl<X, H: SameItem<X>, T: HasItem<X>> HasItem<X> for HCons<H, T>
-where
-    H::Out: Or<T::Out>,
-{
-    type Out = <H::Out as Or<T::Out>>::Out;
+impl<Rt, J, F, X, Rt2, J2, F2, X2> Merge<ExCol<Rt2, J2, F2, X2>> for ShCol<Rt, J, F, X> {
+    type Out = ExCol<Rt2, J2, F2, X2>;
 }
-
-/// The list `T`, with `H` before it unless the answer is [`True`].
-pub trait KeepUnless<H, T> {
-    /// The list.
-    type Out;
+impl<Rt, J, F, X, Rt2, J2, F2, X2> Merge<ShCol<Rt2, J2, F2, X2>> for ShCol<Rt, J, F, X> {
+    type Out = Self;
 }
-impl<H, T> KeepUnless<H, T> for True {
-    type Out = T;
-}
-impl<H, T> KeepUnless<H, T> for False {
-    type Out = HCons<H, T>;
+impl<Rt, F, B> Merge<B> for NodeSet<Rt, F> {
+    type Out = Self;
 }
 
-/// A flat plan with every item once.
+/// A flat plan with every item once, merged ([`Merge`]) where it was
+/// more than once.
 pub trait Dedup {
     /// The plan.
     type Out;
@@ -118,12 +132,38 @@ pub trait Dedup {
 impl Dedup for HNil {
     type Out = HNil;
 }
-impl<H, T> Dedup for HCons<H, T>
+impl<H, T: Dedup> Dedup for HCons<H, T>
 where
-    T: HasItem<H> + Dedup,
-    <T as HasItem<H>>::Out: KeepUnless<H, <T as Dedup>::Out>,
+    T::Out: Insert<H>,
 {
-    type Out = <<T as HasItem<H>>::Out as KeepUnless<H, <T as Dedup>::Out>>::Out;
+    type Out = <T::Out as Insert<H>>::Out;
+}
+/// A flat plan with every item once, with the item `X` put in: merged
+/// with the same item, or added at the end.
+pub trait Insert<X> {
+    /// The plan.
+    type Out;
+}
+impl<X> Insert<X> for HNil {
+    type Out = HCons<X, HNil>;
+}
+impl<X: SameItem<H>, H, T> Insert<X> for HCons<H, T>
+where
+    X::Out: InsertAt<X, H, T>,
+{
+    type Out = <X::Out as InsertAt<X, H, T>>::Out;
+}
+/// [`Insert`] at the item `H` before `T`, by whether `X` is the same
+/// item as `H`.
+pub trait InsertAt<X, H, T> {
+    /// The plan.
+    type Out;
+}
+impl<X: Merge<H>, H, T> InsertAt<X, H, T> for True {
+    type Out = HCons<X::Out, T>;
+}
+impl<X, H, T: Insert<X>> InsertAt<X, H, T> for False {
+    type Out = HCons<H, T::Out>;
 }
 
 /// The position of the item `X` in a flat plan.
@@ -191,6 +231,23 @@ impl<Rt: 'static, F: 'static> Item for NodeSet<Rt, F> {
     }
 }
 
+impl<Rt: 'static, J: 'static, F: 'static, X: 'static> Item for ShCol<Rt, J, F, X> {
+    type Slot<'b, 'c>
+        = Shared<'b, F, X>
+    where
+        'c: 'b;
+    type Seen<'b, 'c>
+        = Shared<'b, F, X>
+    where
+        'c: 'b;
+    fn slot<'b, 'c: 'b>(hs: &'b mut Shared<'c, F, X>) -> Shared<'b, F, X> {
+        *hs
+    }
+    fn seen<'b, 'c: 'b>(slot: Shared<'b, F, X>) -> Shared<'b, F, X> {
+        slot
+    }
+}
+
 /// The union, lent again item by item.
 pub trait Union: Plan {
     /// Every item, exclusive, until a branch takes it.
@@ -254,8 +311,6 @@ pub trait ColAt<I>: Union {
     type X: 'static;
     /// The column, exclusive, taken out of the slots.
     fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Vec<(Self::F, &'c mut Self::X)>;
-    /// The column, read through.
-    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [(Self::F, &'c mut Self::X)];
 }
 impl<Rt: 'static, J: 'static, F: Clone + 'static, X: 'static, T: Union> ColAt<Here>
     for HCons<ExCol<Rt, J, F, X>, T>
@@ -270,12 +325,6 @@ impl<Rt: 'static, J: 'static, F: Clone + 'static, X: 'static, T: Union> ColAt<He
             .take()
             .expect("a branch takes a column exclusive once")
     }
-    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [(F, &'c mut X)] {
-        // Invariant: as for `ex`, a branch does not take a column both
-        // exclusive and shared.
-        seen.head
-            .expect("a branch does not take a column both exclusive and shared")
-    }
 }
 impl<H: Item, T: ColAt<I>, I> ColAt<There<I>> for HCons<H, T> {
     type F = T::F;
@@ -283,7 +332,45 @@ impl<H: Item, T: ColAt<I>, I> ColAt<There<I>> for HCons<H, T> {
     fn ex<'b, 'c: 'b>(slots: &mut Self::Slots<'b, 'c>) -> &'b mut Vec<(T::F, &'c mut T::X)> {
         T::ex(&mut slots.tail)
     }
-    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> &'b [(T::F, &'c mut T::X)] {
+}
+
+/// The column of the components `X` of nodes with full keys `F` is in the
+/// union at `I`, exclusive or shared, and is read there.
+pub trait ReadAt<I>: Union {
+    /// The nodes' full keys.
+    type F: 'static;
+    /// The component.
+    type X: 'static;
+    /// The column, read through.
+    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> Shared<'b, Self::F, Self::X>;
+}
+impl<Rt: 'static, J: 'static, F: 'static, X: 'static, T: Union> ReadAt<Here>
+    for HCons<ExCol<Rt, J, F, X>, T>
+{
+    type F = F;
+    type X = X;
+    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> Shared<'b, F, X> {
+        // Invariant: a branch's needs were checked not to overlap, so a
+        // branch does not take a column both exclusive and shared.
+        Shared::Held(
+            seen.head
+                .expect("a branch does not take a column both exclusive and shared"),
+        )
+    }
+}
+impl<Rt: 'static, J: 'static, F: 'static, X: 'static, T: Union> ReadAt<Here>
+    for HCons<ShCol<Rt, J, F, X>, T>
+{
+    type F = F;
+    type X = X;
+    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> Shared<'b, F, X> {
+        seen.head
+    }
+}
+impl<H: Item, T: ReadAt<I>, I> ReadAt<There<I>> for HCons<H, T> {
+    type F = T::F;
+    type X = T::X;
+    fn read<'b, 'c: 'b>(seen: Self::Seen<'b, 'c>) -> Shared<'b, T::F, T::X> {
         T::read(seen.tail)
     }
 }
@@ -374,12 +461,12 @@ where
 }
 impl<U, Rt: 'static, J: 'static, F: Clone + 'static, X: 'static> Pick<U> for ShCol<Rt, J, F, X>
 where
-    U: IndexOf<ExCol<Rt, J, F, X>> + ColAt<<U as IndexOf<ExCol<Rt, J, F, X>>>::I, F = F, X = X>,
+    U: IndexOf<ShCol<Rt, J, F, X>> + ReadAt<<U as IndexOf<ShCol<Rt, J, F, X>>>::I, F = F, X = X>,
 {
     type Ex<'b> = ();
     fn ex<'b, 'c: 'b>(_: &mut U::Slots<'b, 'c>) {}
     fn pick<'b, 'c: 'b>(_: (), seen: U::Seen<'b, 'c>) -> Shared<'b, F, X> {
-        Shared::Held(<U as ColAt<_>>::read(seen))
+        <U as ReadAt<_>>::read(seen)
     }
 }
 impl<U, Rt: 'static, F: 'static> Pick<U> for NodeSet<Rt, F>
@@ -511,27 +598,11 @@ impl<C: Ctx, Bs, Ps, U, F> Check<C, PlusPos<Ps, U, F>> for Plus<Bs>
 where
     Bs: CheckBranches<C, Ps>,
     Bs: DisjointBranches<C, Ps>,
-    Bs: TakesBranches<C, Ps>,
-    <Bs as TakesBranches<C, Ps>>::Touches: AllDeep<C::Depth>,
 {
 }
 
-/// The node at a route `Self` long is at or below the depth `Sd` of the
-/// members being lent, so a `Plus` may take its component `X` exclusive.
-#[diagnostic::on_unimplemented(
-    message = "a `Plus` inside `Under` takes `{X}` above the members, which share it",
-    label = "every member would borrow the same node",
-    note = "a `Plus` takes all its branches take exclusive, so inside `Under<A, ..>` its branches take only at each member or below it; `OneAtATime` lends the members one at a time"
-)]
-pub trait DeepEnough<X, Sd> {}
-impl<X, N> DeepEnough<X, Z> for N {}
-impl<X, N: DeepEnough<X, M>, M> DeepEnough<X, S<M>> for S<N> {}
-/// Every taking of a list is at or below the depth `Sd`.
-pub trait AllDeep<Sd> {}
-impl<Sd> AllDeep<Sd> for HNil {}
-impl<Sd, Rt: Len, X, E, T: AllDeep<Sd>> AllDeep<Sd> for HCons<Touch<Rt, X, E>, T> where
-    Rt::N: DeepEnough<X, Sd>
-{
+impl<Bs: TakesExclusive> TakesExclusive for Plus<Bs> {
+    type Out = Bs::Out;
 }
 
 /// What the branches take, one after another.
@@ -552,43 +623,80 @@ where
 impl<C, Bs, Ps, U, F> Takes<C, PlusPos<Ps, U, F>> for Plus<Bs>
 where
     Bs: TakesBranches<C, Ps>,
-    Bs::Touches: Exclusive,
+    Bs::Touches: OneEach,
 {
-    type Touches = <Bs::Touches as Exclusive>::Out;
+    type Touches = <Bs::Touches as OneEach>::Out;
 }
 
-/// Whether a list of takings takes the component `X` of the kind at `R`.
-pub trait HasTouch<R, X> {
+/// Whether two takings are of the same thing: one component of one kind,
+/// or one request box.
+pub trait SameTaking<B> {
     /// [`True`] or [`False`].
     type Out;
 }
-impl<R, X> HasTouch<R, X> for HNil {
+impl<R1, X1: Numbered, E1, R2, X2: Numbered, E2> SameTaking<Touch<R2, X2, E2>> for Touch<R1, X1, E1>
+where
+    R1: RouteEq<R2>,
+    X1::Number: NumberEq<X2::Number>,
+    R1::Out: And<<X1::Number as NumberEq<X2::Number>>::Out>,
+{
+    type Out = <R1::Out as And<<X1::Number as NumberEq<X2::Number>>::Out>>::Out;
+}
+impl<R1, X1, E1, I, Sd, W> SameTaking<Deep<I, Sd, W>> for Touch<R1, X1, E1> {
     type Out = False;
 }
-impl<R, X: Numbered, R2: RouteEq<R>, X2: Numbered, E2, T: HasTouch<R, X>> HasTouch<R, X>
-    for HCons<Touch<R2, X2, E2>, T>
-where
-    X2::Number: NumberEq<X::Number>,
-    R2::Out: And<<X2::Number as NumberEq<X::Number>>::Out>,
-    <R2::Out as And<<X2::Number as NumberEq<X::Number>>::Out>>::Out: Or<T::Out>,
-{
-    type Out = <<R2::Out as And<<X2::Number as NumberEq<X::Number>>::Out>>::Out as Or<T::Out>>::Out;
+impl<I, Sd, W, B> SameTaking<B> for Deep<I, Sd, W> {
+    type Out = False;
 }
 
-/// A list of takings as one exclusive taking of each component of each
-/// kind.
-pub trait Exclusive {
+/// One taking for two of the same thing: exclusive when either is.
+pub trait MergeTaking<B> {
+    /// The taking.
+    type Out;
+}
+impl<R, X, E1: Or<E2>, R2, X2, E2> MergeTaking<Touch<R2, X2, E2>> for Touch<R, X, E1> {
+    type Out = Touch<R, X, E1::Out>;
+}
+
+/// A list of takings with one taking of each thing, exclusive when any of
+/// its takings is.
+pub trait OneEach {
     /// The takings.
     type Out;
 }
-impl Exclusive for HNil {
+impl OneEach for HNil {
     type Out = HNil;
 }
-impl<R, X, E, T> Exclusive for HCons<Touch<R, X, E>, T>
+impl<H, T: OneEach> OneEach for HCons<H, T>
 where
-    T: HasTouch<R, X> + Exclusive,
-    <T as HasTouch<R, X>>::Out: KeepUnless<Touch<R, X, True>, <T as Exclusive>::Out>,
+    T::Out: AddTaking<H>,
 {
-    type Out =
-        <<T as HasTouch<R, X>>::Out as KeepUnless<Touch<R, X, True>, <T as Exclusive>::Out>>::Out;
+    type Out = <T::Out as AddTaking<H>>::Out;
+}
+/// A list of takings with one taking of each thing, with `X` put in:
+/// merged with the taking of the same thing, or added at the end.
+pub trait AddTaking<X> {
+    /// The takings.
+    type Out;
+}
+impl<X> AddTaking<X> for HNil {
+    type Out = HCons<X, HNil>;
+}
+impl<X: SameTaking<H>, H, T> AddTaking<X> for HCons<H, T>
+where
+    X::Out: AddTakingAt<X, H, T>,
+{
+    type Out = <X::Out as AddTakingAt<X, H, T>>::Out;
+}
+/// [`AddTaking`] at the taking `H` before `T`, by whether `X` is of
+/// the same thing as `H`.
+pub trait AddTakingAt<X, H, T> {
+    /// The takings.
+    type Out;
+}
+impl<X: MergeTaking<H>, H, T> AddTakingAt<X, H, T> for True {
+    type Out = HCons<X::Out, T>;
+}
+impl<X, H, T: AddTaking<X>> AddTakingAt<X, H, T> for False {
+    type Out = HCons<H, T::Out>;
 }

@@ -13,38 +13,7 @@ use super::{MemberNeed, Need, Pos, Shape};
 /// than one, does not compile.
 ///
 /// ```
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(
 ///     LinkPath,
 ///     HList![Mut<Planner>, WakerOf<Planner>, WakerOf<ConnCore>, Under<ConnCore, WakerOf<LinkCore>>]

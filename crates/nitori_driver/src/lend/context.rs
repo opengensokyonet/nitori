@@ -17,10 +17,10 @@ use nitori_clock::MonotonicClock;
 
 use super::{
     Lend,
-    check::{Check, Clash, DisjointFrom, Takes, Touch},
-    list::{IndexEq, Or, Z},
-    plan::{ExCol, NodeSet, PartPlan, Plan, Rebor, Run},
-    plus::{AllDeep, Exclusive, HasTouch, IndexOf, Item, KeepUnless, Norm, Pick, SameItem, Union},
+    check::{Check, Clash, Deep, DeepEnoughAll, DisjointFrom, Takes, TakesExclusive, Touch},
+    list::{IndexEq, Z},
+    plan::{ExCol, NodeSet, PartPlan, Plan, Rebor, Run, ShCol},
+    plus::{IndexOf, Item, Merge, MergeTaking, Norm, Pick, SameItem, SameTaking, Union},
     table::KindTab,
     tree::Ctx,
 };
@@ -190,6 +190,15 @@ impl<I, Pc, Rt, J, F, X> SameItem<ExCol<Rt, J, F, X>> for CxCol<I, Pc> {
 impl<I, Pc, Rt, J, F, X> SameItem<CxCol<I, Pc>> for ExCol<Rt, J, F, X> {
     type Out = False;
 }
+impl<I, Pc, Rt, J, F, X> SameItem<ShCol<Rt, J, F, X>> for CxCol<I, Pc> {
+    type Out = False;
+}
+impl<I, Pc, Rt, J, F, X> SameItem<CxCol<I, Pc>> for ShCol<Rt, J, F, X> {
+    type Out = False;
+}
+impl<I, Pc, B> Merge<B> for CxCol<I, Pc> {
+    type Out = Self;
+}
 impl<I, Pc, Rt, F> SameItem<NodeSet<Rt, F>> for CxCol<I, Pc> {
     type Out = False;
 }
@@ -332,31 +341,28 @@ where
 {
 }
 
-/// Whether a list of takings takes the box at `I`.
-pub trait HasAsk<I> {
-    /// [`True`](crate::id::True) or [`False`].
-    type Out;
+impl<I: IndexEq<J>, R, J, R2> SameTaking<Asks<J, R2>> for Asks<I, R> {
+    type Out = I::Out;
 }
-impl<I> HasAsk<I> for HNil {
+impl<I, R, R2, X2, E2> SameTaking<Touch<R2, X2, E2>> for Asks<I, R> {
     type Out = False;
 }
-impl<I, R2, X2, E2, T: HasAsk<I>> HasAsk<I> for HCons<Touch<R2, X2, E2>, T> {
-    type Out = T::Out;
+impl<R1, X1, E1, I, R> SameTaking<Asks<I, R>> for Touch<R1, X1, E1> {
+    type Out = False;
 }
-impl<I, J: IndexEq<I>, R, T: HasAsk<I>> HasAsk<I> for HCons<Asks<J, R>, T>
-where
-    J::Out: Or<T::Out>,
-{
-    type Out = <J::Out as Or<T::Out>>::Out;
+impl<I, R, B> MergeTaking<B> for Asks<I, R> {
+    type Out = Self;
 }
-impl<Rt, X, I, R, T: HasTouch<Rt, X>> HasTouch<Rt, X> for HCons<Asks<I, R>, T> {
-    type Out = T::Out;
+impl<T: DeepEnoughAll, I, R> DeepEnoughAll for HCons<Asks<I, R>, T> {}
+impl<I, R, J, Sd, W> Clash<Deep<J, Sd, W>> for Asks<I, R> {
+    type Out = False;
 }
-impl<I, R, T> Exclusive for HCons<Asks<I, R>, T>
-where
-    T: HasAsk<I> + Exclusive,
-    <T as HasAsk<I>>::Out: KeepUnless<Asks<I, R>, <T as Exclusive>::Out>,
-{
-    type Out = <<T as HasAsk<I>>::Out as KeepUnless<Asks<I, R>, <T as Exclusive>::Out>>::Out;
+impl<I, R, J, Sd, W> SameTaking<Deep<J, Sd, W>> for Asks<I, R> {
+    type Out = False;
 }
-impl<Sd, I, R, T: AllDeep<Sd>> AllDeep<Sd> for HCons<Asks<I, R>, T> {}
+impl<C> TakesExclusive for Clock<C> {
+    type Out = False;
+}
+impl<R> TakesExclusive for Requests<R> {
+    type Out = crate::id::True;
+}

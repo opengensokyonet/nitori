@@ -8,7 +8,7 @@ use super::{
     Lend,
     list::{HasPrefix, Prefix},
     plan::{ExCol, Plan, ShCol, Shared},
-    tree::{AtPos, Ctx, Cx, DepthGe, FindUp, UpPos},
+    tree::{AtPos, Ctx, Cx, FindUp, UpPos},
 };
 use crate::need::{At, AtTarget, ExactlyOne, Mut, Pos, Ref};
 
@@ -50,10 +50,12 @@ where
     }
 }
 
+/// That nothing the members of an `Under` share is taken exclusive is
+/// checked with the needs ([`Check`](super::check::Check)), so that the
+/// position is found and the check gives its reason.
 impl<C: Ctx, X: 'static, I: 'static> Lend<C, UpPos<I>> for Mut<X>
 where
     C::Chain: FindUp<X, I>,
-    I: DepthGe<C::Depth>,
     C::Fk: HasPrefix<UpFk<C, X, I>>,
     UpPre<C, X, I>: 'static,
     UpCol<C, X, I>: 'static,

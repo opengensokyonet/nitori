@@ -6,48 +6,45 @@ use super::{MemberNeed, Need, Pos, Shape};
 
 /// `T` taken at the members of an [`Under`](super::Under) one member at a
 /// time: the members may share what `T` takes exclusive above them, and
-/// the view ([`OneView`]) hands out one member's view at a time.
+/// the view ([`OneView`]) hands out one member's view at a time. Inside
+/// the members of another `Under`, lent all at once, they still take
+/// exclusive nothing those members share.
 ///
 /// Every recovery's congestion with the sent records of its logical path,
 /// both exclusive, which [`Under`](super::Under) alone refuses since the
 /// recoveries of one logical path share the sent records:
 ///
 /// ```
-/// # use nitori_driver::{
-/// #     frunk_core::HList,
-/// #     id::Numbered,
-/// #     need::*,
-/// #     structure::{AtMostOne, Child, NodeKind, Share, SlotVec},
-/// # };
-/// # #[derive(Numbered)] struct ConnCore;
-/// # #[derive(Numbered)] struct SentRecords;
-/// # #[derive(Numbered)] struct LinkCore;
-/// # #[derive(Numbered)] struct Planner;
-/// # #[derive(Numbered)] struct Congestion;
-/// # #[derive(Numbered)] struct Label;
-/// # #[derive(Clone, PartialEq, Eq)] struct PathKey(u32);
-/// # #[derive(Clone, PartialEq, Eq)] struct LinkId(u32);
-/// # struct Conn;
-/// # impl NodeKind for Conn { type Children = HList![Child<LogicalPath, SlotVec<PathKey>>]; }
-/// # struct LogicalPath;
-/// # impl NodeKind for LogicalPath { type Children = HList![Child<LinkPath, SlotVec<LinkId>>]; }
-/// # struct LinkPath;
-/// # impl NodeKind for LinkPath { type Children = HList![Child<Recovery, AtMostOne>]; }
-/// # struct Recovery;
-/// # impl NodeKind for Recovery { type Children = HList![]; }
-/// # struct V1;
-/// # impl Share<Conn> for V1 { type Data = HList![ConnCore, Label]; }
-/// # impl Share<LogicalPath> for V1 { type Data = HList![SentRecords]; }
-/// # impl Share<LinkPath> for V1 { type Data = HList![LinkCore, Planner, Label]; }
-/// # impl Share<Recovery> for V1 { type Data = HList![Congestion]; }
-/// # macro_rules! lends {
-/// #     ($l:ty, $n:ty) => {
-/// #         nitori_driver::__private::assert_lends::<Conn, HList![V1], $l, $n, _, _>()
-/// #     };
-/// # }
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 /// lends!(
 ///     Conn,
 ///     HList![Under<ConnCore, OneAtATime<At<Congestion, HList![Mut<Congestion>, Mut<SentRecords>]>>>]
+/// );
+/// ```
+///
+/// By logical path, its links one at a time, each with the sent records
+/// of the logical path; but not with the connection's core, which the
+/// logical paths share:
+///
+/// ```
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends!(
+///     Conn,
+///     HList![Under<
+///         ConnCore,
+///         At<SentRecords, HList![Under<SentRecords, OneAtATime<At<LinkCore, HList![Mut<LinkCore>, Mut<SentRecords>]>>>]>,
+///     >]
+/// );
+/// ```
+///
+/// ```compile_fail,E0277
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends!(
+///     Conn,
+///     HList![Under<
+///         ConnCore,
+///         At<SentRecords, HList![Under<SentRecords, OneAtATime<At<LinkCore, HList![Mut<LinkCore>, Mut<ConnCore>]>>>]>,
+///     >]
 /// );
 /// ```
 pub struct OneAtATime<T>(PhantomData<fn() -> T>);

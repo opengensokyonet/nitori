@@ -119,3 +119,24 @@ fn a_plus_at_each_member() {
     });
     assert_eq!(got, Some(vec![(PathKey(10), 2), (PathKey(20), 1)]));
 }
+
+/// A component read beside a `Plus` whose branches only read it.
+type ReadBeside = needs![Ref<Planner>, (Ref<Planner> + HList![Ref<Planner>, Mut<LinkCore>])];
+
+#[test]
+fn branches_that_only_read_beside_a_read() {
+    let mut root = tree_one();
+    let got = lend!(
+        &mut root,
+        LinkPath,
+        ReadBeside,
+        hlist![PathKey(10), LinkId(2)],
+        |hlist_pat![planner, mut plus]| {
+            let a = plus.take::<Ref<Planner>, _>().next_pn;
+            let hlist_pat![b, link] = plus.take::<HList![Ref<Planner>, Mut<LinkCore>], _>();
+            link.rx = (a + b.next_pn) as u32;
+            (planner.next_pn, link.rx)
+        }
+    );
+    assert_eq!(got, Some((200, 400)));
+}

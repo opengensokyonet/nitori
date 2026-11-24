@@ -3,11 +3,11 @@ use alloc::vec::Vec;
 
 use super::{
     Lend,
-    list::{Append, Len, Prefix},
+    list::{Answer, Append, Len, Prefix, RouteLine},
     plan::{ExCol, NodeSet, PartPlan, Plan, ShCol, Shared},
     tree::{
-        AtMember, AtPos, Collect, Comps, Ctx, Cx, DepthGe, Elem, FindBelow, FindUp, FlatData,
-        MemberPos, ToShape, UnderPos,
+        AtMember, AtPos, Collect, Comps, Ctx, Cx, Elem, FindBelow, FindUp, FlatData, MemberPos,
+        ToShape, UnderPos,
     },
     up::{UpFk, UpKind, UpPre},
 };
@@ -18,25 +18,33 @@ use crate::{
 
 /// What tells the members of an `Under<A, Self>` apart, and how far up
 /// they may take exclusive.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not taken at each member of an `Under`",
+    label = "not a need taken at each member",
+    note = "`Under<A, T>` takes `T` at each member: `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OneAtATime<..>`, or a list of `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OwnKey`, `OwnAddress`, `Clock` and `Requests`; take any other need at each member with `Under<A, At<X, HList![..]>>`"
+)]
 pub trait UnderBody: MemberNeed {
-    /// The members are the nodes of the one kind that has it.
+    /// The members are the nodes of the one kind that has it: a component,
+    /// or all the components of a list ([`AllOf`](super::members::AllOf)).
     type B: 'static;
     /// The depth of members the members' needs are lent with, the members
-    /// being at the route `Rt`: their own, so that nothing they share is
-    /// taken exclusive, or none.
-    type Depth<Rt: Len>;
+    /// being at the route `Rt` and the `Under` lent where the depth of
+    /// members is `Sd`: their own, so that nothing they share is taken
+    /// exclusive, or, lent one at a time, `Sd`, so that they take exclusive
+    /// nothing that the members of an `Under` around them share.
+    type Depth<Rt: Len, Sd>;
 }
 impl<X: 'static> UnderBody for Mut<X> {
     type B = X;
-    type Depth<Rt: Len> = Rt::N;
+    type Depth<Rt: Len, Sd> = Rt::N;
 }
 impl<X: 'static> UnderBody for Ref<X> {
     type B = X;
-    type Depth<Rt: Len> = Rt::N;
+    type Depth<Rt: Len, Sd> = Rt::N;
 }
 impl<B: AtTarget + 'static, T: Need> UnderBody for At<B, T> {
     type B = B;
-    type Depth<Rt: Len> = Rt::N;
+    type Depth<Rt: Len, Sd> = Rt::N;
 }
 
 /// The need taken at each member, with the member as the lend point `MC`;
@@ -115,12 +123,14 @@ where
 pub trait Gather<MC: Ctx, AF, LF, P: Pos>: UnderBody {
     /// What the members take.
     type Cols: Plan;
-    /// The result.
+    /// The result; `line` is whether the members' kind and the lend
+    /// point's are on one line from the root ([`Collect`]).
     fn gather<'a>(
         rows: &'a [&'a MC::Fk],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,
+        line: bool,
     ) -> Self::Collected<'a, P>
     where
         Self: 'a;
@@ -128,18 +138,19 @@ pub trait Gather<MC: Ctx, AF, LF, P: Pos>: UnderBody {
 
 /// The members' views, each from its part of the handles, gathered by the
 /// shape `Sh`.
-fn by_shape<'a, Bd, MC: Ctx, AF, LF, Sh, PB: Pos>(
+pub(super) fn by_shape<'a, Bd, MC: Ctx, AF, LF, Sh, PB: Pos>(
     rows: &'a [&'a MC::Fk],
     mut hs: <Bd::Cols as Plan>::Hs<'a>,
     anchor: &AF,
     at: &LF,
+    line: bool,
 ) -> <Sh::Shape as Shape>::Out<Bd::View<'a, PB>>
 where
     Bd: Body<MC, PB> + 'a,
     Bd::Cols: PartPlan<MC::Fk>,
     Sh: Collect<AF, MC::Fk, LF>,
 {
-    Sh::collect(rows, anchor, at, |m| {
+    Sh::collect(rows, anchor, at, line, |m| {
         let part = <Bd::Cols as PartPlan<MC::Fk>>::part(&mut hs, m);
         Bd::build(part, m)
     })
@@ -158,11 +169,12 @@ where
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,
+        line: bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at)
+        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
     }
 }
 impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
@@ -178,11 +190,12 @@ where
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,
+        line: bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at)
+        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
     }
 }
 impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, B: AtTarget + 'static, T: Need>
@@ -198,11 +211,12 @@ where
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,
+        line: bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at)
+        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
     }
 }
 
@@ -217,7 +231,7 @@ pub type MCx<C, A, IA, Bd, IK> = Cx<
     <C as Ctx>::Root,
     <C as Ctx>::Parts,
     MRoute<C, A, IA, BodyB<Bd>, IK>,
-    <Bd as UnderBody>::Depth<MRoute<C, A, IA, BodyB<Bd>, IK>>,
+    <Bd as UnderBody>::Depth<MRoute<C, A, IA, BodyB<Bd>, IK>, <C as Ctx>::Depth>,
     <C as Ctx>::Context,
 >;
 /// The full key of a member.
@@ -231,10 +245,10 @@ where
     Bd: UnderBody,
     Sh: ToShape,
     C::Chain: FindUp<A, IA>,
-    IA: DepthGe<C::Depth>,
     UpKind<C, A, IA>: FindBelow<C::Parts, BodyB<Bd>, IK, Sh = Sh>,
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, BodyB<Bd>, IK>>::Rel>,
-    MRoute<C, A, IA, BodyB<Bd>, IK>: Len + 'static,
+    MRoute<C, A, IA, BodyB<Bd>, IK>: Len + RouteLine<C::Route> + 'static,
+    <MRoute<C, A, IA, BodyB<Bd>, IK> as RouteLine<C::Route>>::Out: Answer,
     MCx<C, A, IA, Bd, IK>: Ctx,
     Bd: Gather<MCx<C, A, IA, Bd, IK>, UpFk<C, A, IA>, C::Fk, UnderPos<IA, IK, Sh, PB>>,
     C::Fk: Prefix<UpFk<C, A, IA>>,
@@ -257,6 +271,7 @@ where
         Self: 'a,
     {
         let anchor: UpFk<C, A, IA> = at.prefix();
-        Bd::gather(rows, hs, &anchor, at)
+        let line = <<MRoute<C, A, IA, BodyB<Bd>, IK> as RouteLine<C::Route>>::Out as Answer>::YES;
+        Bd::gather(rows, hs, &anchor, at, line)
     }
 }

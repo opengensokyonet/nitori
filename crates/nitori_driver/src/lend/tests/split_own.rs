@@ -11,7 +11,7 @@ fn the_own_member_and_the_others() {
     let mut root = tree_one();
     let got = lend!(
         &mut root,
-        LinkPath,
+        Entry,
         HList![Under<SentRecords, Mut<Credit>>],
         hlist![PathKey(10), LinkId(1)],
         |hlist_pat![mut v]| {
@@ -32,7 +32,7 @@ fn the_own_member_and_the_others() {
     let mut root = tree_two();
     let got = lend!(
         &mut root,
-        LinkPath,
+        Entry,
         HList![Under<ConnCore, Mut<Credit>>],
         hlist![LinkId(2)],
         |hlist_pat![mut v]| {
@@ -44,6 +44,42 @@ fn the_own_member_and_the_others() {
         }
     );
     assert_eq!(got, Some((vec![LinkId(2)], vec![LinkId(1)])));
+}
+
+/// Members of a kind beside the lend point's are none of them in its own
+/// branch, though one has the lend point's keys.
+#[test]
+fn members_of_a_kind_beside_the_lend_point() {
+    let mut root = tree_one();
+    let got = lend!(
+        &mut root,
+        Entry,
+        HList![Under<SentRecords, Mut<LinkCore>>],
+        hlist![PathKey(10), LinkId(1)],
+        |hlist_pat![mut v]| {
+            let (own, rest) = v.split_own();
+            (
+                own.keys().copied().collect::<Vec<_>>(),
+                rest.keys().copied().collect::<Vec<_>>(),
+            )
+        }
+    );
+    assert_eq!(got, Some((vec![], vec![LinkId(1), LinkId(2)])));
+    let mut root = tree_two();
+    let got = lend!(
+        &mut root,
+        LinkPath,
+        HList![Under<ConnCore, Mut<Credit>>],
+        hlist![LinkId(2)],
+        |hlist_pat![mut v]| {
+            let (own, rest) = v.split_own();
+            (
+                own.keys().copied().collect::<Vec<_>>(),
+                rest.keys().copied().collect::<Vec<_>>(),
+            )
+        }
+    );
+    assert_eq!(got, Some((vec![], vec![LinkId(1), LinkId(2)])));
 }
 
 #[test]

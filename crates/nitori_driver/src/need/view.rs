@@ -244,9 +244,11 @@ impl<K, V> KeyedView<K, V> {
     /// The members of the lend point's own branch, exclusive, and the
     /// others, shared.
     ///
-    /// A member is in the own branch when its full key and the lend
-    /// point's agree as far as the shorter goes: the member is the lend
-    /// point, above it or below it.
+    /// A member is in the own branch when it is the lend point, above it or
+    /// below it: its kind is the lend point's, or one on the way up or
+    /// down from it, and their full keys agree as far as the shorter goes.
+    /// The members of a kind beside the lend point's, which is neither, are
+    /// none of them in the own branch, whatever their keys.
     #[allow(clippy::type_complexity)]
     pub fn split_own(&mut self) -> (KeyedView<K, &mut V>, KeyedView<K, &V>)
     where

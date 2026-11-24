@@ -139,6 +139,49 @@ where
     type Out = <I::Out as And<Q::Out>>::Out;
 }
 
+/// Whether two routes are on one line from the root: one of them leads
+/// to the kind the other does, or to a kind below it.
+pub trait RouteLine<B> {
+    /// [`True`] or [`False`].
+    type Out;
+}
+impl<B> RouteLine<B> for HNil {
+    type Out = True;
+}
+impl<J, R> RouteLine<HNil> for HCons<J, R> {
+    type Out = True;
+}
+impl<I: IndexEq<J>, Q: RouteLine<R>, J, R> RouteLine<HCons<J, R>> for HCons<I, Q>
+where
+    I::Out: And<Q::Out>,
+{
+    type Out = <I::Out as And<Q::Out>>::Out;
+}
+
+/// An answer as a value.
+pub trait Answer {
+    /// Whether the answer is yes.
+    const YES: bool;
+}
+impl Answer for True {
+    const YES: bool = true;
+}
+impl Answer for False {
+    const YES: bool = false;
+}
+
+/// One answer is yes when the count is not zero.
+pub trait NonZero {
+    /// [`True`] or [`False`].
+    type Out;
+}
+impl NonZero for Z {
+    type Out = False;
+}
+impl<N> NonZero for S<N> {
+    type Out = True;
+}
+
 /// A full key with the key `k` of one more level.
 pub trait PushKey<K> {
     /// The longer key.
@@ -192,6 +235,14 @@ pub trait HasPrefix<P> {
 impl<L> HasPrefix<HNil> for L {
     fn has_prefix(&self, _: &HNil) -> bool {
         true
+    }
+}
+/// A key shorter than `P` does not start with it: what an `Under` that
+/// takes exclusive above its members would share out, which its check
+/// refuses, so that the check is the one to give the reason.
+impl<H, Q> HasPrefix<HCons<H, Q>> for HNil {
+    fn has_prefix(&self, _: &HCons<H, Q>) -> bool {
+        false
     }
 }
 impl<H: PartialEq, T: HasPrefix<Q>, Q> HasPrefix<HCons<H, Q>> for HCons<H, T> {
@@ -263,6 +314,11 @@ impl<H: PartialEq, T: Concat<Sx>, Sx> Concat<Sx> for HCons<H, T> {
 
 /// The keys of the levels between an anchor and its members, as the key
 /// of a keyed view: the key itself for one level, a tuple for more.
+#[diagnostic::on_unimplemented(
+    message = "the members are told apart by the keys `{Self}`: a keyed view has at most 4 levels of keys",
+    label = "more than 4 levels kept by key between the anchor and the members",
+    note = "the key of a keyed view is the key of the one level kept by key, or a tuple of up to 4 of them; anchor the `Under` lower, or move the lend point with `At`"
+)]
 pub trait KeyTuple {
     /// The key of the view.
     type Tuple: Clone + PartialEq + 'static;

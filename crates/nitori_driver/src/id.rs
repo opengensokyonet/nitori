@@ -44,7 +44,8 @@ pub use nitori_driver_macros::Numbered;
 /// A type with a type-level number, a list of bits the highest first.
 ///
 /// Two types of one crate never have the same number: the derive refuses
-/// the second. Across crates two numbers are the same by chance about once
+/// the second, and tells apart the types derived in the body of a
+/// `macro_rules!` macro by the places it is expanded. Across crates two numbers are the same by chance about once
 /// in 2⁶⁴, which nothing checks.
 pub trait Numbered {
     /// The number: [`BCons`] of [`B0`] and [`B1`], ending in [`BNil`].
@@ -88,6 +89,9 @@ impl<T, U> NumberEq<BCons<B0, U>> for BCons<B1, T> {
 }
 
 /// Two lists of bits of one length, bit by bit exclusive-or.
+///
+/// What the derive mixes numbers with; not for use otherwise.
+#[doc(hidden)]
 pub trait Xor<B> {
     /// The list of the bits that differ.
     type Out;
@@ -109,6 +113,7 @@ impl<T: Xor<U>, U> Xor<BCons<B0, U>> for BCons<B1, T> {
 }
 
 /// A list of bits rotated left by one: the highest bit becomes the lowest.
+#[doc(hidden)]
 pub trait RotateLeft {
     /// The rotated list.
     type Out;
@@ -117,6 +122,7 @@ impl<H, T: PushBit<H>> RotateLeft for BCons<H, T> {
     type Out = T::Out;
 }
 /// A list of bits with the bit `H` added as the lowest.
+#[doc(hidden)]
 pub trait PushBit<H> {
     /// The longer list.
     type Out;
@@ -131,6 +137,9 @@ impl<H, B, T: PushBit<H>> PushBit<H> for BCons<B, T> {
 /// The numbers of the type parameters of a generic type, one per
 /// position, as they are mixed into its own number: the first rotated by
 /// one, the second by two, and so on, then all of them exclusive-or.
+///
+/// What the derive mixes numbers with; not for use otherwise.
+#[doc(hidden)]
 pub trait MixParams {
     /// The mixed numbers.
     type Out;
@@ -149,7 +158,7 @@ where
 
 /// The number of a generic type: its own number `Own` exclusive-or the
 /// numbers of its type parameters `Params` (an `HList`), each rotated by
-/// its position ([`MixParams`]).
+/// its position.
 ///
 /// Rotating keeps the parameters' places apart, so `Pair<A, B>` and
 /// `Pair<B, A>` differ, and so do `Wrap<Wrap<X>>` and `X`.

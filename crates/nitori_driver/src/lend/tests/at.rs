@@ -116,3 +116,41 @@ fn nested_views() {
     });
     assert_eq!(got, Some(1));
 }
+
+/// By logical path, every link core of the connection, read: the members
+/// share them, so they only read them.
+type ReadAbove = HList![Under<
+    ConnCore,
+    At<SentRecords, HList![Mut<SentRecords>, Under<ConnCore, Ref<LinkCore>>]>,
+>];
+
+#[test]
+fn a_nested_under_reads_above_the_members() {
+    let mut root = tree_one();
+    let got = lend!(&mut root, Conn1, ReadAbove, hlist![], |hlist_pat![
+        mut v
+    ]| {
+        let _: &KeyedView<
+            PathKey,
+            HList![&mut SentRecords, KeyedView<(PathKey, LinkId), &LinkCore>],
+        > = &v;
+        v.iter_mut()
+            .map(|(p, hlist_pat![sent, links])| {
+                sent.acked = links.len() as u32;
+                (*p, sent.acked, links.keys().copied().collect::<Vec<_>>())
+            })
+            .collect::<Vec<_>>()
+    });
+    let all = alloc::vec![
+        (PathKey(10), LinkId(1)),
+        (PathKey(10), LinkId(2)),
+        (PathKey(20), LinkId(3))
+    ];
+    assert_eq!(
+        got,
+        Some(alloc::vec![
+            (PathKey(10), 3, all.clone()),
+            (PathKey(20), 3, all)
+        ])
+    );
+}

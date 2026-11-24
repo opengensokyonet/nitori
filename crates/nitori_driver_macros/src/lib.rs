@@ -1,8 +1,9 @@
 //! `#[derive(Numbered)]`: the type-level number of a component, or of any
 //! type a generic component is generic over, for `nitori_driver`.
 //!
-//! The number of a type is a 64-bit hash of the crate's name, the place
-//! the type is defined (file, line and column) and its name: FNV-1a, then
+//! The number of a type is a 64-bit hash of the crate's name, its name and
+//! the place it is defined (file, line and column), with the place of every
+//! macro expansion it came from: FNV-1a, then
 //! the final mix of splitmix64, so names close to each other differ in
 //! their high bits. It is written as a list of bits, the highest first,
 //! that `nitori_driver` compares by trait resolution. A generic type mixes
@@ -11,11 +12,17 @@
 //! `X`; every type parameter must be `Numbered` itself. Lifetimes are
 //! left out; a const parameter is refused.
 //!
+//! A type derived in the body of a `macro_rules!` macro has its name where
+//! the macro is defined; the places of the expansions it came from tell
+//! the types of two expansions apart.
+//!
 //! Two types of one crate given the same number are refused where the
 //! second is derived. Across crates nothing is checked: two numbers are
 //! the same by chance about once in 2⁶⁴.
+#![feature(proc_macro_span)]
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     sync::{Mutex, OnceLock},
 };
 
@@ -38,13 +45,7 @@ pub fn derive_numbered(input: TokenStream) -> TokenStream {
 fn numbered(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     let crate_name = std::env::var("CARGO_CRATE_NAME").unwrap_or_default();
-    let span = name.span().unwrap();
-    let place = format!(
-        "{crate_name}::{}:{}:{}::{name}",
-        span.file(),
-        span.line(),
-        span.column()
-    );
+    let place = place(&crate_name, name);
     let own = mix(fnv1a(&place));
     check_unique(own, &place, name)?;
 
@@ -97,6 +98,20 @@ fn numbered(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             type Count = ::nitori_driver::need::ExactlyOne;
         }
     })
+}
+
+/// What the number of the type named `name` hashes: the crate's name, the
+/// type's name and the place of its name, then the place of each macro
+/// expansion it came from, the innermost first.
+fn place(crate_name: &str, name: &syn::Ident) -> String {
+    let mut place = format!("{crate_name}::{name}");
+    let mut span = Some(name.span().unwrap());
+    while let Some(s) = span {
+        // Writing to a `String` does not fail.
+        let _ = write!(place, "@{}:{}:{}", s.file(), s.line(), s.column());
+        span = s.parent();
+    }
+    place
 }
 
 /// FNV-1a, 64 bits.

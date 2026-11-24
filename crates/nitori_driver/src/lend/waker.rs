@@ -5,7 +5,10 @@ use frunk_core::hlist::HNil;
 
 use super::{
     Lend,
-    check::{Check, CheckBody, CountChain, ExactlyOneUp, Spell, Takes, TakesBody, UpCount},
+    check::{
+        Check, CheckBody, CountChain, ExactlyOneUp, Spell, Takes, TakesBody, TakesExclusive,
+        UpCount,
+    },
     list::{Len, Prefix},
     plan::PartPlan,
     tree::{AtMember, Collect, Ctx, FindUp},
@@ -54,7 +57,7 @@ pub type MemberWaker<MC, X> = ComponentWaker<X, <MC as Ctx>::Route, <MC as Ctx>:
 
 impl<X: 'static> UnderBody for WakerOf<X> {
     type B = X;
-    type Depth<Rt: Len> = Rt::N;
+    type Depth<Rt: Len, Sd> = Rt::N;
 }
 impl<MC: Ctx, X: 'static> Body<MC, WakerPos<AtMember, MemberWaker<MC, X>>> for WakerOf<X>
 where
@@ -81,14 +84,20 @@ where
         _: (),
         anchor: &AF,
         at: &LF,
+        line: bool,
     ) -> Self::Collected<'a, super::tree::UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        Sh::collect(rows, anchor, at, |m| <Self as Body<MC, PB>>::build((), m))
+        Sh::collect(rows, anchor, at, line, |m| {
+            <Self as Body<MC, PB>>::build((), m)
+        })
     }
 }
 impl<MC, X, W> CheckBody<MC, WakerPos<AtMember, W>> for WakerOf<X> {}
+impl<X> TakesExclusive for WakerOf<X> {
+    type Out = crate::id::False;
+}
 impl<MC, X, W> TakesBody<MC, WakerPos<AtMember, W>> for WakerOf<X> {
     type Touches = HNil;
 }
