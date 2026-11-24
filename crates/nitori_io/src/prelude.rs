@@ -15,7 +15,8 @@ pub use crate::calls::{
     ReadArrayExt as _, ReadArrayHostExt as _, ReadBeExt as _, ReadBeHostExt as _,
     ReadChunksExactExt as _, ReadChunksExactHostExt as _, ReadChunksExt as _,
     ReadChunksHostExt as _, ReadExactExt as _, ReadExactHostExt as _, ReadLeExt as _,
-    ReadLeHostExt as _, ReadToEndExt as _, ReadToEndHostExt as _, WriteAllExt as _,
+    ReadLeHostExt as _, ReadToEndExt as _, ReadToEndHostExt as _, SkipExactExt as _,
+    SkipExactHostExt as _, SkipToEndExt as _, SkipToEndHostExt as _, WriteAllExt as _,
     WriteAllHostExt as _, WriteArrayExt as _, WriteArrayHostExt as _, WriteBeExt as _,
     WriteBeHostExt as _, WriteLeExt as _, WriteLeHostExt as _,
 };

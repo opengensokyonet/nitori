@@ -9,7 +9,9 @@
 //! prefixes on Pending, errors, and cancellation; they never roll back.
 
 mod read;
+mod skip;
 mod write;
 
 pub use read::*;
+pub use skip::*;
 pub use write::*;

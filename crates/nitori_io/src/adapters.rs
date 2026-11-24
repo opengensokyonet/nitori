@@ -1,5 +1,5 @@
 //! Explicit capability adapters: chunk reads with caller-selected allocation
-//! limits, and byte budgets for composed accesses.
+//! limits, byte budgets for composed accesses, and skipping built from reads.
 use crate::{
     PollReadExt as _, PollWriteExt as _, Read, ReadChunk, Skip, Write,
     helpers::poll_chunk_from_read,
@@ -13,6 +13,9 @@ use core::{
     task::{Context, Poll, ready},
 };
 use nitori_call::{Compose, Direct, Lent, Receiver, ReceiverFamily};
+
+mod skip;
+pub use skip::{ReadChunkSkip, ReadSkip, Skippable};
 
 pin_project_lite::pin_project! {
     /// Add copying chunk reads to any reader, with a shared underlying cursor.

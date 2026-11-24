@@ -108,8 +108,10 @@ pub trait ReadChunk: Read {
 ///
 /// A source implements this when it can skip natively, without copying, such
 /// as a memory buffer advancing its cursor. There is no blanket
-/// implementation for readers. `Count` is chosen by the source and needs no
-/// arithmetic here; code that adds or compares counts states its own bounds.
+/// implementation for readers; compose [`adapters::ReadSkip`] or
+/// [`adapters::ReadChunkSkip`] on one instead. `Count` is chosen by the
+/// source and needs no arithmetic here; operations that add or compare counts
+/// state their own bounds, as [`calls::skip_exact`] does.
 #[nitori_call::capability(sync)]
 pub trait Skip: Read {
     /// This source's representation of a skipped byte count.

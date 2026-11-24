@@ -73,6 +73,8 @@ may stay borrowed across Pending.
 | `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<F::Error>>` |
 | `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; `Result<usize, ReadChunksError<F::Error>>` |
 | `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; `Result<(), ReadChunksExactError<F::Error>>` |
+| `SkipExact::new(length)` | `Result<(), SkipExactError<F::Error, F::Count>>` |
+| `SkipToEnd::new()` | `Result<(), F::Error>` |
 | `WriteAll::new(input)` | `Result<(), WriteAllError<F::Error>>` |
 | `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<F::Error>>` |
 | `ReadLe::<T>::new()` | `Result<T, ReadLeError<F::Error>>` |
@@ -289,14 +291,53 @@ its boundary without polling the parent. For it, the quota must also satisfy
 `L: Min<F::Count, Output = F::Count>` and `F::Count: Min<L> + Clone`, with
 `L: SubAssign` of that minimum, which the built-in widths and `Infinite` do.
 
-```rust
-use nitori_io::{Infinite, adapters::ReadLimit, prelude::*};
+A reader that cannot skip natively gets `Skip` from a composition state,
+on an access with `io.compose(..)` or on a receiver with
+`ComposedReceiver::new(..)`. `adapters::ReadSkip` reads at most 8 KiB into a
+stack buffer on each poll and drops it; `adapters::ReadChunkSkip` takes one
+chunk of at most the maximum and drops it, without copying. Both skip with
+`Count = usize`, hold no state, and forward `Read`, `ReadChunk` and
+`ExactLen` of the parent. There is no blanket implementation for readers, so
+a source that can skip natively implements `Skip` itself.
 
-let mut input = &b"abcdef"[..];
-assert_eq!(input.sync_skip_unpin(2u8), Ok(Some(2usize)));
-let mut framed = nitori_call::ComposedReceiver::new(input, ReadLimit(3u8));
-assert_eq!(framed.sync_skip_unpin(Infinite), Ok(Some(3)));
-assert_eq!(framed.sync_skip_unpin(Infinite), Ok(None));
+`calls::skip_exact(io, length)` skips exactly `length`, asking for at most
+the remainder on each poll; on EOF or a host failure its `SkipExactError`
+reports the count still left. It needs `Count: Clone + Min<Output = Count> +
+Min<usize, Output = usize> + SubAssign`. `calls::skip_to_end(io)` skips to
+EOF with an `Infinite` maximum and reports no total, which need not fit the
+`Count`; its only failure is the host's own error.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ComposedReceiver, ReceiverAccess, call};
+use nitori_io::{
+    adapters::{ReadLimit, ReadSkip},
+    bridge::Std,
+    calls::SkipExactError,
+    prelude::*,
+};
+use std::io::Cursor;
+
+/// Skip the first `header` bytes of a frame of `length`, then the rest.
+#[call(sync)]
+async fn skip_frame<F: Skip<Count = usize>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+    length: usize,
+    header: usize,
+) -> (Result<(), SkipExactError<F::Error, usize>>, Result<(), F::Error>) {
+    let mut frame = io.compose(ReadLimit(length));
+    let header = frame.skip_exact(header).await;
+    (header, frame.skip_to_end().await)
+}
+
+let mut input = &b"framenext"[..];
+let (header, rest) = input.sync_skip_frame_unpin(5, 2);
+assert!(header.is_ok() && rest.is_ok());
+assert_eq!(input, b"next");
+
+// A reader without native skipping skips by reading.
+let mut reader = ComposedReceiver::new(Std::new(Cursor::new(b"abcdef")), ReadSkip);
+assert_eq!(reader.sync_skip_unpin(4u8).unwrap(), Some(4usize));
 ```
 
 ## Splitting a buffer
