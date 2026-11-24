@@ -108,6 +108,8 @@ pub enum TopAsk {
     Move { twig: u32, from: u32, to: u32 },
     /// End the top.
     EndSelf,
+    /// Panic.
+    Panic,
 }
 /// What a twig is asked: to end.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,6 +142,7 @@ impl HandleRequest<Top, Level> for TopHandler {
                 edit.end_self(());
                 return;
             }
+            TopAsk::Panic => panic!("the top panics"),
         };
         note(format!("top: {out}"));
     }
@@ -209,6 +212,11 @@ pub enum Step {
     Spin,
     /// Panic.
     Panic,
+    /// Keep a guard in the call, which notes its drop, then wait.
+    Guard,
+    /// Not a step of the call, which waits: its leaf's component panics
+    /// when woken.
+    PanicOnWake,
     /// Return.
     Return,
 }
@@ -221,6 +229,8 @@ pub struct Ctl {
     pub script: VecDeque<Step>,
     pub polls: u32,
     pub again: u32,
+    /// Whether its wake panics.
+    pub boom: bool,
 }
 /// The top's component: it notes its end.
 #[derive(Debug, Default, Numbered)]
@@ -317,16 +327,21 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Ctl {
             .count()
             .try_into()
             .unwrap_or(0);
+        let boom = start.contains(&Step::PanicOnWake);
         Ctl {
             key,
             script: core::mem::take(start).into(),
             polls: 0,
             again,
+            boom,
         }
     }
     fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
         let hlist_pat![me, own, wakes] = view;
         note(format!("ctl {}", me.key));
+        if me.boom {
+            panic!("the component panics");
+        }
         if me.again > 0 {
             me.again -= 1;
             wakes.wake(&own, Level::Low);
@@ -362,7 +377,16 @@ enum Then {
     Settle(crate::call::Settle),
     SettleSee(crate::call::Settle),
     Spin,
+    Guard,
     Return,
+}
+
+/// Notes its drop: a call is dropped before its node's components end.
+struct Guard(u32);
+impl Drop for Guard {
+    fn drop(&mut self) {
+        note(format!("drop call {}", self.0));
+    }
 }
 
 /// The keys of the twigs below the leaf, in the order the view holds them.
@@ -390,6 +414,7 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
     host: &mut impl LentAccess<Family = W>,
 ) {
     let mut spinning = false;
+    let mut guards = Vec::new();
     loop {
         let (then, key) = host.with(|mut view| {
             let (step, key) = {
@@ -439,6 +464,8 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
                 }
                 Step::Spin => Then::Spin,
                 Step::Panic => panic!("the script panics"),
+                Step::Guard => Then::Guard,
+                Step::PanicOnWake => Then::Wait,
                 Step::Return => Then::Return,
             };
             (then, key)
@@ -472,6 +499,10 @@ pub async fn script<W: CallFamily<C = Script, K = Leaf, Q: Composition<Priority 
                     Poll::Ready(())
                 })
                 .await;
+                once_pending().await;
+            }
+            Then::Guard => {
+                guards.push(Guard(key));
                 once_pending().await;
             }
             Then::Wait => once_pending().await,
