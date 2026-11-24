@@ -27,23 +27,31 @@ fn up_and_of_each_member() {
             planner.next_pn += 1;
             let mine = all.get(&(PathKey(10), LinkId(2))).cloned();
             let other = all.get(&(PathKey(20), LinkId(3))).cloned();
-            (
-                mine == Some(own.clone()),
-                other == Some(own),
-                all.len(),
-                alloc::format!("{path:?}"),
-            )
+            (mine == Some(own), other == Some(own), all.len(), path, own)
         }
+    )
+    .expect("the link path is there");
+    let (mine, other, len, path, own) = got;
+    assert_eq!((mine, other, len), (true, false, 3));
+    assert_ne!(path, own);
+    // The logical path's waker is the same from its other link, and
+    // another logical path's differs.
+    let again = lend!(
+        &mut root,
+        LinkPath,
+        HList![WakerOf<SentRecords>],
+        hlist![PathKey(10), LinkId(1)],
+        |hlist_pat![w]| w
     );
-    assert_eq!(
-        got,
-        Some((
-            true,
-            false,
-            3,
-            alloc::string::String::from("ComponentWaker(HCons { head: PathKey(10), tail: HNil })")
-        ))
+    let elsewhere = lend!(
+        &mut root,
+        LinkPath,
+        HList![WakerOf<SentRecords>],
+        hlist![PathKey(20), LinkId(3)],
+        |hlist_pat![w]| w
     );
+    assert_eq!(again, Some(path));
+    assert_ne!(elsewhere, Some(path));
     let mut root = tree_two();
     let got = lend!(&mut root, LinkPath, Wakers, hlist![LinkId(2)], |hlist_pat![
         _planner, own, _conn, all
@@ -72,18 +80,17 @@ fn in_branches_and_one_at_a_time() {
             plus.take::<Mut<LinkCore>, _>().rx += 1;
             let mut n = 0;
             each.for_each_mut(|_, _w| n += 1);
-            (alloc::format!("{w:?}"), n)
+            (w, n)
         }
     );
-    assert_eq!(
-        got,
-        Some((
-            alloc::string::String::from(
-                "ComponentWaker(HCons { head: PathKey(10), tail: HCons { head: LinkId(1), tail: HNil } })"
-            ),
-            3
-        ))
+    let own = lend!(
+        &mut root,
+        LinkPath,
+        HList![WakerOf<LinkCore>],
+        hlist![PathKey(10), LinkId(1)],
+        |hlist_pat![w]| w
     );
+    assert_eq!(got.map(|(w, n)| (Some(w), n)), Some((own, 3)));
     let mut root = tree_two();
     let got = lend!(&mut root, LinkPath, Mixed, hlist![LinkId(1)], |hlist_pat![
         mut plus,

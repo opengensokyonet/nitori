@@ -4,22 +4,22 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use frunk_core::hlist::{HCons, Selector};
+use frunk_core::hlist::{HCons, HNil, Selector};
 use nitori_clock::MonotonicClock;
 
 use super::{
     kinds::{AllKinds, RequestLists},
-    pack::{KindList, PackList},
+    pack::{KindDesc, KindList, PackList},
 };
 use crate::{
     component::{ArgsOf, PartList},
     lend::{
-        context::{Context, RequestList},
+        context::{Context, RequestList, WakeList},
         entry::{BuildRootShares, build_root},
     },
     need::LentClock,
     request::NodeRequest,
-    structure::{KindFor, Node, NodeKind},
+    structure::{ChildAddresses, KindFor, Node, NodeKind},
 };
 
 /// A composition: a root kind, a list of parts, the driver's clock and
@@ -29,8 +29,12 @@ use crate::{
 /// Written with [`composition!`](crate::composition!); the pack is opaque,
 /// defined by [`pack`](Composition::pack).
 pub trait Composition: 'static + Sized {
-    /// The root kind.
-    type Root: KindFor<Self::Parts> + AllKinds<Kinds: KindList<Self> + RequestLists<Self::Root>>;
+    /// The root kind: the first of its kinds, whose nodes have no key.
+    type Root: KindFor<Self::Parts, Children: ChildAddresses<Self::Parts>>
+        + AllKinds<
+            Kinds: KindList<Self, Head: KindDesc<Self, Kind = Self::Root, Fk = HNil>>
+                       + RequestLists<Self::Root>,
+        >;
     /// The list of parts.
     type Parts: PartList<Self::Parts> + 'static;
     /// The clock the driver reads for every lending; a
@@ -66,10 +70,14 @@ pub type KindsOf<Q> = <RootOf<Q> as AllKinds>::Kinds;
 /// The root node of `Q`'s tree.
 pub type RootNode<Q> = Node<RootOf<Q>, PartsOf<Q>>;
 /// The context every lending under `Q` takes: the instant the driver read
-/// from its clock, then a request box for every kind of the structure, in
-/// the order of [`KindsOf`].
-pub type ContextOf<Q> =
-    Context<HCons<LentClock<ClockOf<Q>>, <KindsOf<Q> as RequestLists<RootOf<Q>>>::Lists>>;
+/// from its clock, the wakes at `Q`'s priority, then a request box for
+/// every kind of the structure, in the order of [`KindsOf`].
+pub type ContextOf<Q> = Context<
+    HCons<
+        LentClock<ClockOf<Q>>,
+        HCons<WakeList<PriorityOf<Q>>, <KindsOf<Q> as RequestLists<RootOf<Q>>>::Lists>,
+    >,
+>;
 
 /// The root of a new tree of the root kind `R` for the parts `Pt`, which
 /// [`composition!`](crate::composition!) defines [`Composition::root`]
@@ -84,15 +92,18 @@ where
     Node::new(build_root::<R, Pt>(start, args))
 }
 
-/// The context of a lending under `Q`: `clock` read at `now`, and every
-/// request box empty.
+/// The context of a lending under `Q`: `clock` read at `now`, no wakes,
+/// and every request box empty.
 pub(crate) fn context<Q: Composition>(
     clock: ClockOf<Q>,
     now: <ClockOf<Q> as MonotonicClock>::Instant,
 ) -> ContextOf<Q> {
     Context::new(HCons {
         head: LentClock::new(clock, now),
-        tail: <KindsOf<Q> as RequestLists<RootOf<Q>>>::lists(),
+        tail: HCons {
+            head: WakeList::new(),
+            tail: <KindsOf<Q> as RequestLists<RootOf<Q>>>::lists(),
+        },
     })
 }
 
@@ -106,7 +117,30 @@ where
     <KindsOf<Q> as RequestLists<RootOf<Q>>>::Lists:
         Selector<RequestList<NodeRequest<RootOf<Q>, K>>, I>,
 {
-    cx.pieces_mut().tail.get_mut().take()
+    cx.pieces_mut().tail.tail.get_mut().take()
+}
+
+/// The request boxes of every kind of `Q` in `cx`.
+pub(crate) fn request_lists<Q: Composition>(
+    cx: &mut ContextOf<Q>,
+) -> &mut <KindsOf<Q> as RequestLists<RootOf<Q>>>::Lists {
+    &mut cx.pieces_mut().tail.tail
+}
+
+/// The wakes put in the lendings of `cx`, in order, leaving the list
+/// empty.
+pub(crate) fn take_wakes<Q: Composition>(
+    cx: &mut ContextOf<Q>,
+) -> Vec<(crate::need::ComponentWaker, PriorityOf<Q>)> {
+    cx.pieces_mut().tail.head.take()
+}
+
+/// Read the clock of `cx` again, at `now`.
+pub(crate) fn set_now<Q: Composition>(
+    cx: &mut ContextOf<Q>,
+    now: <ClockOf<Q> as MonotonicClock>::Instant,
+) {
+    cx.pieces_mut().head.set_now(now);
 }
 
 /// Write a composition: `composition!(impl for Q: Root, Parts, Clock,

@@ -52,6 +52,12 @@ pub fn cx<Q: Composition<Clock = TestClock>>() -> ContextOf<Q> {
     )
 }
 
+/// What the driver keeps of a call, for a call polled with no driver:
+/// woken at `p`, on a head of its own.
+pub fn host(p: u8) -> crate::call::CallHost<u8> {
+    crate::call::CallHost::new(p, alloc::sync::Arc::new(crate::driver::NodeHead::new(0)), 1)
+}
+
 /// A context of a poll whose waker does nothing.
 pub fn noop() -> Context<'static> {
     Context::from_waker(Waker::noop())

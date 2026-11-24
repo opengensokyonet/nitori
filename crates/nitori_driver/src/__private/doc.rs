@@ -246,5 +246,5 @@ macro_rules! __doc_component_lends {
 }
 pub use crate::{
     __doc_component_lends as component_lends, __doc_lends as lends, __doc_lends_in as lends_in,
-    lend::context::{Context, RequestList},
+    lend::context::{Context, RequestList, WakeList},
 };

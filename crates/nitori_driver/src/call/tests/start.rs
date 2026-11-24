@@ -6,7 +6,7 @@ use alloc::{string::String, vec::Vec};
 
 use frunk_core::{HList, hlist, hlist_pat};
 
-use super::{Q1, Q2, calls::BudgetA, cx, noop};
+use super::{Q1, Q2, calls::BudgetA, cx, host, noop};
 use crate::{
     call::{Composition, build, poll_call, start_calls},
     component::ArgsOf,
@@ -61,6 +61,7 @@ fn components_first_then_calls() {
         &at,
         &mut cx1,
         budget_a.as_mut(),
+        &mut host(0),
         &mut noop(),
     );
     let pn = lend!(&mut root, LinkPath, HList![Ref<Planner>], at, |hlist_pat![
@@ -91,6 +92,7 @@ fn components_first_then_calls() {
         &at,
         &mut cx2,
         budget_a.as_mut(),
+        &mut host(0),
         &mut noop(),
     );
     let pn = lend!(&mut root, LinkPath, HList![Ref<Planner>], at, |hlist_pat![

@@ -14,7 +14,7 @@ use super::{
     tree::{AddressPos, Collect, Ctx, Elem, FoundIn, KeyPos, UnderPos},
     under::{Body, Gather, UnderBody, by_shape},
 };
-use crate::need::{At, Clock, Mut, Need, OwnAddress, OwnKey, Pos, Ref, Requests, WakerOf};
+use crate::need::{At, Clock, Mut, Need, OwnAddress, OwnKey, Pos, Ref, Requests, WakerOf, Wakes};
 
 /// The components `L` (an `HList`) all together: the members of an
 /// `Under` whose need is a list are the nodes of the one kind that has
@@ -35,7 +35,7 @@ impl<X, T: AllAt<Cs, JT>, Cs: Elem<X, J>, J, JT> AllAt<Cs, HCons<J, JT>> for HCo
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not taken at each member in a list inside `Under`",
     label = "not a need of a list taken at each member",
-    note = "in `Under<A, HList![..]>`, each need is `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OwnKey`, `OwnAddress`, `Clock` or `Requests`; take any other need at each member with `Under<A, At<X, HList![..]>>`, and a list one member at a time with `Under<A, OneAtATime<HList![..]>>`"
+    note = "in `Under<A, HList![..]>`, each need is `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OwnKey`, `OwnAddress`, `Clock`, `Requests` or `Wakes`; take any other need at each member with `Under<A, At<X, HList![..]>>`, and a list one member at a time with `Under<A, OneAtATime<HList![..]>>`"
 )]
 pub trait MemberItem {
     /// The components the member has: none, or one.
@@ -63,6 +63,9 @@ impl<C> MemberItem for Clock<C> {
     type Comps = HNil;
 }
 impl<R> MemberItem for Requests<R> {
+    type Comps = HNil;
+}
+impl<P> MemberItem for Wakes<P> {
     type Comps = HNil;
 }
 
@@ -191,4 +194,5 @@ as_at_member! {
     [A: 'static] OwnAddress, AddressPos<A>;
     [K: nitori_clock::MonotonicClock + 'static, I: 'static] Clock<K>, CxPos<I>;
     [R: 'static, I: 'static] Requests<R>, CxPos<I>;
+    [P: 'static, I: 'static] Wakes<P>, CxPos<I>;
 }

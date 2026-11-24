@@ -171,7 +171,8 @@ impl Visit<PtoNeeds> for Pto {
                 let dropped = congestion.in_flight;
                 congestion.in_flight = 0;
                 let again = clock.checked_add(now, Duration::from_secs(u64::from(factory.made)));
-                (dropped, again, *waker == waker.clone())
+                let copied = *waker;
+                (dropped, again, copied == *waker)
             });
         (now, fired)
     }
@@ -249,7 +250,8 @@ impl Visit<CloseNeeds> for CloseAll {
         for (_, hlist_pat![link, waker, own, pings]) in links.iter_mut() {
             link.rx += 1;
             pings.push(Ping(*own));
-            wakers &= *waker == waker.clone();
+            let copied = *waker;
+            wakers &= copied == *waker;
         }
         closes.push(Close);
         (links.len(), wakers)

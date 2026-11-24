@@ -6,7 +6,7 @@ use frunk_core::{HList, hlist, hlist_pat};
 use super::{
     Q1, Q2,
     calls::{Waiting, set_gate},
-    cx, noop,
+    cx, host, noop,
 };
 use crate::{
     call::{poll_call, start_calls},
@@ -33,6 +33,7 @@ fn pending_then_ready() {
         &at,
         &mut cx1,
         waiting.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());
@@ -45,6 +46,7 @@ fn pending_then_ready() {
         &at,
         &mut cx1,
         waiting.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());
@@ -64,6 +66,7 @@ fn pending_then_ready() {
         &at,
         &mut cx2,
         waiting.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());
@@ -76,6 +79,7 @@ fn pending_then_ready() {
         &at,
         &mut cx2,
         waiting.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());
@@ -98,6 +102,7 @@ fn not_there() {
         &hlist![LinkId(9)],
         &mut cx2,
         waiting.as_mut(),
+        &mut host(0),
         &mut noop(),
     );
     assert!(polled.is_none());

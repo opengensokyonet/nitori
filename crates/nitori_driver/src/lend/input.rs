@@ -10,6 +10,7 @@ use crate::{
     capability::{Capability, Contributed},
     need::{
         At, Cap, Clock, Mut, OneAtATime, OwnAddress, OwnKey, Plus, Ref, Requests, Under, WakerOf,
+        Wakes,
     },
     react::Reactions,
 };
@@ -17,7 +18,7 @@ use crate::{
 /// The need `Self`, in the input of a locator, only reads.
 #[diagnostic::on_unimplemented(
     message = "the input of a locator takes `{Self}`; it may only read",
-    note = "`Locator::Input` is lent to pick the node, beside what is taken there: it takes `Ref`, `OwnKey`, `OwnAddress`, `Clock`, `WakerOf` and capabilities made of them, never `Mut`, `Requests`, a reaction point or `Contributed`"
+    note = "`Locator::Input` is lent to pick the node, beside what is taken there: it takes `Ref`, `OwnKey`, `OwnAddress`, `Clock`, `WakerOf` and capabilities made of them, never `Mut`, `Requests`, `Wakes`, a reaction point or `Contributed`"
 )]
 pub trait InputNeed {}
 impl InputNeed for HNil {}
@@ -43,6 +44,7 @@ impl<T: InputNeed> InputNeed for OneAtATime<T> {}
 impl<Bs: InputNeed> InputNeed for Plus<Bs> {}
 impl<X> InputNeed for Cap<X> where X: CapInput {}
 impl<R> InputNeed for Requests<R> where R: PutInInput {}
+impl<P> InputNeed for Wakes<P> where P: WokenInInput {}
 impl<P, W> InputNeed for Reactions<P, W> where P: FiredInInput {}
 impl<F, L> InputNeed for Contributed<F, L> where F: ContributedInInput {}
 
@@ -61,6 +63,13 @@ impl<X: Capability> CapInput for X where X::Needs: InputNeed {}
     note = "`Locator::Input` is lent to pick the node, beside what is taken there: picking has no effect, and requests are put by what is taken at the node picked or by the need itself"
 )]
 pub trait PutInInput {}
+
+/// Wakes at the priority `Self` put by the input of a locator: never.
+#[diagnostic::on_unimplemented(
+    message = "the input of a locator wakes components at `{Self}`; it may only read",
+    note = "`Locator::Input` is lent to pick the node, beside what is taken there: picking has no effect, and a component is woken by what is taken at the node picked or by the need itself"
+)]
+pub trait WokenInInput {}
 
 /// The reaction point `Self` fired by the input of a locator: never.
 #[diagnostic::on_unimplemented(

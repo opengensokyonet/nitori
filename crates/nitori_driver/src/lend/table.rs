@@ -13,13 +13,15 @@ use frunk_core::{
 };
 
 use super::tree::{FkStep, FlatData, RowFam};
-use crate::structure::{Child, ChildStores, KindFor, Node, Store};
+use crate::structure::{Child, ChildStores, KindFor, Node, NodeIdent, Store};
 
 /// The rows of the nodes of one kind with full keys `F`, and the tables of
 /// the kinds below it.
 pub struct Tab<F, Row, Kids> {
     /// One row per node, in the order of the walk.
     pub rows: Vec<(F, Row)>,
+    /// Which node each row is of, in the order of the rows.
+    pub idents: Vec<NodeIdent>,
     /// One table per child kind, in the order of the children.
     pub kids: Kids,
 }
@@ -27,6 +29,7 @@ impl<F, Row, Kids: Default> Default for Tab<F, Row, Kids> {
     fn default() -> Self {
         Self {
             rows: Vec::new(),
+            idents: Vec::new(),
             kids: Kids::default(),
         }
     }
@@ -59,9 +62,15 @@ where
     where
         Pt: 'a;
     fn fill<'a>(node: &'a mut Node<K, Pt>, fk: F, tab: &mut Self::Table<'a>) {
-        let Node { data, children, .. } = node;
+        let Node {
+            data,
+            children,
+            ident,
+            ..
+        } = node;
         <K::Children as KidTabs<Pt, F>>::fill(children, &fk, &mut tab.kids);
         tab.rows.push((fk, data.row()));
+        tab.idents.push(*ident);
     }
 }
 
@@ -162,6 +171,8 @@ pub trait TabAt<Pt: 'static, F, Rt>: KindTab<Pt, F> {
     fn rows_mut<'a: 'b, 'b>(
         tab: &'b mut Self::Table<'a>,
     ) -> &'b mut Vec<(Self::AtFk, <Self::AtComps as RowFam>::Row<'a>)>;
+    /// Which node each row is of.
+    fn idents<'a: 'b, 'b>(tab: &'b Self::Table<'a>) -> &'b [NodeIdent];
 }
 impl<K, Pt: 'static, F: Clone + PartialEq + 'static> TabAt<Pt, F, HNil> for K
 where
@@ -181,6 +192,9 @@ where
         tab: &'b mut Self::Table<'a>,
     ) -> &'b mut Vec<(F, <Self::AtComps as RowFam>::Row<'a>)> {
         &mut tab.rows
+    }
+    fn idents<'a: 'b, 'b>(tab: &'b Self::Table<'a>) -> &'b [NodeIdent] {
+        &tab.idents
     }
 }
 impl<K, Pt: 'static, F, J, Rt> TabAt<Pt, F, HCons<J, Rt>> for K
@@ -218,6 +232,13 @@ where
             <K::Children as KidTab<Pt, F, J>>::Fk,
             Rt,
         >>::rows_mut(<K::Children as KidTab<Pt, F, J>>::kid_mut(&mut tab.kids))
+    }
+    fn idents<'a: 'b, 'b>(tab: &'b Self::Table<'a>) -> &'b [NodeIdent] {
+        <<K::Children as KidTab<Pt, F, J>>::Kind as TabAt<
+            Pt,
+            <K::Children as KidTab<Pt, F, J>>::Fk,
+            Rt,
+        >>::idents(<K::Children as KidTab<Pt, F, J>>::kid(&tab.kids))
     }
 }
 

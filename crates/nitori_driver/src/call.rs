@@ -77,6 +77,7 @@
 //! ```
 
 mod composition;
+mod host;
 mod kind;
 mod kinds;
 mod pack;
@@ -88,8 +89,11 @@ pub use composition::{
     ClockOf, Composition, ContextOf, KindsOf, PartsOf, PriorityOf, RootNode, RootOf,
 };
 #[allow(unused_imports)]
-pub(crate) use composition::{context, take_requests};
-pub use kind::{CallFamily, CallKind, CallView, Lent, Loan, LoanNeeds, RunsOn};
+pub(crate) use composition::{context, request_lists, set_now, take_requests, take_wakes};
+#[allow(unused_imports)]
+pub(crate) use host::CallHost;
+pub use host::Settle;
+pub use kind::{CallFamily, CallKind, CallView, Lent, Loan, LoanHost, LoanNeeds, RunsOn};
 pub use kinds::OtherKind;
 #[allow(unused_imports)]
 pub(crate) use pack::{build, end, node_ending, node_started, poll_call, start_calls, wake};
@@ -106,6 +110,13 @@ use self::{
     },
 };
 
+/// The items of the pack at a position of the structure, for the driver.
+pub(crate) mod pack_at {
+    pub(crate) use super::pack::{
+        CallKindsAt, CallsAt, DescAt, EndReasonOf, FkAt, IndexValue, KindPosAt, StartAt, TableNth,
+    };
+}
+
 /// What a composition proves and packs, kind by kind: the items its proof
 /// and the driver's lending go through, which
 /// [`composition!`](crate::composition!) names. Not for use otherwise.
@@ -115,12 +126,12 @@ pub mod __pack {
         composition::new_root,
         kinds::{
             AllKinds, AnyIs, Comp, FindAt, FindInKids, FindKind, HasKind, InPart, KidKinds,
-            KindsOnce, ListRest, Or, PartsCalls, PartsComps, PickKid, RequestLists,
+            KindsOnce, ListRest, Or, PartsCalls, PartsComps, PickKid, RequestLists, RequestQueues,
         },
         pack::{
-            CallList, CompList, Desc, KindDesc, KindList, KindOps, NewAt, NoKind, NoKindPos,
-            PackList,
+            CallList, CompList, Desc, KindDesc, KindList, KindOps, KindVisit, NewAt, NewAtOf,
+            NoKind, NoKindPos, PackList, SlotPoll, TableOf,
         },
-        prove::{KindPositions, Prove, ProveCalls, ProveComps, RootBuild, prove},
+        prove::{FewCalls, Fits, KindPositions, Prove, ProveCalls, ProveComps, RootBuild, prove},
     };
 }

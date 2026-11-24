@@ -4,7 +4,7 @@ use core::{convert::Infallible, marker::PhantomData, pin::Pin};
 
 use nitori_call::{Access, LentSlot, Operation, ReceiverFamily, Start};
 
-use super::Composition;
+use super::{Composition, PriorityOf, host::CallHost};
 use crate::{
     need::{Need, Pos, View},
     structure::NodeKind,
@@ -94,10 +94,29 @@ pub type CallView<'v, Q, K, C, KP> = View<'v, <C as CallKind<Q, K>>::Needs, KP>;
 #[allow(clippy::type_complexity)]
 pub struct Lent<Q, K, C, KP>(PhantomData<fn() -> (Q, K, C, KP)>);
 
-/// What a call is lent on one poll: the view of its needs.
-pub struct Loan<'v, Q: Composition, K: NodeKind, C: CallKind<Q, K>, KP: Pos>(
-    pub(crate) CallView<'v, Q, K, C, KP>,
-);
+/// What a call is lent on one poll: the view of its needs, and the
+/// driver's side of the call.
+pub struct Loan<'v, Q: Composition, K: NodeKind, C: CallKind<Q, K>, KP: Pos> {
+    pub(crate) view: CallView<'v, Q, K, C, KP>,
+    pub(crate) host: CallHost<PriorityOf<Q>>,
+}
+impl<Q: Composition, K: NodeKind, C: CallKind<Q, K>, KP: Pos> Loan<'_, Q, K, C, KP> {
+    /// From now on, rank the call at `p` when its standard waker, the one
+    /// its `.await`s register, is woken. The priority is read when the
+    /// wake is handled, so a waker handed out before keeps up with it; it
+    /// is the priority the node was added with until set.
+    pub fn set_wake_priority(&self, p: PriorityOf<Q>) {
+        self.host.set_wake_priority(p);
+    }
+    /// The wait for the requests the call put in: awaited, outside
+    /// `host.with`, it gives way once, the driver handles every request
+    /// put in so far, and the call goes on at `p`. The requests are
+    /// handled first; after them, what runs next is decided by priority
+    /// only. See [`Settle`](super::Settle).
+    pub fn settle(&self, p: PriorityOf<Q>) -> super::Settle {
+        self.host.settle(p)
+    }
+}
 // A loan holds borrows only; nothing in it is pinned structurally. The
 // view's type has projections in it, so `Unpin` is not inferred.
 impl<Q: Composition, K: NodeKind, C: CallKind<Q, K>, KP: Pos> Unpin for Loan<'_, Q, K, C, KP> {}
@@ -131,6 +150,13 @@ pub trait CallFamily: ReceiverFamily + 'static {
     ) -> &'s mut CallView<'v, Self::Q, Self::K, Self::C, Self::KP>
     where
         Self: 'v;
+    /// This poll's loan.
+    #[allow(clippy::type_complexity)]
+    fn loan<'s, 'v>(
+        view: Pin<&'s mut Self::ReceiverView<'v>>,
+    ) -> &'s mut Loan<'v, Self::Q, Self::K, Self::C, Self::KP>
+    where
+        Self: 'v;
 }
 impl<Q: Composition, K: NodeKind, C: CallKind<Q, K>, KP: Pos> CallFamily for Lent<Q, K, C, KP> {
     type Q = Q;
@@ -141,7 +167,13 @@ impl<Q: Composition, K: NodeKind, C: CallKind<Q, K>, KP: Pos> CallFamily for Len
     where
         Self: 'v,
     {
-        &mut view.get_mut().0
+        &mut view.get_mut().view
+    }
+    fn loan<'s, 'v>(view: Pin<&'s mut Loan<'v, Q, K, C, KP>>) -> &'s mut Loan<'v, Q, K, C, KP>
+    where
+        Self: 'v,
+    {
+        view.get_mut()
     }
 }
 
@@ -158,6 +190,24 @@ pub trait LoanNeeds<'h, W: CallFamily> {
 impl<'h, W: CallFamily> LoanNeeds<'h, W> for Access<'_, 'h, W> {
     fn needs(&mut self) -> &mut CallView<'h, W::Q, W::K, W::C, W::KP> {
         W::needs(self.as_pin())
+    }
+}
+
+/// The driver's side of a call's loan, as `view.settle(p)` inside
+/// `host.with(|mut view| …)`: [`Loan::set_wake_priority`] and
+/// [`Loan::settle`].
+pub trait LoanHost<W: CallFamily> {
+    /// [`Loan::set_wake_priority`].
+    fn set_wake_priority(&mut self, p: PriorityOf<W::Q>);
+    /// [`Loan::settle`]: the wait, to await outside `host.with`.
+    fn settle(&mut self, p: PriorityOf<W::Q>) -> super::Settle;
+}
+impl<W: CallFamily> LoanHost<W> for Access<'_, '_, W> {
+    fn set_wake_priority(&mut self, p: PriorityOf<W::Q>) {
+        W::loan(self.as_pin()).set_wake_priority(p);
+    }
+    fn settle(&mut self, p: PriorityOf<W::Q>) -> super::Settle {
+        W::loan(self.as_pin()).settle(p)
     }
 }
 

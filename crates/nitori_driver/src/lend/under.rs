@@ -21,7 +21,7 @@ use crate::{
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not taken at each member of an `Under`",
     label = "not a need taken at each member",
-    note = "`Under<A, T>` takes `T` at each member: `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OneAtATime<..>`, or a list of `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OwnKey`, `OwnAddress`, `Clock` and `Requests`; take any other need at each member with `Under<A, At<X, HList![..]>>`"
+    note = "`Under<A, T>` takes `T` at each member: `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OneAtATime<..>`, or a list of `Mut`, `Ref`, `WakerOf`, `At<X, ..>`, `OwnKey`, `OwnAddress`, `Clock`, `Requests` and `Wakes`; take any other need at each member with `Under<A, At<X, HList![..]>>`"
 )]
 pub trait UnderBody: MemberNeed {
     /// The members are the nodes of the one kind that has it: a component,

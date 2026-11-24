@@ -32,9 +32,6 @@ pub trait Pos: 'static {
     /// at a time: those of the branches of a [`Plus`](super::Plus), or of
     /// the members of a [`OneAtATime`](super::OneAtATime).
     type Held<'t> = ();
-    /// What [`WakerOf`](super::WakerOf) is lent as: the waker of a
-    /// component of one node.
-    type Waker: Clone + PartialEq + 'static = ();
 }
 
 /// The position of nothing: every item of [`Pos`] unused.

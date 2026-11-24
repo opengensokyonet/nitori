@@ -61,7 +61,7 @@ mod view;
 mod waker;
 
 pub use cap::Cap;
-pub use context::{Clock, LentClock, RequestBox, Requests};
+pub use context::{Clock, LentClock, RequestBox, Requests, WakeBox, Wakes};
 pub use locator::{AtTarget, Count, ExactlyOne, Locator, OneOrNone};
 pub use one_at_a_time::{OneAtATime, OneView};
 pub use plus::{BranchAt, Branches, Plus, PlusView, Take};

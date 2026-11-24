@@ -5,7 +5,7 @@ use core::{cell::Cell, marker::PhantomData, time::Duration};
 
 use nitori_clock::MonotonicClock;
 
-use super::{Need, Pos};
+use super::{ComponentWaker, Need, Pos};
 
 /// The instant the driver read from its clock `C` for this lending, and
 /// the addition of durations on that clock.
@@ -30,6 +30,10 @@ impl<C: MonotonicClock> LentClock<C> {
     /// The clock `clock`, read at `now`.
     pub(crate) fn new(clock: C, now: C::Instant) -> Self {
         Self { clock, now }
+    }
+    /// Read again, at `now`.
+    pub(crate) fn set_now(&mut self, now: C::Instant) {
+        self.now = now;
     }
     /// The instant read for this lending.
     pub fn now(&self) -> C::Instant {
@@ -103,5 +107,67 @@ impl<'t, R> RequestBox<'t, R> {
         let mut requests = self.requests.take();
         requests.push((at, request));
         self.requests.set(requests);
+    }
+}
+
+/// Waking components at a priority `P`: the wakes put in during a
+/// lending, which the driver ranks in its ready queue after the lending's
+/// requests.
+///
+/// `P` is the composition's priority; a context without a list for it
+/// does not compile. Waking only adds, so it overlaps no other need: a list
+/// may take `Wakes<P>` more than once, and every member of an
+/// [`Under`](super::Under) may take it, all waking through the one list.
+///
+/// ```
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends_in!(
+///     HList![WakeList<u8>],
+///     LinkPath,
+///     HList![
+///         Mut<LinkCore>,
+///         WakerOf<Planner>,
+///         Wakes<u8>,
+///         Under<ConnCore, HList![WakerOf<LinkCore>, Wakes<u8>]>,
+///         Under<ConnCore, OneAtATime<HList![Mut<Planner>, Wakes<u8>]>>
+///     ]
+/// );
+/// ```
+///
+/// Another priority than the context's does not compile:
+///
+/// ```compile_fail,E0277
+/// # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
+/// lends_in!(HList![WakeList<u8>], LinkPath, HList![Wakes<u16>]);
+/// ```
+pub struct Wakes<P>(PhantomData<fn() -> P>);
+impl<P: 'static> Need for Wakes<P> {
+    type View<'t, Q: Pos> = WakeBox<'t, P>;
+}
+
+/// What [`Wakes`]`<P>` is lent as: the list the wakes are put in.
+///
+/// A handle, copied to every need that takes it.
+pub struct WakeBox<'t, P> {
+    wakes: &'t Cell<Vec<(ComponentWaker, P)>>,
+}
+impl<P> Clone for WakeBox<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<P> Copy for WakeBox<'_, P> {}
+impl<'t, P> WakeBox<'t, P> {
+    /// The box of `wakes`.
+    pub(crate) fn new(wakes: &'t Cell<Vec<(ComponentWaker, P)>>) -> Self {
+        Self { wakes }
+    }
+    /// Wake the component of `waker` at the priority `p`. Woken again
+    /// before it is handled, it is handled once, at the highest priority
+    /// it was woken at.
+    pub fn wake(&self, waker: &ComponentWaker, p: P) {
+        let mut wakes = self.wakes.take();
+        wakes.push((*waker, p));
+        self.wakes.set(wakes);
     }
 }

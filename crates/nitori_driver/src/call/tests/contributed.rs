@@ -12,7 +12,7 @@ use frunk_core::{
 };
 use nitori_call::{LentAccess, call};
 
-use super::{Q1, Q2, cx, noop};
+use super::{Q1, Q2, cx, host, noop};
 use crate::{
     call::{CallFamily, CallKind, Composition, LoanNeeds, PartsOf, poll_call, start_calls},
     capability::{Contribute, Contributed, DispatchRun, DispatchSum, PieceList},
@@ -191,6 +191,7 @@ fn dispatched_through_the_bound() {
         &at,
         &mut cx1,
         receiving.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());
@@ -220,6 +221,7 @@ fn dispatched_through_the_bound() {
         &at,
         &mut cx2,
         receiving.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());

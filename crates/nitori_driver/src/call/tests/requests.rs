@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use frunk_core::{hlist, hlist_pat};
 
-use super::{Q1, Q2, calls::Closing, cx, noop};
+use super::{Q1, Q2, calls::Closing, cx, host, noop};
 use crate::{
     call::{poll_call, start_calls, take_requests},
     lend::tests::fixtures::{
@@ -23,6 +23,7 @@ fn put_in_and_taken() {
         &hlist![PathKey(10), LinkId(2)],
         &mut cx1,
         closing.as_mut(),
+        &mut host(0),
         &mut noop(),
     );
     let one: (_, Vec<(u64, u32)>) = (
@@ -43,6 +44,7 @@ fn put_in_and_taken() {
         &hlist![LinkId(2)],
         &mut cx2,
         closing.as_mut(),
+        &mut host(0),
         &mut noop(),
     );
     let requests = take_requests::<Q2, Conn2, _>(&mut cx2);

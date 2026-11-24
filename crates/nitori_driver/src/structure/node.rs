@@ -1,5 +1,9 @@
 //! Nodes: the parts' shares and the stores of the children.
-use core::{marker::PhantomData, ops::Add};
+use core::{
+    marker::PhantomData,
+    ops::Add,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
 
 use frunk_core::{
     hlist::{HCons, HList, HNil},
@@ -14,9 +18,6 @@ use super::{Child, ChildIndex, ChildList, ChildStorage, NodeKind, StoreOf};
 pub trait Share<K> {
     /// The components.
     type Data: HList + 'static;
-    /// What the part keeps of its share after the root of the tree ended;
-    /// `()` by default. Only the root's is kept.
-    type Remains: Default + 'static = ();
     /// The reactions of the part at the nodes of this kind: a list of
     /// [`ReactsTo`](crate::react::ReactsTo)`<point, reaction>`, none by
     /// default.
@@ -27,21 +28,6 @@ pub trait Share<K> {
     /// ([`CallKind::start`](crate::call::CallKind::start)).
     type Calls: HList + 'static = HNil;
 }
-
-/// What the parts `Self` keep of their shares in a node of the kind `K`
-/// after it ended, one per part, in the order of the parts.
-pub trait RemainsList<K>: 'static {
-    /// The list.
-    type Remains: Default + HList + 'static;
-}
-impl<K> RemainsList<K> for HNil {
-    type Remains = HNil;
-}
-impl<K, Pt: Share<K> + 'static, T: RemainsList<K>> RemainsList<K> for HCons<Pt, T> {
-    type Remains = HCons<Pt::Remains, T::Remains>;
-}
-/// What the parts `P` keep after a node of the kind `K` ended.
-pub type RemainsOf<P, K> = <P as RemainsList<K>>::Remains;
 
 /// The shares of a list of parts in a node of the kind `K`, one list per
 /// part, in the order of the parts.
@@ -85,6 +71,35 @@ impl<P, CK: KindFor<P>, S: ChildStorage, T: ChildStores<P>> ChildStores<P>
     type Stores = HCons<S::Store<Node<CK, P>>, T::Stores>;
 }
 
+/// Which node a node is: the number its driver keeps it under, which the
+/// driver gives to another node once this one ended and nothing refers to
+/// it, and a serial no other node of the process has.
+///
+/// Not reachable from outside the crate; `pub` because the lending's
+/// plans name it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct NodeIdent {
+    /// The number in the driver's table; [`NodeIdent::NO_NUMBER`] for a
+    /// node no driver keeps.
+    pub(crate) number: u32,
+    /// The serial, given when the node was made.
+    pub(crate) serial: u64,
+}
+impl NodeIdent {
+    /// The number of a node no driver keeps.
+    pub(crate) const NO_NUMBER: u32 = u32::MAX;
+    /// A new serial, with no number yet.
+    fn fresh() -> Self {
+        // Serials are only told apart; a relaxed count gives each node its
+        // own, and 2⁶⁴ of them are not used up.
+        static SERIALS: AtomicU64 = AtomicU64::new(0);
+        Self {
+            number: Self::NO_NUMBER,
+            serial: SERIALS.fetch_add(1, Relaxed),
+        }
+    }
+}
+
 /// A node of the kind `K` for the parts `P`: the parts' shares and the
 /// stores of its children.
 pub struct Node<K: KindFor<P>, P> {
@@ -92,6 +107,8 @@ pub struct Node<K: KindFor<P>, P> {
     pub data: K::Data,
     /// The stores of the children, one per child of the kind.
     pub children: <K::Children as ChildStores<P>>::Stores,
+    /// Which node it is.
+    pub(crate) ident: NodeIdent,
     _parts: PhantomData<fn() -> P>,
 }
 impl<K: KindFor<P>, P> Node<K, P> {
@@ -100,6 +117,7 @@ impl<K: KindFor<P>, P> Node<K, P> {
         Self {
             data,
             children: Default::default(),
+            ident: NodeIdent::fresh(),
             _parts: PhantomData,
         }
     }

@@ -1,6 +1,7 @@
 //! What a composition reads off its structure: every kind, where each is,
 //! that none is at two places, the calls and components of each kind, and
 //! a request box for each kind.
+use alloc::vec::Vec;
 use core::ops::Add;
 
 use frunk_core::hlist::{HCons, HList, HNil};
@@ -13,7 +14,7 @@ use crate::{
         tree::{InKid, IsSelf, KHead, KTail},
     },
     request::NodeRequest,
-    structure::{Child, NodeKind, Share},
+    structure::{Child, KeyRoute, NodeKind, Share},
 };
 
 // ------------------------------------------------------------------ where a kind is
@@ -203,7 +204,7 @@ pub(crate) type CompsOf<Pt, K> = <Pt as PartsComps<K>>::Comps;
 /// root is of the kind `R`, in the order of the kinds.
 pub trait RequestLists<R: NodeKind> {
     /// The boxes.
-    type Lists: Pieces;
+    type Lists: Pieces + RequestQueues<R>;
     /// Every box, empty.
     fn lists() -> Self::Lists;
 }
@@ -213,6 +214,70 @@ impl<R: NodeKind> RequestLists<R> for HNil {
         HNil
     }
 }
+/// The request boxes `Self` of every kind of a structure whose root is
+/// of the kind `R`, as the driver handles them: by the number of the
+/// kind, counted from the first box.
+pub trait RequestQueues<R: NodeKind> {
+    /// Queue the requests put in so far, and note every one queued with
+    /// its place in the order and its kind, the first box being `kind`.
+    fn enqueue_all(&mut self, kind: usize, out: &mut Vec<(u64, usize)>);
+    /// The route of the first request queued in the box `kind`, with its
+    /// place in the order.
+    fn first(&self, kind: usize) -> Option<(u64, &KeyRoute<R>)>;
+    /// Take the first request queued in the box `kind` off the queue, and
+    /// keep it for the handler of its kind, or drop it.
+    fn pop(&mut self, kind: usize, keep: bool);
+    /// How many requests are kept for the handlers, in every box.
+    fn held(&self) -> usize;
+    /// Drop every request in every box.
+    fn clear_all(&mut self);
+}
+impl<R: NodeKind> RequestQueues<R> for HNil {
+    fn enqueue_all(&mut self, _: usize, _: &mut Vec<(u64, usize)>) {}
+    fn first(&self, _: usize) -> Option<(u64, &KeyRoute<R>)> {
+        None
+    }
+    fn pop(&mut self, _: usize, _: bool) {}
+    fn held(&self) -> usize {
+        0
+    }
+    fn clear_all(&mut self) {}
+}
+impl<R: NodeKind, K: NodeKind, T: RequestQueues<R>> RequestQueues<R>
+    for HCons<RequestList<NodeRequest<R, K>>, T>
+{
+    fn enqueue_all(&mut self, kind: usize, out: &mut Vec<(u64, usize)>) {
+        self.head.enqueue();
+        out.extend(self.head.queued().map(|order| (order, kind)));
+        self.tail.enqueue_all(kind + 1, out);
+    }
+    fn first(&self, kind: usize) -> Option<(u64, &KeyRoute<R>)> {
+        match kind.checked_sub(1) {
+            None => self.head.first().map(|(order, r)| (*order, r.at.route())),
+            Some(rest) => self.tail.first(rest),
+        }
+    }
+    fn pop(&mut self, kind: usize, keep: bool) {
+        match kind.checked_sub(1) {
+            None => {
+                if let Some(r) = self.head.pop()
+                    && keep
+                {
+                    self.head.hold(r);
+                }
+            }
+            Some(rest) => self.tail.pop(rest, keep),
+        }
+    }
+    fn held(&self) -> usize {
+        self.head.held_len() + self.tail.held()
+    }
+    fn clear_all(&mut self) {
+        self.head.clear();
+        self.tail.clear_all();
+    }
+}
+
 impl<R: NodeKind, K: NodeKind, T: RequestLists<R>> RequestLists<R> for HCons<K, T> {
     type Lists = HCons<RequestList<NodeRequest<R, K>>, T::Lists>;
     fn lists() -> Self::Lists {

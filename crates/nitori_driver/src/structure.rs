@@ -29,9 +29,8 @@ pub use kind::{
     Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, NoChild,
     NoStore, NodeKind, StorageAt,
 };
-pub use node::{
-    ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, RemainsList, RemainsOf, Share, Shares,
-};
+pub(crate) use node::NodeIdent;
+pub use node::{ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, Share, Shares};
 pub use path::{
     Append, End, FromAddress, KeyedPath, NodePath, ParentPath, PathFrom, SplitLast, Step,
 };

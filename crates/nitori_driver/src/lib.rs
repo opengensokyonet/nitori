@@ -19,6 +19,7 @@ pub use frunk_core;
 pub mod call;
 pub mod capability;
 pub mod component;
+pub mod driver;
 pub mod id;
 pub(crate) mod lend;
 pub mod need;

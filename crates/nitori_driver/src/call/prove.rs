@@ -7,6 +7,7 @@
 //! ([`composition!`](crate::composition!)), by the bounds of [`Prove`];
 //! what they make is the pack's items, whose operations ([`KindOps`],
 //! [`CallList`], [`CompList`]) lend at them without inferring again.
+use alloc::boxed::Box;
 use core::{
     marker::PhantomData,
     pin::Pin,
@@ -17,13 +18,17 @@ use frunk_core::hlist::{HCons, HNil};
 use nitori_call::LentCall;
 
 use super::{
-    CallKind, Comp, Composition, ContextOf, Lent, Loan, PartsOf, RootNode, RootOf, RunsOn,
+    CallKind, Comp, Composition, ContextOf, Lent, Loan, PartsOf, PriorityOf, RootNode, RootOf,
+    RunsOn,
+    host::CallHost,
     kinds::{KindsOnce, ListRest},
-    pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindOps},
+    pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindOps, SlotPoll},
 };
 use crate::{
     component::{ArgsOf, Component, EndCause},
-    id::Numbered,
+    driver::FkPlace,
+    id::{NumberValue, Numbered, number_of},
+    lend::list::{S, Z},
     lend::{
         build::{NewPointCx, NewPointFk},
         entry::{
@@ -34,8 +39,29 @@ use crate::{
     },
     need::Pos,
     react::{NodeEnding, NodeStarted},
-    structure::{KindFor, NodeKind},
+    structure::{KindFor, Node, NodeIdent, NodeKind},
 };
+
+/// The most calls a kind of node has: the driver keeps a bit for each in
+/// one word.
+type MaxCalls = S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<S<Z>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>;
+
+/// A list with at most the budget `B` of items.
+pub trait Fits<B> {}
+impl<B> Fits<B> for HNil {}
+impl<H, T: Fits<B>, B> Fits<S<B>> for HCons<H, T> {}
+
+/// The calls `Self` of one kind of node are few enough for the driver.
+#[diagnostic::on_unimplemented(
+    message = "a kind of node has more than 64 calls",
+    label = "the calls of the shares at one kind",
+    note = "the driver keeps a bit for each call of a node in one word; split the calls between kinds, or join some of them into one call"
+)]
+pub trait FewCalls {}
+impl<L: Fits<MaxCalls>> FewCalls for L {}
+
+/// The route from the root of `Q` to the kind `K`.
+type RouteOf<Q, K> = <RootOf<Q> as Locate<K, IlOf<Q, K>>>::Route;
 
 /// What was proved of one kind: the positions of its calls `PC`, of its
 /// components `PO`, of its build `IB`, and of the reaction points
@@ -85,7 +111,7 @@ where
     Q: Composition,
     K: KindFor<PartsOf<Q>>,
     Desc<K>: KindDesc<Q, Kind = K>,
-    CallsOfDesc<Q, K>: ProveCalls<Q, K, IC>,
+    CallsOfDesc<Q, K>: ProveCalls<Q, K, IC> + FewCalls,
     CompsOfDesc<Q, K>: ProveComps<Q, K, IO>,
     IlOf<Q, K>: BuildAt<Q, K, IB>,
     NodeStarted<K>: Numbered,
@@ -258,9 +284,40 @@ where
         Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IS, Fk = FkOf<Q, K>>,
     EndingReactions<K>:
         Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, IE, Fk = FkOf<Q, K>>,
+    RootOf<Q>: Locate<K, IlOf<Q, K>>,
+    (RootOf<Q>, RouteOf<Q, K>): FkPlace<PartsOf<Q>, FkOf<Q, K>, Kind0 = RootOf<Q>, Target = K>,
 {
     type Calls = PC;
     type Comps = PO;
+    fn build_at(
+        root: &mut RootNode<Q>,
+        at: &FkOf<Q, K>,
+        start: &mut K::Start,
+        args: &ArgsOf<PartsOf<Q>>,
+        cx: &mut ContextOf<Q>,
+    ) -> Option<<K as KindFor<PartsOf<Q>>>::Data> {
+        let at = <Desc<K> as KindDesc<Q>>::new_at(at);
+        <IlOf<Q, K> as BuildAt<Q, K, IB>>::build(root, &at, start, args, cx)
+    }
+    fn vacant(root: &RootNode<Q>, at: &FkOf<Q, K>) -> Option<bool> {
+        <(RootOf<Q>, RouteOf<Q, K>) as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::vacant(root, at)
+    }
+    fn insert(
+        root: &mut RootNode<Q>,
+        at: &FkOf<Q, K>,
+        data: <K as KindFor<PartsOf<Q>>>::Data,
+        number: u32,
+    ) -> Result<(NodeIdent, NodeIdent), <K as KindFor<PartsOf<Q>>>::Data> {
+        let mut node = Node::<K, PartsOf<Q>>::new(data);
+        node.ident.number = number;
+        let own = node.ident;
+        <(RootOf<Q>, RouteOf<Q, K>) as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::insert(root, at, node)
+            .map(|parent| (own, parent))
+            .map_err(|node| node.data)
+    }
+    fn remove(root: &mut RootNode<Q>, at: &FkOf<Q, K>) -> bool {
+        <(RootOf<Q>, RouteOf<Q, K>) as FkPlace<PartsOf<Q>, FkOf<Q, K>>>::remove(root, at).is_some()
+    }
     fn build(
         root: &mut RootNode<Q>,
         at: &<Desc<K> as KindDesc<Q>>::NewAt,
@@ -287,11 +344,13 @@ where
     C: CallKind<Q, K>,
     P: Pos,
     C::Needs: Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, P, Fk = FkOf<Q, K>>,
-    C::Op: RunsOn<Lent<Q, K, C, P>>,
+    C::Op: RunsOn<Lent<Q, K, C, P>> + 'static,
     PT: CallList<Q, Desc<K>, Ct>,
 {
     type HeadRunning = LentCall<Lent<Q, K, C, P>, C::Op>;
     type Tail = PT;
+    type Slots = HCons<Option<Pin<Box<Self::HeadRunning>>>, PT::Slots>;
+    const COUNT: u32 = PT::COUNT + 1;
     fn start_head(start: &mut K::Start) -> Self::HeadRunning {
         LentCall::new(C::start(start))
     }
@@ -300,17 +359,57 @@ where
         at: &FkOf<Q, K>,
         cx: &mut ContextOf<Q>,
         call: Pin<&mut Self::HeadRunning>,
+        host: &mut CallHost<PriorityOf<Q>>,
         wcx: &mut task::Context<'_>,
     ) -> Option<Poll<()>> {
-        <C::Needs as Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, P>>::lend_to(
-            root,
-            at,
-            cx,
-            move |view| {
-                let mut loan = Loan::<Q, K, C, P>(view);
-                call.poll_return_with_views(Pin::new(&mut loan), wcx)
-            },
-        )
+        // The loan holds a copy of what the driver keeps of the call, so
+        // that it borrows nothing beside the view; it is written back
+        // after the poll.
+        let lent = host.clone();
+        let (polled, lent) =
+            <C::Needs as Lends<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, ContextOf<Q>, P>>::lend_to(
+                root,
+                at,
+                cx,
+                move |view| {
+                    let mut loan = Loan::<Q, K, C, P> { view, host: lent };
+                    let polled = call.poll_return_with_views(Pin::new(&mut loan), wcx);
+                    (polled, loan.host)
+                },
+            )?;
+        *host = lent;
+        Some(polled)
+    }
+    fn start_slots(start: &mut K::Start) -> Self::Slots {
+        let head = Some(Box::pin(Self::start_head(start)));
+        HCons {
+            head,
+            tail: PT::start_slots(start),
+        }
+    }
+    fn poll_slot(
+        root: &mut RootNode<Q>,
+        at: &FkOf<Q, K>,
+        cx: &mut ContextOf<Q>,
+        slots: &mut Self::Slots,
+        j: u32,
+        host: &mut CallHost<PriorityOf<Q>>,
+        wcx: &mut task::Context<'_>,
+    ) -> SlotPoll {
+        let Some(rest) = j.checked_sub(1) else {
+            let Some(call) = &mut slots.head else {
+                return SlotPoll::NoCall;
+            };
+            return match Self::poll_head(root, at, cx, call.as_mut(), host, wcx) {
+                None => SlotPoll::NotThere,
+                Some(Poll::Ready(())) => {
+                    slots.head = None;
+                    SlotPoll::Returned
+                }
+                Some(Poll::Pending) => SlotPoll::Pending,
+            };
+        };
+        PT::poll_slot(root, at, cx, &mut slots.tail, rest, host, wcx)
     }
 }
 
@@ -321,7 +420,7 @@ where
     K: NodeKind,
     Desc<K>: KindDesc<Q, Kind = K>,
     Ct: ListRest,
-    C: Component<O, PartsOf<Q>, K>,
+    C: Component<O, PartsOf<Q>, K> + Numbered<Number: NumberValue>,
     PT: Pos,
     P: Pos,
     OwnNeeds<C, O, PartsOf<Q>, K>:
@@ -341,5 +440,26 @@ where
         entry::end::<RootOf<Q>, PartsOf<Q>, K, IlOf<Q, K>, O, C, PT, P, ContextOf<Q>>(
             root, at, cx, cause,
         )
+    }
+    fn wake_number(
+        root: &mut RootNode<Q>,
+        at: &FkOf<Q, K>,
+        cx: &mut ContextOf<Q>,
+        number: u64,
+    ) -> Option<Option<()>> {
+        if number_of::<C>() == number {
+            return Some(Self::wake_head(root, at, cx));
+        }
+        PR::wake_number(root, at, cx, number)
+    }
+    fn end_all(
+        root: &mut RootNode<Q>,
+        at: &FkOf<Q, K>,
+        cx: &mut ContextOf<Q>,
+        cause: EndCause<'_, K::EndReason>,
+    ) {
+        // A node not in the tree has no components to end.
+        let _ = Self::end_head(root, at, cx, cause);
+        PR::end_all(root, at, cx, cause);
     }
 }

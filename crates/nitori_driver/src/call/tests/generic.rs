@@ -5,7 +5,7 @@ use alloc::{string::String, vec::Vec};
 
 use frunk_core::{HList, hlist, hlist_pat};
 
-use super::{Q1, Q2, calls::Sending, cx, noop};
+use super::{Q1, Q2, calls::Sending, cx, host, noop};
 use crate::{
     call::{poll_call, start_calls},
     lend::tests::{
@@ -64,6 +64,7 @@ fn one_function_on_both() {
         &at,
         &mut cx1,
         sending.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());
@@ -82,6 +83,7 @@ fn one_function_on_both() {
         &at,
         &mut cx2,
         sending.as_mut(),
+        &mut host(0),
         &mut noop(),
     )
     .map(|p| p.is_ready());

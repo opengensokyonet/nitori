@@ -2,6 +2,7 @@
 use core::marker::PhantomData;
 
 use super::{MemberNeed, Need, Pos, Shape};
+use crate::structure::NodeIdent;
 
 /// The waker of the component `X`, without borrowing `X`: of the one node
 /// from the lend point up to the root that has it, or of each member
@@ -21,43 +22,37 @@ use super::{MemberNeed, Need, Pos, Shape};
 /// ```
 pub struct WakerOf<X>(PhantomData<fn() -> X>);
 impl<X: 'static> Need for WakerOf<X> {
-    type View<'t, P: Pos> = P::Waker;
+    type View<'t, P: Pos> = ComponentWaker;
 }
 impl<X: 'static> MemberNeed for WakerOf<X> {
     type Collected<'t, P: Pos> = <P::Shape as Shape>::Out<Self::View<'t, P::Inner>>;
 }
 
 /// What [`WakerOf`]`<X>` is lent as: the waker of the component `X` of
-/// the node of the kind at the route `Rt` with the full key `F`.
+/// one node, which the driver made.
 ///
-/// This type is provisional: it is the node's identity, and two are equal
-/// when they are of the same node.
-pub struct ComponentWaker<X, Rt, F> {
-    node: F,
-    _of: PhantomData<fn() -> (X, Rt)>,
+/// It names the node and the component, and holds nothing of either: it
+/// is copied freely, compared, and sent to another thread. Two are equal
+/// when they are of the same component of the same node. A node that
+/// ended is not woken by it, nor is another node built later under the
+/// same key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ComponentWaker {
+    node: NodeIdent,
+    component: u64,
 }
-impl<X, Rt, F> ComponentWaker<X, Rt, F> {
-    /// The waker of `X` of the node with the full key `node`.
-    pub(crate) fn new(node: F) -> Self {
-        Self {
-            node,
-            _of: PhantomData,
-        }
+impl ComponentWaker {
+    /// The waker of the component numbered `component` of the node
+    /// `node`.
+    pub(crate) fn new(node: NodeIdent, component: u64) -> Self {
+        Self { node, component }
     }
-}
-impl<X, Rt, F: Clone> Clone for ComponentWaker<X, Rt, F> {
-    fn clone(&self) -> Self {
-        Self::new(self.node.clone())
+    /// The node it wakes.
+    pub(crate) fn node(&self) -> NodeIdent {
+        self.node
     }
-}
-impl<X, Rt, F: PartialEq> PartialEq for ComponentWaker<X, Rt, F> {
-    fn eq(&self, other: &Self) -> bool {
-        self.node == other.node
-    }
-}
-impl<X, Rt, F: Eq> Eq for ComponentWaker<X, Rt, F> {}
-impl<X, Rt, F: core::fmt::Debug> core::fmt::Debug for ComponentWaker<X, Rt, F> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("ComponentWaker").field(&self.node).finish()
+    /// The number of the component it wakes.
+    pub(crate) fn component(&self) -> u64 {
+        self.component
     }
 }

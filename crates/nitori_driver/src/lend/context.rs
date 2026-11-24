@@ -7,7 +7,7 @@
 //! pass. Every piece is shared: the clock is read, and a request box only
 //! adds, numbering each request from the one order of the context, so no
 //! context need overlaps another.
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{cell::Cell, marker::PhantomData};
 
 use frunk_core::{
@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     id::False,
-    need::{Clock, LentClock, Pos, RequestBox, Requests},
+    need::{Clock, ComponentWaker, LentClock, Pos, RequestBox, Requests, WakeBox, Wakes},
 };
 
 // ------------------------------------------------------------------ the context
@@ -114,20 +114,62 @@ impl<C: MonotonicClock + 'static> Piece for LentClock<C> {
 
 /// The requests `R` put in during a lending, each with its place in the
 /// order of the context.
+///
+/// The driver handles them from a queue: it moves the requests put in so
+/// far to the queue, then takes them off one at a time, in the order of
+/// the context across every list.
 pub struct RequestList<R> {
     requests: Vec<(u64, R)>,
+    queue: VecDeque<(u64, R)>,
+    held: Vec<(u64, R)>,
 }
 impl<R> RequestList<R> {
     /// No requests.
     pub(crate) fn new() -> Self {
         Self {
             requests: Vec::new(),
+            queue: VecDeque::new(),
+            held: Vec::new(),
         }
     }
     /// The requests put in, each with its place in the order, leaving the
     /// list empty.
     pub(crate) fn take(&mut self) -> Vec<(u64, R)> {
         core::mem::take(&mut self.requests)
+    }
+    /// Move the requests put in so far behind those queued.
+    pub(crate) fn enqueue(&mut self) {
+        self.queue.extend(self.requests.drain(..));
+    }
+    /// The first request queued.
+    pub(crate) fn first(&self) -> Option<&(u64, R)> {
+        self.queue.front()
+    }
+    /// The places in the order of the requests queued.
+    pub(crate) fn queued(&self) -> impl Iterator<Item = u64> + '_ {
+        self.queue.iter().map(|(order, _)| *order)
+    }
+    /// How many requests are kept for the handler of their kind.
+    pub(crate) fn held_len(&self) -> usize {
+        self.held.len()
+    }
+    /// Take the first request queued off the queue.
+    pub(crate) fn pop(&mut self) -> Option<(u64, R)> {
+        self.queue.pop_front()
+    }
+    /// Keep `request` for the handler of its kind.
+    pub(crate) fn hold(&mut self, request: (u64, R)) {
+        self.held.push(request);
+    }
+    /// The requests kept for the handler of their kind, leaving none.
+    pub(crate) fn take_held(&mut self) -> Vec<(u64, R)> {
+        core::mem::take(&mut self.held)
+    }
+    /// Drop every request, put in, queued or kept.
+    pub(crate) fn clear(&mut self) {
+        self.requests.clear();
+        self.queue.clear();
+        self.held.clear();
     }
 }
 impl<R: 'static> Piece for RequestList<R> {
@@ -140,11 +182,36 @@ impl<R: 'static> Piece for RequestList<R> {
     }
 }
 
+/// The wakes at the priority `P` put in during a lending, in the order
+/// they were put in.
+pub struct WakeList<P> {
+    wakes: Vec<(ComponentWaker, P)>,
+}
+impl<P> WakeList<P> {
+    /// No wakes.
+    pub(crate) fn new() -> Self {
+        Self { wakes: Vec::new() }
+    }
+    /// The wakes put in, in order, leaving the list empty.
+    pub(crate) fn take(&mut self) -> Vec<(ComponentWaker, P)> {
+        core::mem::take(&mut self.wakes)
+    }
+}
+impl<P: 'static> Piece for WakeList<P> {
+    type Hs<'a> = WakeBox<'a, P>;
+    fn lend<'a>(&'a mut self, _: &'a Cell<u64>) -> WakeBox<'a, P> {
+        WakeBox::new(Cell::from_mut(&mut self.wakes))
+    }
+    fn shorten<'a: 'c, 'c>(hs: WakeBox<'a, P>) -> WakeBox<'c, P> {
+        hs
+    }
+}
+
 /// The context `Self` holds the piece `Pc`, at `I` (inferred).
 #[diagnostic::on_unimplemented(
     message = "the context of the lending has no `{Pc}`",
     label = "a context need reads a piece this context does not hold",
-    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestList<R>`; the driver's context holds its own clock and a list for each type of request"
+    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestList<R>`, `Wakes<P>` its `WakeList<P>`; the driver's context holds its own clock, a list for each type of request and the list of wakes at the composition's priority"
 )]
 pub trait HasPiece<Pc: Piece, I>: LendContext {
     /// The piece, from its slot.
@@ -159,7 +226,7 @@ impl<Pc: Piece, L: PieceIn<Pc, I>, I> HasPiece<Pc, I> for Context<L> {
 #[diagnostic::on_unimplemented(
     message = "the context of the lending has no `{Pc}`",
     label = "a context need reads a piece this context does not hold",
-    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestList<R>`; the driver's context holds its own clock and a list for each type of request"
+    note = "`Clock<C>` reads the `LentClock<C>` of the context, `Requests<R>` its `RequestList<R>`, `Wakes<P>` its `WakeList<P>`; the driver's context holds its own clock, a list for each type of request and the list of wakes at the composition's priority"
 )]
 pub trait PieceIn<Pc: Piece, I>: Pieces {
     /// The piece, from its slot.
@@ -355,4 +422,28 @@ impl<C> TakesExclusive for Clock<C> {
 }
 impl<R> TakesExclusive for Requests<R> {
     type Out = False;
+}
+impl<P> TakesExclusive for Wakes<P> {
+    type Out = False;
+}
+
+impl<C: Ctx, P: 'static, I: 'static> Lend<C, CxPos<I>> for Wakes<P>
+where
+    C::Context: HasPiece<WakeList<P>, I>,
+{
+    type Cols = CxCol<I, WakeList<P>>;
+    fn build<'a>(hs: WakeBox<'a, P>, _: &C::Fk) -> WakeBox<'a, P>
+    where
+        Self: 'a,
+    {
+        hs
+    }
+}
+impl<C: Ctx, P: 'static, I> Check<C, CxPos<I>> for Wakes<P> where
+    C::Context: HasPiece<WakeList<P>, I>
+{
+}
+/// Waking only adds: it takes nothing another need could overlap.
+impl<C, P, I> Takes<C, CxPos<I>> for Wakes<P> {
+    type Touches = HNil;
 }

@@ -57,6 +57,34 @@ pub trait Numbered {
     type Number;
 }
 
+/// A list of bits as the number it spells, the highest bit first: what
+/// a component is told apart by while the driver runs.
+///
+/// What the driver reads numbers with; not for use otherwise.
+#[doc(hidden)]
+pub trait NumberValue {
+    /// How many bits the list has.
+    const LEN: u32;
+    /// The number.
+    const VALUE: u64;
+}
+impl NumberValue for BNil {
+    const LEN: u32 = 0;
+    const VALUE: u64 = 0;
+}
+impl<T: NumberValue> NumberValue for BCons<B0, T> {
+    const LEN: u32 = T::LEN + 1;
+    const VALUE: u64 = T::VALUE;
+}
+impl<T: NumberValue> NumberValue for BCons<B1, T> {
+    const LEN: u32 = T::LEN + 1;
+    const VALUE: u64 = (1 << T::LEN) | T::VALUE;
+}
+/// The number of `X` as a value.
+pub(crate) const fn number_of<X: Numbered<Number: NumberValue>>() -> u64 {
+    <X::Number as NumberValue>::VALUE
+}
+
 /// The bit 0.
 pub struct B0;
 /// The bit 1.

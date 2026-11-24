@@ -16,7 +16,9 @@ use super::{
 use crate::{
     capability::{Capability, Contributed, PieceList},
     id::{False, NumberEq},
-    need::{At, Clock, Mut, OneAtATime, OwnAddress, OwnKey, Plus, Ref, Requests, Under, WakerOf},
+    need::{
+        At, Clock, Mut, OneAtATime, OwnAddress, OwnKey, Plus, Ref, Requests, Under, WakerOf, Wakes,
+    },
     react::{Point, Reactions},
 };
 
@@ -69,6 +71,7 @@ fires_nothing! {
     OwnAddress;
     Clock<C> [C];
     Requests<R> [R];
+    Wakes<P> [P];
 }
 impl<Rt, Pt, S, B, T: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for At<B, T> {}
 impl<Rt, Pt, S, A, T: NoCycle<Rt, Pt, S>> NoCycle<Rt, Pt, S> for Under<A, T> {}

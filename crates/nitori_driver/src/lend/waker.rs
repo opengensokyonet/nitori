@@ -9,79 +9,91 @@ use super::{
         Check, CheckBody, CountChain, ExactlyOneUp, Spell, Takes, TakesBody, TakesExclusive,
         UpCount,
     },
-    list::{Len, Prefix},
+    ident::{IdentCol, Idents},
+    list::{HasPrefix, Len},
     plan::PartPlan,
     tree::{AtMember, Collect, Ctx, FindUp},
-    under::{Body, Gather, UnderBody},
+    under::{Body, Gather, UnderBody, by_shape},
     up::{UpFk, UpPre},
 };
-use crate::need::{ComponentWaker, Pos, WakerOf};
+use crate::{
+    id::{NumberValue, Numbered, number_of},
+    need::{ComponentWaker, Pos, WakerOf},
+};
 
-/// The position of a [`WakerOf`], lent as `W`: the node found up the
-/// chain at `I`, or the member ([`AtMember`]).
-pub struct WakerPos<I, W>(PhantomData<fn() -> (I, W)>);
-impl<I: 'static, W: Clone + PartialEq + 'static> Pos for WakerPos<I, W> {
-    type Waker = W;
-}
+/// The position of a [`WakerOf`]: the node found up the chain at `I`, or
+/// the member ([`AtMember`]).
+pub struct WakerPos<I>(PhantomData<fn() -> I>);
+impl<I: 'static> Pos for WakerPos<I> {}
 
-/// The waker of `X` of the node found up the chain of `C` at `I`.
-pub type UpWaker<C, X, I> = ComponentWaker<X, UpPre<C, X, I>, UpFk<C, X, I>>;
-
-impl<C: Ctx, X: 'static, I: 'static> Lend<C, WakerPos<I, UpWaker<C, X, I>>> for WakerOf<X>
+impl<C: Ctx, X: Numbered<Number: NumberValue> + 'static, I: 'static> Lend<C, WakerPos<I>>
+    for WakerOf<X>
 where
     C::Chain: FindUp<X, I>,
-    C::Fk: Prefix<UpFk<C, X, I>>,
+    C::Fk: HasPrefix<UpFk<C, X, I>>,
     UpPre<C, X, I>: 'static,
 {
-    type Cols = ();
-    fn build<'a>(_: (), at: &C::Fk) -> UpWaker<C, X, I>
+    type Cols = IdentCol<UpPre<C, X, I>, UpFk<C, X, I>>;
+    fn build<'a>(hs: Idents<'a, UpFk<C, X, I>>, at: &C::Fk) -> ComponentWaker
     where
         Self: 'a,
     {
-        ComponentWaker::new(at.prefix())
+        // Invariant: the lend point is in the tree, so is every node above
+        // it.
+        let node = hs
+            .iter()
+            .find(|(f, _)| at.has_prefix(f))
+            .map(|(_, ident)| *ident)
+            .expect("the node above a lend point is in the tree");
+        ComponentWaker::new(node, number_of::<X>())
     }
 }
-impl<C: Ctx, X, I, W> Check<C, WakerPos<I, W>> for WakerOf<X>
+impl<C: Ctx, X, I> Check<C, WakerPos<I>> for WakerOf<X>
 where
     C::Chain: CountChain<X>,
     <C::Chain as CountChain<X>>::N: Spell,
     UpCount<C, X>: ExactlyOneUp<X>,
 {
 }
-impl<C, X, I, W> Takes<C, WakerPos<I, W>> for WakerOf<X> {
+impl<C, X, I> Takes<C, WakerPos<I>> for WakerOf<X> {
     type Touches = HNil;
 }
-
-/// The waker of `X` of each member, at the lend point `MC`.
-pub type MemberWaker<MC, X> = ComponentWaker<X, <MC as Ctx>::Route, <MC as Ctx>::Fk>;
 
 impl<X: 'static> UnderBody for WakerOf<X> {
     type B = X;
     type Depth<Rt: Len, Sd> = Rt::N;
 }
-impl<MC: Ctx, X: 'static> Body<MC, WakerPos<AtMember, MemberWaker<MC, X>>> for WakerOf<X>
+impl<MC: Ctx, X: Numbered<Number: NumberValue> + 'static> Body<MC, WakerPos<AtMember>>
+    for WakerOf<X>
 where
     MC::Route: 'static,
 {
-    type Cols = ();
-    fn build<'a>(_: (), member: &MC::Fk) -> MemberWaker<MC, X>
+    type Cols = IdentCol<MC::Route, MC::Fk>;
+    fn build<'a>(hs: Idents<'a, MC::Fk>, member: &MC::Fk) -> ComponentWaker
     where
         Self: 'a,
     {
-        ComponentWaker::new(member.clone())
+        // Invariant: the members are the nodes of the kind at the route,
+        // so every member has a row.
+        let node = hs
+            .iter()
+            .find(|(f, _)| *f == member)
+            .map(|(_, ident)| *ident)
+            .expect("a member of an `Under` is in the tree");
+        ComponentWaker::new(node, number_of::<X>())
     }
 }
 impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
     Gather<MC, AF, LF, super::tree::UnderPos<IA, IK, Sh, PB>> for WakerOf<X>
 where
-    Self: Body<MC, PB, Cols = ()>,
-    (): PartPlan<MC::Fk>,
+    Self: Body<MC, PB>,
+    <Self as Body<MC, PB>>::Cols: PartPlan<MC::Fk>,
     Sh: Collect<AF, MC::Fk, LF>,
 {
-    type Cols = ();
+    type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
         rows: &'a [&'a MC::Fk],
-        _: (),
+        hs: <Self::Cols as super::plan::Plan>::Hs<'a>,
         anchor: &AF,
         at: &LF,
         line: bool,
@@ -89,15 +101,13 @@ where
     where
         Self: 'a,
     {
-        Sh::collect(rows, anchor, at, line, |m| {
-            <Self as Body<MC, PB>>::build((), m)
-        })
+        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
     }
 }
-impl<MC, X, W> CheckBody<MC, WakerPos<AtMember, W>> for WakerOf<X> {}
+impl<MC, X, I> CheckBody<MC, WakerPos<I>> for WakerOf<X> {}
 impl<X> TakesExclusive for WakerOf<X> {
     type Out = crate::id::False;
 }
-impl<MC, X, W> TakesBody<MC, WakerPos<AtMember, W>> for WakerOf<X> {
+impl<MC, X, I> TakesBody<MC, WakerPos<I>> for WakerOf<X> {
     type Touches = HNil;
 }
