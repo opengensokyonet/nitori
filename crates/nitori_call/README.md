@@ -469,7 +469,8 @@ each call on it, a cancelled call included, and calls on it can compose again.
 ## Receiver access
 
 `ReceiverAccess` is implemented by the slot a root operation receives, by
-`Composed`, and by `&mut A`; downstream crates do not implement it. Each use
+`ConstructedAccess`, by `Composed`, and by `&mut A`; downstream crates do not
+implement it. Each use
 borrows the access mutably, so two operations cannot use it at the same time,
 and it never leaves the operation. With the `std` feature an access is `Send` but
 not `Sync`: within a poll it may move to a scoped thread, which can ask for a
@@ -498,6 +499,59 @@ async fn increment(io: &mut impl ReceiverAccess<Family = Direct<usize>>) -> usiz
 When the call is polled without a view, the first access records a request
 and the poll ends with `CallPoll::NeedsView`; polls that touch no resource need
 no view.
+
+A type that holds its access, such as a stream reading one record after
+another, is written once for every access. `ConstructedAccess` holds a
+receiver and constructs its view at each access, so outside any call the same
+type holds one and lives across awaits; inside an operation it holds the
+operation's access:
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ConstructedAccess, ReceiverAccess, call};
+use nitori_io::prelude::*;
+# use std::{future::Future, pin::pin, task::{Context, Poll, Waker}};
+# fn ready<T>(future: impl Future<Output = T>) -> T {
+#     match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+#         Poll::Ready(value) => value,
+#         Poll::Pending => unreachable!(),
+#     }
+# }
+
+/// Counts the bytes it reads from the access it holds.
+struct Counting<I> {
+    io: I,
+    count: usize,
+}
+impl<I: ReceiverAccess<Family: Read>> Counting<I> {
+    async fn next_byte(&mut self) -> Option<u8> {
+        let [byte] = self.io.read_array::<1>().await.ok()?;
+        self.count += 1;
+        Some(byte)
+    }
+}
+
+#[call(sync)]
+async fn first_two<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A) -> [Option<u8>; 2] {
+    let mut counting = Counting { io, count: 0 };
+    [counting.next_byte().await, counting.next_byte().await]
+}
+
+fn main() {
+    let mut input = b"ab".as_slice();
+    assert_eq!(input.sync_first_two_unpin(), [Some(b'a'), Some(b'b')]);
+
+    let mut counting = Counting { io: ConstructedAccess::new(b"xyz".as_slice()), count: 0 };
+    assert_eq!(ready(counting.next_byte()), Some(b'x'));
+    // later, after other work
+    assert_eq!(ready(counting.next_byte()), Some(b'y'));
+    assert_eq!((counting.count, counting.io.into_inner()), (2, b"z".as_slice()));
+}
+```
+
+Its view is always at hand: an access never waits for it, and a release point
+completes at once. The receiver must be `Unpin`; pin one that is not with
+`pin!` or `Box::pin` and hold the pinned pointer.
 
 ## Calls
 

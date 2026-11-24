@@ -185,8 +185,9 @@ use receivers::{LentReceivers, LentViews};
 /// neither waits nor can end the poll. Other work runs only at `.await` and
 /// `yield`; the code between them is atomic with respect to it.
 ///
-/// The slots of a [`LentCall`], compositions of them and `&mut` borrows of
-/// them are the only such accesses. Every operation written for a
+/// The slots of a [`LentCall`], [`ConstructedAccess`](crate::ConstructedAccess),
+/// compositions of them and `&mut` borrows of them are the only such
+/// accesses. Every operation written for a
 /// [`ReceiverAccess`] works on them too.
 pub trait LentAccess: ReceiverAccess {
     /// Run `body` once with this poll's view.

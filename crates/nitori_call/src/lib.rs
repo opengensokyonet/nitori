@@ -186,7 +186,7 @@ pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamil
 mod loan;
 pub use loan::{Lent, ViewLoan, ViewOperation};
 mod access;
-pub use access::{Access, ReceiverAccess, ReceiverSlot, ReleaseView};
+pub use access::{Access, ConstructedAccess, ReceiverAccess, ReceiverSlot, ReleaseView};
 mod lent;
 pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;
