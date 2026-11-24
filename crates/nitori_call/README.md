@@ -449,9 +449,14 @@ fn main() {
 `io.compose(state)` returns a `Composed` access that borrows its parent
 mutably; on each access it builds the child view from the parent view and the
 state. The state must be `Unpin`; pass `pin!(state)` otherwise. `into_state`
-recovers it and ends the borrow. Generic adapters can keep the parent view as a
-`ViewLoan<'view, F>`, which hides its inner lifetime: `loan.with(|access| ..)`
-lends it back for one capability call.
+recovers it and ends the borrow. `Compose::compose` takes the parent view by
+value. On an access the parent view is only borrowed for that access, so the
+state composes on `Lent<F>`, whose view is a `ViewLoan<'view, F>` that hides
+the parent view's inner lifetime: `loan.with(|access| ..)` lends it back for
+one capability call, and `loan.project(|access| ..)` gives the loan up for a
+pinned borrow of a place in the view, such as the value behind a lock guard.
+A capability reaches `Lent<F>` where it is implemented for it; `nitori_io`
+forwards its own.
 
 ## Receiver access
 

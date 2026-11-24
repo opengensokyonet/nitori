@@ -2,8 +2,8 @@
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use bytes::Buf;
 use nitori_call::{
-    AcquisitionState, Compose, Guarded, Lock, LockAcquisition, Locked, ReceiverAccess,
-    ReceiverFamily, call, drive_composed,
+    AcquisitionState, Compose, Guarded, Lent, Lock, LockAcquisition, Locked, ReceiverAccess,
+    ReceiverFamily, ViewLoan, call, drive_composed,
 };
 use nitori_io::{calls::WriteAllError, prelude::*};
 use std::{
@@ -119,15 +119,15 @@ struct StreamView<'v>(Option<&'v mut Vec<u8>>);
 impl ReceiverFamily for Stream {
     type ReceiverView<'v> = StreamView<'v>;
 }
-impl<L: Lock<Value = Connection>> Compose<Locked<L>> for StreamOf {
+impl<L: Lock<Value = Connection>> Compose<Lent<Locked<L>>> for StreamOf {
     type Family = Stream;
-    fn compose<'s, 'p>(self: Pin<&'s mut Self>, guard: Pin<&'s mut L::Guard<'p>>) -> StreamView<'s>
+    fn compose<'s>(self: Pin<&'s mut Self>, guard: ViewLoan<'s, Locked<L>>) -> StreamView<'s>
     where
-        Locked<L>: 'p,
-        'p: 's,
+        Lent<Locked<L>>: 's,
     {
         let id = self.0;
-        StreamView(guard.get_mut().streams.get_mut(&id))
+        let connection = guard.project(|access| Pin::new(&mut **access.into_pin().get_mut()));
+        StreamView(connection.get_mut().streams.get_mut(&id))
     }
 }
 #[derive(Debug, PartialEq)]

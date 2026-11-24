@@ -1,13 +1,13 @@
 // expect: E0515
 // facade-only
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{Compose, Direct, DirectView, ReceiverAccess};
+use nitori_call::{Compose, Direct, DirectView, Lent, ReceiverAccess, ViewLoan};
 use std::{future::{Future, poll_fn}, pin::Pin, task::Poll};
 struct State(usize);
-impl Compose<Direct<()>> for State {
+impl Compose<Lent<Direct<()>>> for State {
     type Family = Direct<usize>;
-    fn compose<'v, 'p>(self: Pin<&'v mut Self>, _: Pin<&'v mut DirectView<'p, ()>>) -> DirectView<'v, usize>
-    where Direct<()>: 'p, Self::Family: 'v, 'p: 'v {
+    fn compose<'v>(self: Pin<&'v mut Self>, _: ViewLoan<'v, Direct<()>>) -> DirectView<'v, usize>
+    where Lent<Direct<()>>: 'v, Self::Family: 'v {
         DirectView(Pin::new(&mut self.get_mut().0))
     }
 }

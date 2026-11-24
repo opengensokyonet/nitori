@@ -1,7 +1,9 @@
 //! A byte capability, memory and waiting resources, and hand-written operations.
 #![allow(dead_code)]
 use bytes::BufMut;
-use nitori_call::{Compose, Direct, ReceiverAccess, ReceiverFamily, ViewLoan, direct_receiver};
+use nitori_call::{
+    Compose, Direct, Lent, ReceiverAccess, ReceiverFamily, ViewLoan, direct_receiver,
+};
 use std::{
     collections::VecDeque,
     convert::Infallible,
@@ -157,19 +159,15 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
     where
         Self: 'v;
 }
-impl<F: ReceiverFamily> Compose<F> for ReadLimit {
+impl<F: ReceiverFamily> Compose<Lent<F>> for ReadLimit {
     type Family = Limited<F>;
-    fn compose<'v, 'p>(
-        self: Pin<&'v mut Self>,
-        inner: Pin<&'v mut F::ReceiverView<'p>>,
-    ) -> LimitedView<'v, F>
+    fn compose<'v>(self: Pin<&'v mut Self>, inner: ViewLoan<'v, F>) -> LimitedView<'v, F>
     where
-        F: 'p,
+        Lent<F>: 'v,
         Self::Family: 'v,
-        'p: 'v,
     {
         LimitedView {
-            inner: ViewLoan::new(inner),
+            inner,
             remaining: &mut self.get_mut().0,
         }
     }

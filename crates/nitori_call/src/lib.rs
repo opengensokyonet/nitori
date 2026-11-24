@@ -184,7 +184,7 @@ mod tuples;
 mod receiver;
 pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamily};
 mod loan;
-pub use loan::{ViewLoan, ViewOperation};
+pub use loan::{Lent, ViewLoan, ViewOperation};
 mod access;
 pub use access::{Access, ReceiverAccess, ReceiverSlot, ReleaseView};
 mod lent;

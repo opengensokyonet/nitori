@@ -1,6 +1,8 @@
 //! Locks as executors: an operation runs on the value behind a lock, which
 //! is locked only on polls whose operation uses it.
-use crate::{Compose, Lend, Receiver, ReceiverFamily, ViewAcquisition, call::InPlace};
+use crate::{
+    Compose, Lend, Lent, Receiver, ReceiverFamily, ViewAcquisition, ViewLoan, call::InPlace,
+};
 #[cfg(any(feature = "std", feature = "tokio-sync", feature = "futures-lock"))]
 use crate::{
     Drive, RootOperation,
@@ -92,23 +94,26 @@ impl<'lock, L: Lock + ?Sized> ViewAcquisition<'lock> for LockAcquisition<'lock, 
 
 /// Composes a lock guard into the view of the value behind it, so that
 /// operations run on the value's own family with every capability it has.
+/// The guard is lent for one access; the value's view borrows it for that
+/// access.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Guarded;
-impl<L: Lock + ?Sized> Compose<Locked<L>> for Guarded
+impl<L: Lock + ?Sized> Compose<Lent<Locked<L>>> for Guarded
 where
     L::Value: Receiver + Unpin,
 {
     type Family = <L::Value as Receiver>::Family;
-    fn compose<'scope, 'parent>(
-        self: Pin<&'scope mut Self>,
-        guard: Pin<&'scope mut L::Guard<'parent>>,
-    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'scope>
+    fn compose<'v>(
+        self: Pin<&'v mut Self>,
+        guard: ViewLoan<'v, Locked<L>>,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
     where
-        Locked<L>: 'parent,
-        Self::Family: 'scope,
-        'parent: 'scope,
+        Lent<Locked<L>>: 'v,
+        Self::Family: 'v,
     {
-        Pin::new(&mut **guard.get_mut()).view()
+        guard
+            .project(|access| Pin::new(&mut **access.into_pin().get_mut()))
+            .view()
     }
 }
 

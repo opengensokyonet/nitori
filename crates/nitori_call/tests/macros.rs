@@ -2,8 +2,8 @@
 use bytes::BufMut;
 use futures_core::Stream;
 use nitori_call::{
-    Call, CallPoll, Compose, Direct, Lend, Receiver, ReceiverAccess, ReceiverFamily, ReceiverSlot,
-    Start, ViewLoan, call, capability, direct_receiver,
+    Call, CallPoll, Compose, Direct, Lend, Lent, Receiver, ReceiverAccess, ReceiverFamily,
+    ReceiverSlot, Start, ViewLoan, call, capability, direct_receiver,
 };
 use std::{
     collections::VecDeque,
@@ -202,19 +202,15 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
     where
         Self: 'v;
 }
-impl<F: ReceiverFamily> Compose<F> for ReadLimit {
+impl<F: ReceiverFamily> Compose<Lent<F>> for ReadLimit {
     type Family = Limited<F>;
-    fn compose<'v, 'p>(
-        self: Pin<&'v mut Self>,
-        inner: Pin<&'v mut F::ReceiverView<'p>>,
-    ) -> LimitedView<'v, F>
+    fn compose<'v>(self: Pin<&'v mut Self>, inner: ViewLoan<'v, F>) -> LimitedView<'v, F>
     where
-        F: 'p,
+        Lent<F>: 'v,
         Self::Family: 'v,
-        'p: 'v,
     {
         LimitedView {
-            inner: ViewLoan::new(inner),
+            inner,
             remaining: &mut self.get_mut().0,
         }
     }

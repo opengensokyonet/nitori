@@ -225,9 +225,10 @@ fn pending_and_error_leave_quota_untouched_even_for_an_unknown_source() {
         (Poll::Ready(Err(())), 255),
         (Poll::Ready(Ok(1)), 254),
     ] {
-        let mut parent = pin!(Pin::new(&mut host).view());
-        let view =
-            <ReadLimit<u8> as Compose<Unknown>>::compose(Pin::new(&mut quota), parent.as_mut());
+        let view = <ReadLimit<u8> as Compose<Unknown>>::compose(
+            Pin::new(&mut quota),
+            Pin::new(&mut host).view(),
+        );
         let got = <Limited<Unknown, ReadLimit<u8>> as Read>::poll_read(
             pin!(view),
             &mut Context::from_waker(Waker::noop()),
@@ -307,19 +308,17 @@ fn budget_views_display_the_remaining_quota() {
     use nitori_io::adapters::WriteLimit;
     let mut storage = Vec::<u8>::new();
     let mut write_limit = WriteLimit(3);
-    let mut view = pin!(Pin::new(&mut storage).view());
     let limited = <WriteLimit as Compose<Direct<Vec<u8>>>>::compose(
         Pin::new(&mut write_limit),
-        view.as_mut(),
+        Pin::new(&mut storage).view(),
     );
     assert_eq!(describe(&limited), "LimitedView { remaining: 3, .. }");
 
     let mut source = &b"abc"[..];
     let mut read_limit = ReadLimit(7u8);
-    let mut view = pin!(Pin::new(&mut source).view());
     let limited = <ReadLimit<u8> as Compose<Direct<&[u8]>>>::compose(
         Pin::new(&mut read_limit),
-        view.as_mut(),
+        Pin::new(&mut source).view(),
     );
     assert_eq!(describe(&limited), "LimitedView { remaining: 7, .. }");
 }

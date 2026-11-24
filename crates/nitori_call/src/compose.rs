@@ -1,7 +1,8 @@
 //! Scoped adaptation of the current view into another family.
 use crate::{
-    LentAccess, ReceiverAccess, ReceiverFamily, ViewOperation,
+    LentAccess, ReceiverAccess, ReceiverFamily, ViewLoan, ViewOperation,
     access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
+    loan::Lent,
 };
 use core::{
     marker::PhantomData,
@@ -9,28 +10,32 @@ use core::{
     pin::{Pin, pin},
 };
 
-/// One projection; the parent view keeps its original inner lifetime.
+/// Composition state: it adapts a view of `F` into a view of its own family.
+///
+/// The parent view is passed by value, and the child view may keep it, with
+/// the state's borrow, for `'v`. Where the parent view is only borrowed for
+/// one access, as in [`ReceiverAccess::compose`] and
+/// [`drive_composed`](crate::drive_composed), the state composes on
+/// [`Lent<F>`](Lent), whose view is a [`ViewLoan`] of the parent's view.
 pub trait Compose<F: ReceiverFamily> {
     type Family: ReceiverFamily;
-    fn compose<'scope, 'parent>(
-        self: Pin<&'scope mut Self>,
-        parent: Pin<&'scope mut F::ReceiverView<'parent>>,
-    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'scope>
+    fn compose<'v>(
+        self: Pin<&'v mut Self>,
+        parent: F::ReceiverView<'v>,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
     where
-        F: 'parent,
-        Self::Family: 'scope,
-        'parent: 'scope;
+        F: 'v,
+        Self::Family: 'v;
 }
 impl<F: ReceiverFamily, S: Compose<F> + Unpin + ?Sized> Compose<F> for &mut S {
     type Family = S::Family;
-    fn compose<'s, 'p>(
-        self: Pin<&'s mut Self>,
-        parent: Pin<&'s mut F::ReceiverView<'p>>,
-    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'s>
+    fn compose<'v>(
+        self: Pin<&'v mut Self>,
+        parent: F::ReceiverView<'v>,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
     where
-        F: 'p,
-        Self::Family: 's,
-        'p: 's,
+        F: 'v,
+        Self::Family: 'v,
     {
         Pin::new(&mut **self.get_mut()).compose(parent)
     }
@@ -40,21 +45,23 @@ where
     P::Target: Compose<F>,
 {
     type Family = <P::Target as Compose<F>>::Family;
-    fn compose<'s, 'p>(
-        self: Pin<&'s mut Self>,
-        parent: Pin<&'s mut F::ReceiverView<'p>>,
-    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'s>
+    fn compose<'v>(
+        self: Pin<&'v mut Self>,
+        parent: F::ReceiverView<'v>,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
     where
-        F: 'p,
-        Self::Family: 's,
-        'p: 's,
+        F: 'v,
+        Self::Family: 'v,
     {
         self.get_mut().as_mut().compose(parent)
     }
 }
 
 /// An access adapted by composition state. It borrows its parent mutably,
-/// so the parent is unavailable while the adapted access exists.
+/// so the parent is unavailable while the adapted access exists. On each
+/// access the state composes on a [`ViewLoan`] of the parent's view, a view
+/// of [`Lent`], so the child view ends with that access; what must last
+/// longer is kept in the state.
 #[derive(Debug)]
 pub struct Composed<'p, A: ?Sized, S> {
     parent: &'p mut A,
@@ -69,9 +76,12 @@ impl<'p, A: ?Sized, S> Composed<'p, A, S> {
         self.state
     }
 }
-impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> Sealed for Composed<'_, A, S> {}
+impl<A: ReceiverAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> Sealed
+    for Composed<'_, A, S>
+{
+}
 #[allow(private_bounds)]
-impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
+impl<A: ReceiverAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> ReceiverAccess
     for Composed<'_, A, S>
 {
     type Family = S::Family;
@@ -86,15 +96,18 @@ impl<A: ReceiverAccess + ?Sized, S: Compose<A::Family> + Unpin> ReceiverAccess
         self.parent.release_point()
     }
 }
-impl<A: LentAccess + ?Sized, S: Compose<A::Family> + Unpin> LentAccess for Composed<'_, A, S> {}
+impl<A: LentAccess + ?Sized, S: Compose<Lent<A::Family>> + Unpin> LentAccess
+    for Composed<'_, A, S>
+{
+}
 
-/// Builds the child view from the parent view before visiting it.
+/// Builds the child view from a loan of the parent view before visiting it.
 struct ComposeChild<'q, F, S, V> {
     state: Pin<&'q mut S>,
     inner: V,
     family: PhantomData<fn(F) -> F>,
 }
-impl<F: ReceiverFamily, S: Compose<F>, V: ViewVisitor<S::Family>> ViewOperation<F>
+impl<F: ReceiverFamily, S: Compose<Lent<F>>, V: ViewVisitor<S::Family>> ViewOperation<F>
     for ComposeChild<'_, F, S, V>
 {
     type Output = V::Output;
@@ -102,11 +115,12 @@ impl<F: ReceiverFamily, S: Compose<F>, V: ViewVisitor<S::Family>> ViewOperation<
     where
         F: 'h,
     {
-        let child = pin!(self.state.compose(parent));
+        let mut state = self.state;
+        let child = pin!(state.as_mut().compose(ViewLoan::new(parent)));
         self.inner.run(child)
     }
 }
-impl<F: ReceiverFamily, S: Compose<F>, V: ViewVisitor<S::Family>> ViewVisitor<F>
+impl<F: ReceiverFamily, S: Compose<Lent<F>>, V: ViewVisitor<S::Family>> ViewVisitor<F>
     for ComposeChild<'_, F, S, V>
 {
     fn absent(self, request: ViewRequest<'_>) -> V::Output {

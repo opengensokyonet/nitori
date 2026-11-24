@@ -130,10 +130,49 @@ impl<'scope, F: ReceiverFamily + 'scope> ViewLoan<'scope, F> {
         // and &mut self excludes every other use through this wrapper.
         unsafe { self.raw.apply(operation) }
     }
+    /// Give up the loan for a pinned borrow, for the loan's whole scope, of a
+    /// place reached from the view, such as the value behind a lock guard.
+    ///
+    /// `project` reaches the place from an [`Access`] that lasts for the
+    /// call only; the borrow it returns is extended to `'scope`. `T` is named
+    /// outside the closure, so it cannot name the view's hidden lifetime.
+    pub fn project<T: ?Sized + 'scope, P>(mut self, project: P) -> Pin<&'scope mut T>
+    where
+        P: for<'access, 'parent> FnOnce(Access<'access, 'parent, F>) -> Pin<&'access mut T>,
+    {
+        let target: *mut T = self.with(|access| {
+            // SAFETY: only the address is taken; nothing is moved out of the
+            // pinned place, and the pointer is pinned again below.
+            unsafe { core::ptr::from_mut(project(access).get_unchecked_mut()) }
+        });
+        // SAFETY: `new` made this loan from a `Pin<&'scope mut _>` of the
+        // view, whose inner lifetime outlives 'scope, so the view stays live,
+        // in place and borrowed by this loan alone for all of 'scope. The loan
+        // is consumed here, so the view has no other use in 'scope. `target`
+        // was reached by reborrowing the view, so it is valid as long as the
+        // view's borrow, and `T: 'scope` keeps what `T` itself borrows valid
+        // as long. `project` returned it pinned, and it is only pinned again.
+        unsafe { Pin::new_unchecked(&mut *target) }
+    }
     pub fn with<B, R>(&mut self, body: B) -> R
     where
         B: for<'access, 'parent> FnOnce(Access<'access, 'parent, F>) -> R,
     {
         self.apply(ClosureOperation(body))
     }
+}
+
+/// The family whose views are [`ViewLoan`]s of the views of `F`.
+///
+/// Composition state composes on it where the parent view is borrowed for one
+/// access, as in [`ReceiverAccess::compose`](crate::ReceiverAccess::compose)
+/// and [`drive_composed`](crate::drive_composed). A capability of `F` is
+/// a capability of `Lent<F>` only where it is implemented for it, usually by
+/// forwarding through [`ViewLoan::with`]; `nitori_io` does so for its own.
+pub struct Lent<F>(PhantomData<fn(F) -> F>);
+impl<F: ReceiverFamily> ReceiverFamily for Lent<F> {
+    type ReceiverView<'v>
+        = ViewLoan<'v, F>
+    where
+        Self: 'v;
 }

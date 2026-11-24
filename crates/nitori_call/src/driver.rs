@@ -3,7 +3,7 @@
 //! that `executor.operation(..).await` works whether the executor can lend a
 //! view at once or must acquire one.
 use crate::{
-    Call, CallPoll, Compose, DynCall, Lend, Operation, Receiver, ReceiverFamily, Receivers,
+    Call, CallPoll, Compose, DynCall, Lend, Lent, Operation, Receiver, ReceiverFamily, Receivers,
     RootOperation, ViewLoan,
     call::{InPlace, remaining},
 };
@@ -481,7 +481,7 @@ where
 mod lend {
     //! How `Drive` lends what its acquisitions delivered. Unnameable outside
     //! this crate: lending each view as it is, or composing it first.
-    use crate::{Compose, Lend, ReceiverFamily, ViewLoan};
+    use crate::{Compose, Lend, Lent, ReceiverFamily, ViewLoan};
     use core::pin::{Pin, pin};
 
     /// Continues with the lend of one slot.
@@ -535,7 +535,7 @@ mod lend {
         where
             F: 'p;
     }
-    impl<F: ReceiverFamily, C: Compose<F>> SlotState<F> for C {
+    impl<F: ReceiverFamily, C: Compose<Lent<F>>> SlotState<F> for C {
         type Family = C::Family;
         #[inline]
         fn lend_slot<'p, V: SlotVisitor<C::Family>>(
@@ -558,7 +558,7 @@ mod lend {
     ) -> V::Output
     where
         F: ReceiverFamily + 'p,
-        C: Compose<F>,
+        C: Compose<Lent<F>>,
         V: SlotVisitor<C::Family>,
     {
         let Some(view) = view else {
@@ -566,7 +566,7 @@ mod lend {
         };
         let releasable = view.is_releasable();
         // The composed view borrows the delivered one for this lend only.
-        let mut composed = pin!(state.compose(view.into_inner()));
+        let mut composed = pin!(state.compose(ViewLoan::new(view.into_inner())));
         let composed = ViewLoan::new(composed.as_mut());
         visitor.visit(Some(match releasable {
             true => Lend::Releasable(composed),
@@ -583,7 +583,7 @@ use lend::{AsAcquired, Lender, SlotState, SlotVisitor};
 pub struct Composing<S> {
     state: S,
 }
-impl<F: ReceiverFamily, S: Compose<F>> Lender<F> for Composing<S> {
+impl<F: ReceiverFamily, S: Compose<Lent<F>>> Lender<F> for Composing<S> {
     type Family = S::Family;
     #[inline(always)]
     fn lend<'p, V: SlotVisitor<S::Family>>(
@@ -1306,7 +1306,8 @@ where
 
 /// Run `operation` with views from `acquisition`, each composed by `state`
 /// first: the operation runs on the composed family, and the composed view
-/// borrows the acquired one while it is lent. A releasable acquired view
+/// borrows the acquired one while it is lent: `state` composes on [`Lent`]
+/// views of the acquired family. A releasable acquired view
 /// makes the composed view releasable. For a tuple of acquisitions, `state`
 /// is a tuple with a state for each.
 ///

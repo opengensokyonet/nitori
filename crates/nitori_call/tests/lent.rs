@@ -808,18 +808,17 @@ fn four_accesses_at_once() {
 
 /// A view of the same counter, as a composed access.
 struct SameCounter;
-impl Compose<Direct<Total>> for SameCounter {
+impl Compose<nitori_call::Lent<Direct<Total>>> for SameCounter {
     type Family = Direct<Total>;
-    fn compose<'scope, 'parent>(
+    fn compose<'scope>(
         self: Pin<&'scope mut Self>,
-        parent: Pin<&'scope mut DirectView<'parent, Total>>,
+        parent: nitori_call::ViewLoan<'scope, Direct<Total>>,
     ) -> DirectView<'scope, Total>
     where
-        Direct<Total>: 'parent,
+        nitori_call::Lent<Direct<Total>>: 'scope,
         Direct<Total>: 'scope,
-        'parent: 'scope,
     {
-        DirectView(parent.get_pin_mut())
+        DirectView(parent.project(|access| access.into_pin().get_pin_mut()))
     }
 }
 

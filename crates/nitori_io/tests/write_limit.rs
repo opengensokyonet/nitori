@@ -33,10 +33,9 @@ impl Write for Overcounting {
 fn a_write_counted_beyond_the_limit_panics() {
     let mut host = Overcounting;
     let mut limit = WriteLimit(3);
-    let mut view = pin!(Pin::new(&mut host).view());
     let mut limited = pin!(<WriteLimit as Compose<Overcounting>>::compose(
         Pin::new(&mut limit),
-        view.as_mut(),
+        Pin::new(&mut host).view(),
     ));
     let _ = <Limited<Overcounting, WriteLimit> as Write>::poll_write(
         limited.as_mut(),

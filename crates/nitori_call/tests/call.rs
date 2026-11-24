@@ -3,8 +3,8 @@ mod support;
 
 use futures_core::{FusedStream, Stream};
 use nitori_call::{
-    Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Lend, Operation,
-    Receiver, ReceiverAccess, ReceiverFamily, Start, call, direct_receiver,
+    Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Lend, Lent, Operation,
+    Receiver, ReceiverAccess, ReceiverFamily, Start, ViewLoan, call, direct_receiver,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -94,16 +94,12 @@ struct PinnedLimit {
     limit: ReadLimit,
     _pinned: PhantomPinned,
 }
-impl<F: ReceiverFamily> Compose<F> for PinnedLimit {
+impl<F: ReceiverFamily> Compose<Lent<F>> for PinnedLimit {
     type Family = Limited<F>;
-    fn compose<'s, 'p>(
-        self: Pin<&'s mut Self>,
-        parent: Pin<&'s mut F::ReceiverView<'p>>,
-    ) -> LimitedView<'s, F>
+    fn compose<'s>(self: Pin<&'s mut Self>, parent: ViewLoan<'s, F>) -> LimitedView<'s, F>
     where
-        F: 'p,
+        Lent<F>: 's,
         Self::Family: 's,
-        'p: 's,
     {
         // SAFETY: the limit is never moved out of the pinned state.
         let limit = unsafe { self.map_unchecked_mut(|state| &mut state.limit) };

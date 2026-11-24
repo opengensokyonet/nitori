@@ -41,19 +41,18 @@ impl<'data, F: ReceiverFamily> ReceiverFamily for Counted<'data, F> {
     where
         Self: 'visit;
 }
-impl<'data, F: ReceiverFamily> Compose<F> for Count<'data> {
+impl<'data, F: ReceiverFamily> Compose<nitori_call::Lent<F>> for Count<'data> {
     type Family = Counted<'data, F>;
-    fn compose<'visit, 'parent>(
+    fn compose<'visit>(
         self: Pin<&'visit mut Self>,
-        inner: Pin<&'visit mut F::ReceiverView<'parent>>,
+        inner: nitori_call::ViewLoan<'visit, F>,
     ) -> View<'visit, 'data, F>
     where
-        F: 'parent,
-        'parent: 'visit,
+        nitori_call::Lent<F>: 'visit,
         Self::Family: 'visit,
     {
         View {
-            inner: nitori_call::ViewLoan::new(inner),
+            inner,
             state: self,
             invariant: PhantomData,
             pinned: PhantomPinned,
@@ -250,9 +249,11 @@ fn explicit_view_executes_without_reconstruction() {
         _pin: PhantomPinned
     });
     let mut parent = pin!(Pin::new(&mut bytes).view());
-    let mut view = pin!(<Count<'_> as Compose<nitori_call::Direct<&[u8]>>>::compose(
+    let mut view = pin!(<Count<'_> as Compose<
+        nitori_call::Lent<nitori_call::Direct<&[u8]>>,
+    >>::compose(
         state.as_mut(),
-        parent.as_mut()
+        nitori_call::ViewLoan::new(parent.as_mut())
     ));
     let call = pin!(Call::<Counted<'_, nitori_call::Direct<&[u8]>>, _>::new(
         Tagged::new()

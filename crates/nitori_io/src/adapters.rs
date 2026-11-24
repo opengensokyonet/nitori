@@ -11,7 +11,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use nitori_call::{Compose, Direct, Receiver, ReceiverFamily, ViewLoan};
+use nitori_call::{Compose, Direct, Lent, Receiver, ReceiverFamily};
 
 pin_project_lite::pin_project! {
     /// Add copying chunk reads to any reader, with a shared underlying cursor.
@@ -167,12 +167,21 @@ pub struct ReadLimit<L = usize>(pub L);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteLimit(pub usize);
 
-/// The family of an access composed with [`ReadLimit`] or [`WriteLimit`].
+/// The family of a view composed with [`ReadLimit`] or [`WriteLimit`] on a
+/// view of `F`.
 pub struct Limited<F, L>(PhantomData<fn(F) -> F>, PhantomData<L>);
-/// A view of a parent view with the remaining budget of a [`Limited`] family.
-pub struct LimitedView<'v, F: ReceiverFamily, L> {
-    parent: ViewLoan<'v, F>,
-    limit: &'v mut L,
+pin_project_lite::pin_project! {
+    /// The view of a [`Limited`] family: the parent view, held by value, and
+    /// the remaining budget.
+    pub struct LimitedView<'v, F, L>
+    where
+        F: ReceiverFamily,
+        F: 'v,
+    {
+        #[pin]
+        parent: F::ReceiverView<'v>,
+        limit: &'v mut L,
+    }
 }
 impl<F: ReceiverFamily, L: fmt::Debug> fmt::Debug for LimitedView<'_, F, ReadLimit<L>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -200,11 +209,11 @@ macro_rules! limit_compose {
     ($limit:ty $(, $param:ident)*) => {
         impl<F: ReceiverFamily $(, $param: Unpin)*> Compose<F> for $limit {
             type Family = Limited<F, Self>;
-            fn compose<'v, 'p>(
-                self: Pin<&'v mut Self>, parent: Pin<&'v mut F::ReceiverView<'p>>,
+            fn compose<'v>(
+                self: Pin<&'v mut Self>, parent: F::ReceiverView<'v>,
             ) -> LimitedView<'v,F,Self>
-            where F:'p, Self::Family:'v, 'p:'v {
-                LimitedView {parent: ViewLoan::new(parent), limit:self.get_mut()}
+            where F:'v, Self::Family:'v {
+                LimitedView {parent, limit:self.get_mut()}
             }
         }
     };
@@ -221,10 +230,8 @@ where
     where
         Self: 'v,
     {
-        let view = host.get_mut();
-        let parent = view
-            .parent
-            .with(|parent| F::remaining_len(parent.into_pin()));
+        let view = host.project();
+        let parent = F::remaining_len(view.parent);
         crate::Min::min(parent, view.limit.0.clone())
     }
 }
@@ -257,17 +264,17 @@ where
     where
         Self: 'v,
     {
-        let view = host.get_mut();
+        let view = host.project();
         let remaining = crate::Min::min(view.limit.0.clone(), usize::MAX);
         if remaining == 0 {
             return Poll::Ready(Ok(0));
         }
         let allowed = remaining.min(destination.remaining_mut());
-        let count = ready!(view.parent.with(|parent| F::poll_read(
-            parent.into_pin(),
+        let count = ready!(F::poll_read(
+            view.parent,
             cx,
             &mut destination.limit(allowed)
-        )))?;
+        ))?;
         assert!(count <= allowed, "read exceeded the requested capacity");
         view.limit.consume(count);
         Poll::Ready(Ok(count))
@@ -289,16 +296,12 @@ where
     where
         Self: 'v,
     {
-        let view = host.get_mut();
+        let view = host.project();
         let Some(allowed) = NonZeroUsize::new(crate::Min::min(view.limit.0.clone(), maximum.get()))
         else {
             return Poll::Ready(Ok(None));
         };
-        let chunk = ready!(view.parent.with(|parent| F::poll_read_chunk(
-            parent.into_pin(),
-            cx,
-            allowed
-        )))?;
+        let chunk = ready!(F::poll_read_chunk(view.parent, cx, allowed))?;
         if let Some(chunk) = &chunk {
             let count = chunk.remaining();
             assert!(
@@ -320,17 +323,79 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
     where
         Self: 'v,
     {
-        let view = host.get_mut();
+        let view = host.project();
         let remaining = view.limit.0;
         // The boundary accepts nothing, without polling the parent.
         if remaining == 0 {
             return Poll::Ready(Ok(0));
         }
-        let count = ready!(view.parent.with(|parent| {
-            F::poll_write(parent.into_pin(), cx, &mut (&mut *input).take(remaining))
-        }))?;
+        let count = ready!(F::poll_write(
+            view.parent,
+            cx,
+            &mut (&mut *input).take(remaining)
+        ))?;
         assert!(count <= remaining, "write exceeded the offered input");
         view.limit.0 -= count;
         Poll::Ready(Ok(count))
+    }
+}
+
+// A loan of a view has the capabilities of the view it lends, so that state
+// composed on an access, which composes on `Lent`, can use them.
+
+/// Reads from the lent view.
+impl<F: Read> Read for Lent<F> {
+    type Error = F::Error;
+    fn poll_read<'v, O: BufMut + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        destination: &mut O,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'v,
+    {
+        host.get_mut()
+            .with(|parent| F::poll_read(parent.into_pin(), cx, destination))
+    }
+}
+/// Reads chunks from the lent view.
+impl<F: ReadChunk> ReadChunk for Lent<F> {
+    type Chunk = F::Chunk;
+    fn poll_read_chunk<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        maximum: NonZeroUsize,
+    ) -> Poll<Result<Option<F::Chunk>, Self::Error>>
+    where
+        Self: 'v,
+    {
+        host.get_mut()
+            .with(|parent| F::poll_read_chunk(parent.into_pin(), cx, maximum))
+    }
+}
+/// Writes to the lent view.
+impl<F: Write> Write for Lent<F> {
+    type Error = F::Error;
+    fn poll_write<'v, I: Buf + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        input: &mut I,
+    ) -> Poll<Result<usize, Self::Error>>
+    where
+        Self: 'v,
+    {
+        host.get_mut()
+            .with(|parent| F::poll_write(parent.into_pin(), cx, input))
+    }
+}
+/// The exact length of the lent view.
+impl<F: crate::ExactLen> crate::ExactLen for Lent<F> {
+    type Length = F::Length;
+    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> F::Length
+    where
+        Self: 'v,
+    {
+        host.get_mut()
+            .with(|parent| F::remaining_len(parent.into_pin()))
     }
 }
