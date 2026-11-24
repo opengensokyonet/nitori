@@ -23,9 +23,7 @@ pub(crate) use address::resolve_ident;
 pub use address::{Address, ChildAddresses, KeyAddress, KeyRoute, resolve_node};
 #[cfg(test)]
 pub(crate) use edit::insert;
-pub use edit::{
-    InsertError, LastChildren, LastKind, MoveError, NoParentError, OccupiedError, ParentChildren,
-};
+pub use edit::{MoveError, OccupiedError};
 pub use kind::{
     Child, ChildIndex, ChildList, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindAt, NoChild,
     NoStore, NodeKind, StorageAt,

@@ -3,10 +3,11 @@
 A driver for the state of one connection, or of another protocol's
 connection: a tree of nodes the code that uses it declares, the calls it
 runs at the nodes by priority, and what it lends them. It is experimental
-and builds without the standard library, with `alloc`; it needs the
-nightly toolchain the repository pins. Its default `std` feature turns on
-`nitori_call`'s, whose call slots are then `Send`: a driver whose
-components, calls and requests are `Send` is `Send` then.
+and builds without the standard library, with `alloc`, when its default
+`std` feature is off; it needs the nightly toolchain the repository pins.
+The `std` feature turns on `nitori_call`'s, whose call slots are then
+`Send`: a driver is `Send` when what it holds is, the components, calls,
+requests and keys, the clock and the parts' arguments.
 
 This crate gives the mechanism without protocol meaning; the code that
 uses it declares its structure, its parts, their components and calls,
@@ -45,8 +46,9 @@ and what each kind of node can be asked.
   (`Edit`) that adds, ends, replaces and moves nodes in the node's own
   subtree and lends the handler's needs at the node.
 - `driver`: `Driver::new` builds the root; the driver is a future that
-  handles what was woken, the highest priority first, the requests put in
-  after each lending before anything else runs, until the root ended.
+  handles what was woken, the highest priority first, until the root
+  ended. After each lending it handles the requests put in, in order,
+  before anything else runs.
   `Driver::operate` lends at a node by key address from outside.
   Dropping the driver ends every node, the nodes below first; after a
   panic through it, no component's operation runs again.

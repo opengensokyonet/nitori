@@ -49,8 +49,8 @@ pub trait Composition: 'static + Sized {
     type Priority: Ord + Copy + 'static;
     /// What the driver keeps of the nodes of every kind: the tables of
     /// [`Pack`](Composition::Pack), opaque too. Named apart from the pack
-    /// so that the driver is `Send` exactly when they are: a projection
-    /// out of the opaque pack would not be.
+    /// so that whether the driver is `Send` can follow from them: a
+    /// projection out of the opaque pack is never `Send`.
     type Tables: 'static;
     /// What was proved of every kind of the structure, in the order of
     /// [`KindsOf`].

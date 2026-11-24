@@ -1,15 +1,16 @@
-//! The types of editing the tree: why a node could not be added or moved,
-//! and the children of a path's parent.
+//! Why a node could not be added under a key, or moved; and, for the
+//! tests, putting a node in the tree by path.
 use snafu::Snafu;
 
 #[cfg(test)]
 use super::{
-    Append, ChildAt, ChildOfKind, HandleAt, KeyAt, KindFor, Node, NodePath, Occupied, Store,
+    Append, ChildAt, ChildOfKind, ChildrenOf, HandleAt, KeyAt, KindFor, Node, NodePath, Occupied,
+    PathFrom, Store,
 };
-use super::{ChildrenOf, KindAt, PathFrom, SplitLast};
 
 /// The children of the node a path `X` from the root `R` leads to.
-pub type ParentChildren<R, X> = ChildrenOf<<X as PathFrom<R>>::Target>;
+#[cfg(test)]
+pub(crate) type ParentChildren<R, X> = ChildrenOf<<X as PathFrom<R>>::Target>;
 
 /// The parent keeps a child of this kind under the key already.
 #[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
@@ -17,14 +18,16 @@ pub type ParentChildren<R, X> = ChildrenOf<<X as PathFrom<R>>::Target>;
 pub struct OccupiedError;
 
 /// No node is at the parent's path.
+#[cfg(test)]
 #[derive(Debug, Snafu, PartialEq, Eq, Clone, Copy)]
 #[snafu(display("no node at the parent's path"))]
-pub struct NoParentError;
+pub(crate) struct NoParentError;
 
 /// Why a node could not be added; the node comes back.
+#[cfg(test)]
 #[derive(Debug, Snafu)]
 #[snafu(module)]
-pub enum InsertError<N> {
+pub(crate) enum InsertError<N> {
     /// No node at the parent's path.
     #[snafu(display("the node was not added"))]
     NoParent {
@@ -42,15 +45,6 @@ pub enum InsertError<N> {
         source: OccupiedError,
     },
 }
-impl<N> InsertError<N> {
-    /// The node that was not added.
-    pub fn into_node(self) -> N {
-        match self {
-            Self::NoParent { node, .. } | Self::Occupied { node, .. } => node,
-        }
-    }
-}
-
 /// Add `node` as a child of the node at `at`, under `key`; the child's
 /// position among the parent's children is inferred from its kind.
 /// Returns the child's path.
@@ -83,11 +77,6 @@ where
         }),
     }
 }
-
-/// The children of the parent of the node a path `X` from `R` leads to.
-pub type LastChildren<R, X> = ChildrenOf<<<X as SplitLast>::Parent as PathFrom<R>>::Target>;
-/// The kind of the node a path `X` from `R` leads to, through its parent.
-pub type LastKind<R, X> = KindAt<LastChildren<R, X>, <X as SplitLast>::Index>;
 
 /// Why a node could not be moved; it stays where it was.
 #[derive(Debug, Snafu, PartialEq, Eq)]

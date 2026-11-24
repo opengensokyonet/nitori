@@ -4,12 +4,13 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0 OR MIT"
-description = "The tree of state a driver keeps and lends to its calls"
+description = "A driver for the state of one connection, its calls and what it lends them"
 
 [features]
 default = ["std"]
-# Call slots that are `Send`, so that a driver whose components, calls and
-# requests are `Send` is `Send` too.
+# Call slots that are `Send`, so that a driver is `Send` when what it holds
+# is: its components, calls, requests and keys, its clock and the parts'
+# arguments.
 std = ["nitori_call/std"]
 
 [dependencies]
