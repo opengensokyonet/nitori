@@ -1,7 +1,7 @@
 //! The skip capability on memory sources and its forwarding through a loan,
 //! a read budget and `Chunked`.
 #![feature(impl_trait_in_assoc_type)]
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use core::{
     convert::Infallible,
     num::NonZeroUsize,
@@ -122,7 +122,7 @@ async fn skip_within<F: Skip, M>(
 where
     M: Min<<F as Skip>::Count, Output = <F as Skip>::Count> + Clone,
     u8: Min<<F as Skip>::Count, Output = <F as Skip>::Count>,
-    <F as Skip>::Count: Min<u8, Output = u8> + Clone,
+    <F as Skip>::Count: Min<u8, Output = u8> + Clone + PartialOrd,
 {
     let mut limited = io.compose(ReadLimit(budget));
     let result = limited.skip(maximum).await;
@@ -329,4 +329,41 @@ impl Skip for Failing {
     {
         Poll::Ready(Err(Broken))
     }
+}
+
+/// Reports one byte more than it was allowed to skip.
+struct Overskip;
+nitori_call::family_receiver!(impl [] for Overskip);
+impl Read for Overskip {
+    type Error = Infallible;
+    fn poll_read<'v, B: BufMut + ?Sized>(
+        _: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+        _: &mut B,
+    ) -> Poll<Result<usize, Infallible>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(0))
+    }
+}
+impl Skip for Overskip {
+    type Count = usize;
+    fn poll_skip<'v, M: Min<usize, Output = usize> + Clone>(
+        _: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+        maximum: M,
+    ) -> Poll<Result<Option<usize>, Infallible>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(Some(Min::min(maximum, usize::MAX) + 1)))
+    }
+}
+
+#[test]
+#[should_panic = "skip exceeded the requested maximum"]
+fn a_parent_skipping_past_the_budget_panics() {
+    let mut framed = ComposedReceiver::new(Overskip, ReadLimit(2usize));
+    let _ = framed.sync_skip_unpin(Infinite);
 }

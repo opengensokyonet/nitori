@@ -358,6 +358,10 @@ impl<C, M: crate::Min<C, Output = C>, L: crate::Min<C, Output = C>> crate::Min<C
 /// parent, as reads do. The parent bounds each skip by both the requested
 /// maximum and the budget, so the skipped count, in the parent's `Count`,
 /// fits the budget.
+///
+/// # Panics
+///
+/// If the parent reports more than both maxima allowed it, as reads do.
 impl<F: Skip, L> Skip for Limited<F, ReadLimit<L>>
 where
     L: Clone
@@ -366,7 +370,7 @@ where
         + crate::Min<F::Count, Output = F::Count>
         + core::ops::SubAssign<<F::Count as crate::Min<L>>::Output>,
     usize: crate::Min<L>,
-    F::Count: crate::Min<L> + Clone,
+    F::Count: crate::Min<L> + Clone + PartialOrd,
 {
     type Count = F::Count;
     fn poll_skip<'v, M: crate::Min<F::Count, Output = F::Count> + Clone>(
@@ -382,8 +386,13 @@ where
         if crate::Min::min(budget.clone(), usize::MAX) == 0 {
             return Poll::Ready(Ok(None));
         }
-        let skipped = ready!(F::poll_skip(view.parent, cx, BothMaxima(maximum, budget)))?;
+        let allowed = BothMaxima(maximum, budget);
+        let skipped = ready!(F::poll_skip(view.parent, cx, allowed.clone()))?;
         if let Some(count) = &skipped {
+            assert!(
+                *count <= crate::Min::min(allowed, count.clone()),
+                "skip exceeded the requested maximum"
+            );
             // The count is at most the budget, so the minimum is the count
             // itself, in the budget's subtraction type.
             view.limit.0 -= crate::Min::min(count.clone(), view.limit.0.clone());
