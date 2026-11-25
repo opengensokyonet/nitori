@@ -2,7 +2,7 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use core::{
     convert::Infallible,
-    future::poll_fn,
+    future::Future,
     num::NonZeroUsize,
     pin::{Pin, pin},
     task::{Context, Poll},
@@ -13,13 +13,23 @@ use nitori_io::{
     adapters::{Chunked, ReadLimit},
     prelude::*,
 };
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::Wake,
+};
 
 async fn query<A: ReceiverAccess>(io: &mut A) -> <A::Family as ExactLen>::Length
 where
     A::Family: ExactLen,
 {
-    poll_fn(|cx| io.poll_access(cx, |mut view, _| Poll::Ready(view.remaining_len()))).await
+    let Ok(length) = io.remaining_len().await else {
+        panic!("the sources of these tests always know their length");
+    };
+    length
 }
 
 #[call(sync)]
@@ -110,11 +120,15 @@ struct Endless;
 nitori_call::family_receiver!(impl [] for Endless);
 impl ExactLen for Endless {
     type Length = Infinite;
-    fn remaining_len<'v>(_: Pin<&mut Self::ReceiverView<'v>>) -> Infinite
+    type LengthError = !;
+    fn poll_remaining_len<'v>(
+        _: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<Infinite, !>>
     where
         Self: 'v,
     {
-        Infinite
+        Poll::Ready(Ok(Infinite))
     }
 }
 impl Read for Endless {
@@ -167,6 +181,83 @@ fn infinite_source_and_wide_quota_account_for_actual_short_reads() {
         Chunked::new(Endless, NonZeroUsize::MIN).sync_query_len_unpin(),
         Infinite
     );
+}
+
+/// A received stream: its length is known once the peer's final size
+/// arrives, after one Pending, and cannot be known after a reset.
+struct Received {
+    polls: usize,
+    outcome: Result<usize, Reset>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reset;
+nitori_call::family_receiver!(impl [] for Received);
+impl ExactLen for Received {
+    type Length = usize;
+    type LengthError = Reset;
+    fn poll_remaining_len<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, Reset>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        this.polls += 1;
+        if this.polls == 1 {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        Poll::Ready(this.outcome)
+    }
+}
+
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Poll a query to its end; returns its output and how many polls were
+/// Pending, after checking that each Pending registered the waker.
+fn finish<Q: Future>(query: Q) -> (Q::Output, usize) {
+    let wakes = Arc::new(Wakes::default());
+    let waker = core::task::Waker::from(wakes.clone());
+    let mut cx = Context::from_waker(&waker);
+    let mut query = pin!(query);
+    for pendings in 0..10 {
+        let before = wakes.0.load(Ordering::Relaxed);
+        match query.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return (output, pendings),
+            Poll::Pending => assert!(
+                wakes.0.load(Ordering::Relaxed) > before,
+                "Pending without a wakeup"
+            ),
+        }
+    }
+    panic!("the query does not finish");
+}
+
+#[test]
+fn a_query_waits_for_the_length_and_reports_why_it_cannot_be_known() {
+    use nitori_call::ConstructedAccess;
+    for outcome in [Ok(5), Err(Reset)] {
+        let mut direct = ConstructedAccess::new(Received { polls: 0, outcome });
+        assert_eq!(finish(direct.remaining_len()), (outcome, 1));
+
+        let mut access = ConstructedAccess::new(Received { polls: 0, outcome });
+        let mut limited = access.compose(ReadLimit(3u8));
+        assert_eq!(finish(limited.remaining_len()), (outcome.map(|_| 3u8), 1));
+        assert_eq!(limited.into_state().0, 3);
+
+        let mut chunked = ConstructedAccess::new(Chunked::new(
+            Received { polls: 0, outcome },
+            NonZeroUsize::MIN,
+        ));
+        assert_eq!(finish(chunked.remaining_len()), (outcome, 1));
+    }
 }
 
 #[test]

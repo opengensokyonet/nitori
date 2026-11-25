@@ -137,12 +137,16 @@ where
     T::Family: crate::ExactLen,
 {
     type Length = <T::Family as crate::ExactLen>::Length;
-    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> Self::Length
+    type LengthError = <T::Family as crate::ExactLen>::LengthError;
+    fn poll_remaining_len<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::Length, Self::LengthError>>
     where
         Self: 'v,
     {
         let inner = host.get_pin_mut().project().inner;
-        <T::Family as crate::ExactLen>::remaining_len(core::pin::pin!(inner.view()))
+        <T::Family as crate::ExactLen>::poll_remaining_len(core::pin::pin!(inner.view()), cx)
     }
 }
 impl<T: Receiver> Write for Direct<Chunked<T>>
@@ -278,13 +282,17 @@ where
     F::Length: crate::Min<L>,
 {
     type Length = <F::Length as crate::Min<L>>::Output;
-    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> Self::Length
+    type LengthError = F::LengthError;
+    fn poll_remaining_len<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::Length, Self::LengthError>>
     where
         Self: 'v,
     {
         let view = host.project();
-        let parent = F::remaining_len(view.parent);
-        crate::Min::min(parent, view.limit.0.clone())
+        let parent = ready!(F::poll_remaining_len(view.parent, cx))?;
+        Poll::Ready(Ok(crate::Min::min(parent, view.limit.0.clone())))
     }
 }
 
@@ -572,11 +580,15 @@ impl<F: Skip> Skip for Lent<F> {
 /// The exact length of the lent view.
 impl<F: crate::ExactLen> crate::ExactLen for Lent<F> {
     type Length = F::Length;
-    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> F::Length
+    type LengthError = F::LengthError;
+    fn poll_remaining_len<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<F::Length, F::LengthError>>
     where
         Self: 'v,
     {
         host.get_mut()
-            .with(|parent| F::remaining_len(parent.into_pin()))
+            .with(|parent| F::poll_remaining_len(parent.into_pin(), cx))
     }
 }

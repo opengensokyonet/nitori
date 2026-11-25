@@ -6,7 +6,7 @@
 pub use crate::{ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
 
 pub use crate::{
-    ExactLenExt as _, ExactLenViewExt as _, PollReadExt as _, PollWriteExt as _, ReadChunkExt as _,
+    ExactLenExt as _, PollReadExt as _, PollWriteExt as _, ReadChunkExt as _,
     ReadChunkHostExt as _, ReadExt as _, ReadHostExt as _, SkipExt as _, SkipHostExt as _,
     WriteExt as _, WriteHostExt as _,
 };

@@ -366,10 +366,14 @@ macro_rules! memory_len {
     ($($ty:ty),* $(,)?) => {$(
         impl crate::ExactLen for Direct<$ty> {
             type Length = usize;
+            type LengthError = !;
 
-            fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> usize
+            fn poll_remaining_len<'v>(
+                host: Pin<&mut Self::ReceiverView<'v>>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<usize, !>>
             where Self: 'v {
-                host.get_pin_mut().remaining()
+                Poll::Ready(Ok(host.get_pin_mut().remaining()))
             }
         }
     )*};
@@ -386,11 +390,15 @@ mod cursor_length {
     #[allow(private_bounds)]
     impl<T: StableBytes + Unpin> crate::ExactLen for Direct<Cursor<T>> {
         type Length = usize;
-        fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> usize
+        type LengthError = !;
+        fn poll_remaining_len<'v>(
+            host: Pin<&mut Self::ReceiverView<'v>>,
+            _: &mut Context<'_>,
+        ) -> Poll<Result<usize, !>>
         where
             Self: 'v,
         {
-            host.get_pin_mut().remaining()
+            Poll::Ready(Ok(host.get_pin_mut().remaining()))
         }
     }
 

@@ -206,31 +206,32 @@ reaches normal EOF may report the zero-sized `Infinite`. A subsequent IO
 failure can still end a read early. Ordinary readers need only implement
 the capabilities they provide.
 
-The length query is a synchronous view method. It is available through the
-prelude on a lent access or on the view obtained by `poll_access`.
+The query is `poll_remaining_len`, which can wait: a received stream knows
+its final size only once the peer sends it. It fails with the source's
+`LengthError` when the length cannot be known, such as after a reset;
+memory sources report `!`. Inside an operation, `remaining_len()` awaits it.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-use core::{future::poll_fn, task::Poll};
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{adapters::ReadLimit, prelude::*};
 
 #[call(sync)]
 async fn bounded_len<F: ExactLen<Length = usize>>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> u8 {
-    let mut limited = io.compose(ReadLimit(4u8));
-    poll_fn(|cx| limited.poll_access(cx, |mut view, _| Poll::Ready(view.remaining_len()))).await
+) -> Result<u8, F::LengthError> {
+    io.compose(ReadLimit(4u8)).remaining_len().await
 }
 let mut input = &b"abc"[..];
-assert_eq!(input.sync_bounded_len_unpin(), 3u8);
+assert_eq!(input.sync_bounded_len_unpin(), Ok(3u8));
 assert_eq!(input, b"abc");
 ```
 
 Slices, `Bytes`, `BytesMut`, `VecDeque<u8>`, and the standard-library
 `Cursor` over byte arrays, slices, vectors, boxed slices, `Bytes`, or
 `BytesMut` support the query. Seeking a cursor past its end gives zero.
-`Chunked` forwards its inner source's exact length and type.
+`Chunked` forwards its inner source's exact length, with its `Length` and
+`LengthError`.
 
 ## Byte budgets
 

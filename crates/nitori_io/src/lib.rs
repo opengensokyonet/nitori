@@ -33,10 +33,13 @@ pub mod prelude;
 mod split;
 
 /// Report the exact remaining byte count of this source layer at its cursor.
-/// Querying a view is synchronous and consumes nothing. A successful read
-/// subtracts the number of bytes consumed from a finite count. A known
-/// infinite source can report [`Infinite`]. A source whose end cannot be
-/// predicted need not implement this capability.
+///
+/// A query consumes nothing. It is `Pending` while the length is not known
+/// yet but will be, such as a received stream's final size before the peer
+/// sends it, and an error when it cannot be known, such as after the stream
+/// is reset. A successful read subtracts the number of bytes consumed from a
+/// finite count. A known infinite source can report [`Infinite`]. A source
+/// whose end cannot be predicted need not implement this capability.
 ///
 /// The count describes reading to normal EOF without an independent change
 /// such as seeking or appending data. A subsequent IO failure is still
@@ -45,8 +48,15 @@ mod split;
 pub trait ExactLen: nitori_call::ReceiverFamily {
     /// This source's representation of its exact remaining byte length.
     type Length;
+    /// Why the length cannot be known; `!` for a source that always knows
+    /// it.
+    type LengthError;
     /// Return the byte length from the current cursor to normal EOF.
-    fn remaining_len<'visit>(source: Pin<&mut Self::ReceiverView<'visit>>) -> Self::Length
+    /// Register the waker before returning `Pending`.
+    fn poll_remaining_len<'visit>(
+        source: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Self::Length, Self::LengthError>>
     where
         Self: 'visit;
 }

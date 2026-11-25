@@ -153,8 +153,11 @@ fn the_composed_family_forwards_the_exact_length() {
     let mut io = ComposedReceiver::new(&b"abc"[..], ReadSkip);
     let view = pin!(Pin::new(&mut io).view());
     assert_eq!(
-        <Skippable<nitori_call::Direct<&[u8]>, ReadSkip> as ExactLen>::remaining_len(view),
-        3usize
+        <Skippable<nitori_call::Direct<&[u8]>, ReadSkip> as ExactLen>::poll_remaining_len(
+            view,
+            &mut Context::from_waker(Waker::noop()),
+        ),
+        Poll::Ready(Ok(3usize))
     );
 }
 

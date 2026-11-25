@@ -102,11 +102,15 @@ impl<F: ReadChunk, S> ReadChunk for Skippable<F, S> {
 }
 impl<F: ExactLen, S> ExactLen for Skippable<F, S> {
     type Length = F::Length;
-    fn remaining_len<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> F::Length
+    type LengthError = F::LengthError;
+    fn poll_remaining_len<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<F::Length, F::LengthError>>
     where
         Self: 'v,
     {
-        F::remaining_len(host)
+        F::poll_remaining_len(host, cx)
     }
 }
 
