@@ -61,11 +61,12 @@ impl<'data, F: ReceiverFamily> Compose<nitori_call::Lent<F>> for Count<'data> {
 }
 impl<F: Read> Read for Counted<'_, F> {
     type Error = F::Error;
+    type Metadata = F::Metadata;
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'v,
     {
@@ -91,7 +92,7 @@ impl<'data, F: Read> TaggedFamily for Counted<'data, F> {
     }
 }
 #[call(yields = <A::Family as TaggedFamily>::Tag)]
-async fn tagged<A: ReceiverAccess<Family: TaggedFamily>>(
+async fn tagged<A: ReceiverAccess<Family: TaggedFamily<Metadata: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<<A::Family as Read>::Error>> {
     let tag = poll_fn(|cx| {
@@ -101,10 +102,10 @@ async fn tagged<A: ReceiverAccess<Family: TaggedFamily>>(
     })
     .await;
     yield tag;
-    io.read_array::<2>().await
+    io.read_array::<2>().await.map(|read| read.value)
 }
 #[call(yields = usize)]
-async fn inner<A: ReceiverAccess<Family: Read>>(
+async fn inner<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
     drops: Rc<Cell<usize>>,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<<A::Family as Read>::Error>> {
@@ -131,7 +132,7 @@ fn unreachable_result<T>() -> T {
     panic!("child completed without a result")
 }
 #[call(yields = usize)]
-async fn outer<A: ReceiverAccess<Family: Read>>(
+async fn outer<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
     drops: Rc<Cell<usize>>,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<<A::Family as Read>::Error>> {
@@ -161,11 +162,12 @@ struct Delayed<'data> {
 nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
     type Error = std::convert::Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'v,
     {
@@ -179,7 +181,7 @@ impl Read for Delayed<'_> {
         let count = out.remaining_mut().min(this.bytes.len()).min(1);
         out.put_slice(&this.bytes[..count]);
         this.bytes = &this.bytes[count..];
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
 }
 fn poll<'data, Op>(
@@ -268,7 +270,7 @@ fn explicit_view_executes_without_reconstruction() {
 }
 
 #[call(sync)]
-async fn chained<A: ReceiverAccess<Family: Read>>(
+async fn chained<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
     drops: Rc<Cell<usize>>,
 ) -> Result<[u8; 2], nitori_io::calls::ReadArrayError<<A::Family as Read>::Error>> {
@@ -287,7 +289,7 @@ async fn chained<A: ReceiverAccess<Family: Read>>(
     });
     let mut first = io.compose(a.as_mut());
     let mut second = first.compose(b.as_mut());
-    second.read_array::<2>().await
+    second.read_array::<2>().await.map(|read| read.value)
 }
 #[test]
 fn chained_composition_keeps_both_intermediate_views_alive() {
@@ -297,4 +299,11 @@ fn chained_composition_keeps_both_intermediate_views_alive() {
     assert_eq!(result.unwrap(), *b"ab");
     assert_eq!(bytes, b"c");
     assert_eq!(drops.get(), 2);
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

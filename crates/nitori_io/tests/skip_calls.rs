@@ -123,11 +123,12 @@ struct Broken;
 nitori_call::family_receiver!(impl [] for ThenFail);
 impl Read for ThenFail {
     type Error = Broken;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Broken>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Broken>>
     where
         Self: 'v,
     {
@@ -138,6 +139,13 @@ impl Read for ThenFail {
         let count = Ord::min(out.remaining_mut(), this.0.len());
         out.put_slice(&this.0[..count]);
         this.0 = &this.0[count..];
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

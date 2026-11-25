@@ -16,20 +16,20 @@ use nitori_io::{
 };
 
 #[call(sync)]
-async fn read_two<F: Read>(
+async fn read_two<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<[u8; 2], ReadArrayError<F::Error>> {
-    io.read_array::<2>().await
+    io.read_array::<2>().await.map(|read| read.value)
 }
 
 /// Reads two bytes within a budget of one composed in the call, and returns
 /// what is left of that budget.
 #[call(sync)]
-async fn read_two_within_one<F: Read>(
+async fn read_two_within_one<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> (Result<[u8; 2], ReadArrayError<F::Error>>, usize) {
     let mut limited = io.compose(ReadLimit(1usize));
-    let result = limited.read_array::<2>().await;
+    let result = limited.read_array::<2>().await.map(|read| read.value);
     (result, limited.into_state().0)
 }
 
@@ -66,11 +66,12 @@ struct Delayed<'data> {
 nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'v,
     {
@@ -84,7 +85,7 @@ impl Read for Delayed<'_> {
         let count = out.remaining_mut().min(this.bytes.len()).min(1);
         out.put_slice(&this.bytes[..count]);
         this.bytes = &this.bytes[count..];
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
 }
 
@@ -130,4 +131,11 @@ fn a_cancelled_call_leaves_the_source_and_the_budget_in_step() {
     };
     assert_eq!(read.unwrap(), *b"bc");
     assert_eq!(framed.get_ref().1, &ReadLimit(1));
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

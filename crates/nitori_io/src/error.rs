@@ -69,7 +69,8 @@ impl CompletedNotBelowExpectedError {
     }
 }
 
-/// The destination has less room than the whole requested read needs.
+/// A buffer has less room than a count it must hold: the destination of a
+/// read of a whole length, or storage lent for a grant.
 ///
 /// Reported before any IO, so the available room is always below the required
 /// length.
@@ -105,10 +106,13 @@ pub struct DestinationFullError {
 }
 
 /// A nonempty write succeeded without accepting any bytes.
+///
+/// The count is a `usize` for writes of one buffer; copies, which are not
+/// bounded by memory, count in `u64`.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 #[snafu(display("write made no progress after {completed} bytes"))]
-pub struct WriteZeroError {
+pub struct WriteZeroError<C: core::fmt::Display = usize> {
     /// Bytes accepted before the write that accepted none.
-    pub completed: usize,
+    pub completed: C,
 }

@@ -23,7 +23,7 @@ enum WriteLineError<E> {
 }
 
 #[call(sync, yields = usize)]
-async fn write_line<F: Write, A: ReceiverAccess<Family = F>>(
+async fn write_line<F: Write<Report: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     line: &[u8],
 ) -> Result<usize, WriteLineError<F::Error>> {

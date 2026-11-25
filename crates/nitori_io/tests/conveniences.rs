@@ -21,11 +21,12 @@ struct Closed;
 family_receiver!(impl [] for Closed);
 impl Read for Closed {
     type Error = &'static str;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, &'static str>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, &'static str>>
     where
         Self: 'v,
     {
@@ -34,11 +35,12 @@ impl Read for Closed {
 }
 impl Write for Closed {
     type Error = &'static str;
+    type Report = ();
     fn poll_write<'v, B: Buf + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, &'static str>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, &'static str>>
     where
         Self: 'v,
     {
@@ -56,8 +58,8 @@ async fn read_limited<A: ReceiverAccess<Family: Read>>(
     let mut total = 0;
     let result = loop {
         match limited.read(&mut *output).await {
-            Ok(0) => break Ok(total),
-            Ok(count) => total += count,
+            Ok(None) => break Ok(total),
+            Ok(Some(segment)) => total += segment.count.get(),
             Err(error) => break Err(error),
         }
     };
@@ -102,7 +104,7 @@ async fn chunks_limited<A: ReceiverAccess<Family: ReadChunk<Chunk = Bytes>>>(
     let mut chunks = pin!(limited.read_chunks_exact(length, NonZeroUsize::new(4).unwrap()));
     loop {
         match chunks.as_mut().step().await {
-            ControlFlow::Continue(chunk) => yield chunk,
+            ControlFlow::Continue(chunk) => yield chunk.chunk,
             ControlFlow::Break(result) => return result,
         }
     }
@@ -132,7 +134,7 @@ fn read_limit_caps_chunks() {
 }
 
 #[call(sync)]
-async fn write_limited<A: ReceiverAccess<Family: Write>>(
+async fn write_limited<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
     io: &mut A,
     budget: usize,
     payload: &[u8],
@@ -141,7 +143,7 @@ async fn write_limited<A: ReceiverAccess<Family: Write>>(
     Result<(), WriteAllError<<A::Family as Write>::Error>>,
 ) {
     let mut limited = io.compose(WriteLimit(budget));
-    let result = limited.write_all(payload).await;
+    let result = limited.write_all(payload).await.map(|_| ());
     (limited.into_state().0, result)
 }
 
@@ -173,7 +175,9 @@ fn write_limit_accepts_nothing_at_the_boundary_without_the_parent() {
 }
 
 #[call(sync)]
-async fn write_header<A: ReceiverAccess<Family: Write>>(io: &mut A) -> Result<(), usize> {
+async fn write_header<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+    io: &mut A,
+) -> Result<(), usize> {
     io.write_array([0xff])
         .await
         .map_err(|error| error.completed())?;
@@ -182,6 +186,7 @@ async fn write_header<A: ReceiverAccess<Family: Write>>(io: &mut A) -> Result<()
         .map_err(|error| error.completed())?;
     io.write_be(0x0304_u16)
         .await
+        .map(|_| ())
         .map_err(|error| error.completed())
 }
 
@@ -191,16 +196,16 @@ fn endian_writes_round_trip() {
     output.sync_write_header_unpin().unwrap();
     assert_eq!(output, [0xff, 0x02, 0x01, 0x03, 0x04]);
     let mut input = &output[1..];
-    assert_eq!(input.sync_read_le_unpin::<u16>().unwrap(), 0x0102);
-    assert_eq!(input.sync_read_be_unpin::<u16>().unwrap(), 0x0304);
+    assert_eq!(input.sync_read_le_unpin::<u16>().unwrap().value, 0x0102);
+    assert_eq!(input.sync_read_be_unpin::<u16>().unwrap().value, 0x0304);
     let mut output = Vec::new();
     for value in [-1.5_f64, f64::MIN_POSITIVE] {
         output.sync_write_be_unpin(value).unwrap();
     }
     let mut input2 = output.as_slice();
-    assert_eq!(input2.sync_read_be_unpin::<f64>().unwrap(), -1.5);
+    assert_eq!(input2.sync_read_be_unpin::<f64>().unwrap().value, -1.5);
     assert_eq!(
-        input2.sync_read_be_unpin::<f64>().unwrap(),
+        input2.sync_read_be_unpin::<f64>().unwrap().value,
         f64::MIN_POSITIVE
     );
 }
@@ -216,17 +221,17 @@ fn endian_write_reports_progress_when_the_destination_fills() {
 }
 
 #[call(yields = u8)]
-async fn bytes_then_count<A: ReceiverAccess<Family: Read>>(
+async fn bytes_then_count<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<usize, ReadArrayError<<A::Family as Read>::Error>> {
-    let [a, b] = io.read_array::<2>().await?;
+    let [a, b] = io.read_array::<2>().await?.value;
     yield a;
     yield b;
     Ok(2)
 }
 
 #[call(sync)]
-async fn step_after_final<A: ReceiverAccess<Family: Read>>(
+async fn step_after_final<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
     events: &mut Vec<ControlFlow<usize, u8>>,
     past_the_end: bool,

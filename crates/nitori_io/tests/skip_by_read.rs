@@ -34,11 +34,12 @@ struct Chunks {
 nitori_call::family_receiver!(impl [] for Chunks);
 impl Read for Chunks {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, !>>
     where
         Self: 'v,
     {
@@ -46,7 +47,7 @@ impl Read for Chunks {
         let count = Ord::min(out.remaining_mut(), this.bytes.len());
         out.put_slice(&this.bytes[..count]);
         this.bytes.drain(..count);
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
 }
 impl ReadChunk for Chunks {
@@ -55,15 +56,16 @@ impl ReadChunk for Chunks {
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, !>>
     where
         Self: 'v,
     {
         let this = host.get_pin_mut().get_mut();
         this.chunk_requests += 1;
         let count = Ord::min(maximum.get(), this.bytes.len());
-        Poll::Ready(Ok((count != 0).then(|| {
-            Bytes::from(this.bytes.drain(..count).collect::<Vec<_>>())
+        Poll::Ready(Ok((count != 0).then(|| nitori_io::ChunkSegment {
+            chunk: Bytes::from(this.bytes.drain(..count).collect::<Vec<_>>()),
+            metadata: (),
         })))
     }
 }
@@ -73,7 +75,12 @@ fn reading_skips_on_a_receiver_and_forwards_the_reads() {
     let mut io = ComposedReceiver::new(reader(b"abcdefgh"), ReadSkip);
     assert_eq!(io.sync_skip_unpin(2u8).unwrap(), Some(2usize));
     let mut out = [0; 2];
-    assert_eq!(io.sync_read_unpin(&mut out.as_mut_slice()).unwrap(), 2);
+    assert_eq!(
+        io.sync_read_unpin(&mut out.as_mut_slice())
+            .unwrap()
+            .map(|segment| segment.count.get()),
+        Some(2)
+    );
     assert_eq!(&out, b"cd");
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), Some(4));
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), None);
@@ -122,7 +129,10 @@ fn chunks_skip_by_dropping_one_bounded_chunk_per_poll() {
         ReadChunkSkip,
     );
     assert_eq!(io.sync_skip_unpin(2u8), Ok(Some(2usize)));
-    let chunk = io.sync_read_chunk_unpin(NonZeroUsize::MIN).unwrap();
+    let chunk = io
+        .sync_read_chunk_unpin(NonZeroUsize::MIN)
+        .unwrap()
+        .map(|segment| segment.chunk);
     assert_eq!(chunk.as_deref(), Some(&b"c"[..]));
     assert_eq!(io.sync_skip_unpin(Infinite), Ok(Some(3)));
     assert_eq!(io.sync_skip_unpin(u128::MAX), Ok(None));
@@ -167,14 +177,14 @@ async fn skip_by_reading<F: Read>(
 /// Skips `length` bytes by chunks, with the state composed on the access,
 /// then reads one byte.
 #[call(sync)]
-async fn skip_by_chunks_then_read<F: ReadChunk>(
+async fn skip_by_chunks_then_read<F: ReadChunk<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
 ) -> Result<[u8; 1], nitori_io::calls::ReadArrayError<F::Error>> {
     if io.compose(ReadChunkSkip).skip_exact(length).await.is_err() {
         panic!("the source holds enough bytes");
     }
-    io.read_array::<1>().await
+    io.read_array::<1>().await.map(|read| read.value)
 }
 
 #[test]
@@ -197,11 +207,12 @@ struct Delayed<'data> {
 nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'v,
     {
@@ -215,7 +226,7 @@ impl Read for Delayed<'_> {
         let count = Ord::min(Ord::min(out.remaining_mut(), this.bytes.len()), 1);
         out.put_slice(&this.bytes[..count]);
         this.bytes = &this.bytes[count..];
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
 }
 
@@ -225,7 +236,7 @@ impl ReadChunk for Delayed<'_> {
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, !>>
     where
         Self: 'v,
     {
@@ -239,7 +250,10 @@ impl ReadChunk for Delayed<'_> {
         let count = Ord::min(Ord::min(maximum.get(), this.bytes.len()), 1);
         let chunk = Bytes::copy_from_slice(&this.bytes[..count]);
         this.bytes = &this.bytes[count..];
-        Poll::Ready(Ok((count != 0).then_some(chunk)))
+        Poll::Ready(Ok((count != 0).then_some(nitori_io::ChunkSegment {
+            chunk,
+            metadata: (),
+        })))
     }
 }
 
@@ -343,7 +357,7 @@ fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
 /// composes the state again on that, then reads one byte and returns what is
 /// left of the budget.
 #[call(sync)]
-async fn skip_by_reading_on_composed<F: Read>(
+async fn skip_by_reading_on_composed<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
 ) -> (
@@ -354,13 +368,13 @@ async fn skip_by_reading_on_composed<F: Read>(
     let mut budget = Composed::new(io, ReadLimit(5usize));
     let mut skipping = budget.compose(ReadSkip);
     let skipped = skipping.skip_exact(length).await;
-    let read = skipping.read_array::<1>().await;
+    let read = skipping.read_array::<1>().await.map(|read| read.value);
     (skipped, read, budget.into_state().0)
 }
 
 /// As above, by chunks.
 #[call(sync)]
-async fn skip_by_chunks_on_composed<F: ReadChunk>(
+async fn skip_by_chunks_on_composed<F: ReadChunk<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
 ) -> (
@@ -371,7 +385,7 @@ async fn skip_by_chunks_on_composed<F: ReadChunk>(
     let mut budget = Composed::new(io, ReadLimit(5usize));
     let mut skipping = budget.compose(ReadChunkSkip);
     let skipped = skipping.skip_exact(length).await;
-    let read = skipping.read_array::<1>().await;
+    let read = skipping.read_array::<1>().await.map(|read| read.value);
     (skipped, read, budget.into_state().0)
 }
 
@@ -401,11 +415,12 @@ struct Broken;
 nitori_call::family_receiver!(impl [] for Failing);
 impl Read for Failing {
     type Error = Broken;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Broken>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Broken>>
     where
         Self: 'v,
     {
@@ -418,10 +433,17 @@ impl ReadChunk for Failing {
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: NonZeroUsize,
-    ) -> Poll<Result<Option<&'static [u8]>, Broken>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<&'static [u8], Self::Metadata>>, Broken>>
     where
         Self: 'v,
     {
         Poll::Ready(Err(Broken))
     }
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

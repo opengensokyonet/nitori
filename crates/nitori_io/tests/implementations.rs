@@ -22,6 +22,22 @@ fn ready<T, E: std::fmt::Debug>(poll: Poll<Result<T, E>>) -> T {
         Poll::Pending => panic!("unexpected Pending"),
     }
 }
+trait Segment {
+    fn len(self) -> usize;
+}
+impl<M> Segment for Option<nitori_io::ReadSegment<M>> {
+    fn len(self) -> usize {
+        self.map_or(0, |segment| segment.count.get())
+    }
+}
+impl<R> Segment for Option<nitori_io::WriteSegment<R>> {
+    fn len(self) -> usize {
+        self.map_or(0, |segment| segment.count.get())
+    }
+}
+fn segment_len(segment: impl Segment) -> usize {
+    segment.len()
+}
 fn check_reader<T: nitori_call::Receiver + Unpin>(mut source: T)
 where
     T::Family: Read<Error = Infallible>,
@@ -30,17 +46,20 @@ where
     let mut second = [0; 2];
     let mut output = first.as_mut_slice().chain_mut(second.as_mut_slice());
     let output: &mut dyn BufMut = &mut output;
-    assert_eq!(ready(Pin::new(&mut source).poll_read(&mut cx(), output)), 3);
+    assert_eq!(
+        segment_len(ready(Pin::new(&mut source).poll_read(&mut cx(), output))),
+        3
+    );
     assert_eq!(first, *b"a");
     assert_eq!(second, *b"bc");
     let mut rest = Vec::new();
     assert_eq!(
-        ready(Pin::new(&mut source).poll_read(&mut cx(), &mut rest)),
+        segment_len(ready(Pin::new(&mut source).poll_read(&mut cx(), &mut rest))),
         2
     );
     assert_eq!(rest, b"de");
     assert_eq!(
-        ready(Pin::new(&mut source).poll_read(&mut cx(), &mut rest)),
+        segment_len(ready(Pin::new(&mut source).poll_read(&mut cx(), &mut rest))),
         0
     );
 }
@@ -64,7 +83,9 @@ fn memory_readers_and_forwarding_share_cursors() {
     let mut cursor = Cursor::new(b"abc");
     cursor.set_position(u64::MAX);
     assert_eq!(
-        ready(Pin::new(&mut cursor).poll_read(&mut cx(), &mut Vec::new())),
+        segment_len(ready(
+            Pin::new(&mut cursor).poll_read(&mut cx(), &mut Vec::new())
+        )),
         0
     );
     assert_eq!(cursor.position(), u64::MAX);
@@ -76,9 +97,13 @@ where
     let mut first = [0; 1];
     ready(Pin::new(&mut source).poll_read(&mut cx(), &mut first.as_mut_slice()));
     assert_eq!(first, *b"a");
-    let chunk = ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(2))).unwrap();
+    let chunk = ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(2)))
+        .unwrap()
+        .chunk;
     assert_eq!(chunk.chunk(), b"bc");
-    let chunk = ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(99))).unwrap();
+    let chunk = ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(99)))
+        .unwrap()
+        .chunk;
     assert_eq!(chunk.chunk(), b"de");
     assert!(ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(1))).is_none());
 }
@@ -87,7 +112,9 @@ fn native_chunks_are_bounded_and_zero_copy() {
     let bytes = Bytes::from_static(b"abcde");
     let address = bytes.as_ptr();
     let mut source = bytes.clone();
-    let chunk = ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(2))).unwrap();
+    let chunk = ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(2)))
+        .unwrap()
+        .chunk;
     assert_eq!(chunk.as_ptr(), address);
     check_chunks(bytes);
     check_chunks(BytesMut::from(&b"abcde"[..]));
@@ -101,7 +128,7 @@ where
 {
     let mut input = (&b"ab"[..]).chain(&b"cde"[..]);
     let input: &mut dyn Buf = &mut input;
-    let count = ready(Pin::new(sink).poll_write(&mut cx(), input));
+    let count = segment_len(ready(Pin::new(sink).poll_write(&mut cx(), input)));
     assert_eq!(input.remaining(), 5 - count);
     count
 }
@@ -136,14 +163,18 @@ fn std_bridge_and_copying_chunks() {
     let mut source = Chunked::new(Std::new(Cursor::new(b"abcdef")), nz(2));
     assert_eq!(source.chunk_capacity(), nz(2));
     assert_eq!(
-        ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(99))).unwrap(),
+        ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(99)))
+            .unwrap()
+            .chunk,
         b"ab"[..]
     );
     let mut one = [0; 1];
     ready(Pin::new(&mut source).poll_read(&mut cx(), &mut one.as_mut_slice()));
     assert_eq!(one, *b"c");
     assert_eq!(
-        ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(1))).unwrap(),
+        ready(Pin::new(&mut source).poll_read_chunk(&mut cx(), nz(1)))
+            .unwrap()
+            .chunk,
         b"d"[..]
     );
     assert_eq!(source.into_inner().into_inner().position(), 4);
@@ -203,12 +234,12 @@ fn operations_extend_actual_resources_and_forwarding_receivers() {
     let mut source = &b"abcd"[..];
     {
         let mut call = pin!(source.read_array_unpin::<2>());
-        assert_eq!(ready(call.as_mut().poll(&mut cx())), *b"ab");
+        assert_eq!(ready(call.as_mut().poll(&mut cx())).value, *b"ab");
     }
     {
         let forwarded = &mut source;
         let mut call = pin!(forwarded.read_array_unpin::<2>());
-        assert_eq!(ready(call.as_mut().poll(&mut cx())), *b"cd");
+        assert_eq!(ready(call.as_mut().poll(&mut cx())).value, *b"cd");
     }
     let mut output = Vec::new();
     {

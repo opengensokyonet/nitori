@@ -82,11 +82,12 @@ struct Source {
 }
 impl Read for Source {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -99,7 +100,7 @@ impl ReadChunk for Source {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -109,14 +110,19 @@ impl ReadChunk for Source {
             return Poll::Ready(Ok(None));
         }
         let count = this.bytes.len().min(maximum.get()).min(2);
-        Poll::Ready(Ok(Some(this.bytes.split_to(count))))
+        Poll::Ready(Ok(Some(nitori_io::ChunkSegment {
+            chunk: this.bytes.split_to(count),
+            metadata: (),
+        })))
     }
 }
 nitori_call::family_receiver!(impl [] for Source);
 
 /// A parent that forwards the frame's chunks as its own items.
 #[call(yields = Bytes)]
-async fn forward_frame<A: ReceiverAccess<Family: ReadChunk<Chunk = Bytes, Error = Infallible>>>(
+async fn forward_frame<
+    A: ReceiverAccess<Family: ReadChunk<Chunk = Bytes, Error = !, Metadata = ()>>,
+>(
     io: &mut A,
 ) -> Result<usize, CodecError<Infallible>> {
     let mut frame = pin!(io.read_data_frame(NonZeroUsize::new(3).unwrap()));
@@ -167,11 +173,12 @@ pub(super) struct Output {
 }
 impl nitori_io::Write for Output {
     type Error = Infallible;
+    type Report = ();
     fn poll_write<'visit, Input: bytes::Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -185,7 +192,7 @@ impl nitori_io::Write for Output {
         let count = input.chunk().len().min(2);
         this.bytes.extend_from_slice(&input.chunk()[..count]);
         input.advance(count);
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(written(count)))
     }
 }
 nitori_call::family_receiver!(impl [] for Output);
@@ -271,4 +278,8 @@ fn frame_header_failures_name_the_field() {
         input.sync_read_data_frame_unpin(NonZeroUsize::new(2).unwrap()),
         Err(CodecError::FrameLength { .. })
     ));
+}
+
+fn written(count: usize) -> Option<nitori_io::WriteSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::WriteSegment { count, report: () })
 }

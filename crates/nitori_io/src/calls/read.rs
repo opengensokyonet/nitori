@@ -1,6 +1,7 @@
 //! Read operations and their operation-specific failures.
 use crate::{
-    Read as ReadHost, ReadChunk as ChunkHost, ReadChunkExt as _, ReadExt as _,
+    ChunkSegment, Combine, Read as ReadHost, ReadChunk as ChunkHost, ReadChunkExt as _,
+    ReadExt as _, ReadSegment,
     error::{self, DestinationFullError, IncompleteError, InsufficientCapacityError},
 };
 use bytes::{Buf, BufMut};
@@ -8,15 +9,17 @@ use core::{num::NonZeroUsize, ops::ControlFlow, pin::pin};
 use nitori_call::{ReceiverAccess, call};
 use snafu::{IntoError, Snafu};
 
-/// Fill exactly `length` bytes, checking the whole capacity before any IO.
+/// Fill exactly `length` bytes, checking the whole capacity before any IO,
+/// and return the combined metadata of the segments read.
 #[call(sync)]
 pub async fn read_exact<F, B>(
     io: &mut impl ReceiverAccess<Family = F>,
     destination: &mut B,
     length: usize,
-) -> Result<(), ReadExactError<F::Error>>
+) -> Result<<F as ReadHost>::Metadata, ReadExactError<F::Error>>
 where
     F: ReadHost,
+    <F as ReadHost>::Metadata: Combine,
     B: BufMut + ?Sized,
 {
     let available = destination.remaining_mut();
@@ -30,8 +33,7 @@ where
     }
     fill(io, destination, length)
         .await
-        .map_err(ReadExactError::from_fill)?;
-    Ok(())
+        .map_err(ReadExactError::from_fill)
 }
 
 /// Failures that [`read_exact`] can produce.
@@ -78,21 +80,23 @@ impl<E> ReadExactError<E> {
     }
 }
 
-/// Read until `length` bytes have been put into `destination`.
+/// Read until `length` bytes have been put into `destination`, combining
+/// the metadata of the segments.
 async fn fill<F, B>(
     io: &mut impl ReceiverAccess<Family = F>,
     mut destination: &mut B,
     length: usize,
-) -> Result<(), ReadArrayError<F::Error>>
+) -> Result<F::Metadata, ReadArrayError<F::Error>>
 where
-    F: ReadHost,
+    F: ReadHost<Metadata: Combine>,
     B: BufMut + ?Sized,
 {
     let mut completed = 0;
+    let mut combined = F::Metadata::default();
     while completed < length {
         let remaining = length - completed;
         match io.read(&mut (&mut destination).limit(remaining)).await {
-            Ok(0) => {
+            Ok(None) => {
                 return Err(error::IncompleteSnafu {
                     expected: length,
                     completed,
@@ -100,45 +104,66 @@ where
                 .build()
                 .into());
             }
-            Ok(count) => {
-                assert!(count <= remaining, "read exceeded limit");
-                completed += count;
+            Ok(Some(ReadSegment { count, metadata })) => {
+                assert!(count.get() <= remaining, "read exceeded limit");
+                completed += count.get();
+                combined = combined.combine(metadata);
             }
             Err(source) => {
                 return Err(read_array_error::ReceiverSnafu { completed }.into_error(source));
             }
         }
     }
-    Ok(())
+    Ok(combined)
 }
 
 /// Append until EOF. A full destination before confirmed EOF is an error.
+/// Returns the total and the combined metadata of the segments read.
 #[call(sync)]
 pub async fn read_to_end<F, B>(
     io: &mut impl ReceiverAccess<Family = F>,
     destination: &mut B,
-) -> Result<usize, ReadToEndError<F::Error>>
+) -> Result<ReadTotal<<F as ReadHost>::Metadata>, ReadToEndError<F::Error>>
 where
     F: ReadHost,
+    <F as ReadHost>::Metadata: Combine,
     B: BufMut + ?Sized,
 {
     let mut completed = 0usize;
+    let mut combined = <F as ReadHost>::Metadata::default();
     loop {
         if destination.remaining_mut() == 0 {
             return Err(error::DestinationFullSnafu { completed }.build().into());
         }
         match io.read(&mut *destination).await {
-            Ok(0) => return Ok(completed),
-            Ok(count) => {
+            Ok(None) => {
+                return Ok(ReadTotal {
+                    count: completed,
+                    metadata: combined,
+                });
+            }
+            Ok(Some(ReadSegment { count, metadata })) => {
+                // invariant: the bytes put into one destination fit in memory.
                 completed = completed
-                    .checked_add(count)
-                    .expect("read byte count overflow")
+                    .checked_add(count.get())
+                    .expect("read byte count overflow");
+                combined = combined.combine(metadata);
             }
             Err(source) => {
                 return Err(read_to_end_error::ReceiverSnafu { completed }.into_error(source));
             }
         }
     }
+}
+
+/// Everything [`read_to_end`] read: the byte count, zero for an empty
+/// source, and the combined metadata of the segments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReadTotal<M> {
+    /// The bytes appended to the destination.
+    pub count: usize,
+    /// The combined metadata of those bytes.
+    pub metadata: M,
 }
 
 /// Failures that [`read_to_end`] can produce.
@@ -169,8 +194,9 @@ impl<E> ReadToEndError<E> {
     }
 }
 
-/// Yield chunks until `maximum` bytes or EOF; the final value is the total.
-#[call(sync, yields = F::Chunk)]
+/// Yield chunks, each with its metadata, until `maximum` bytes or EOF; the
+/// final value is the total.
+#[call(sync, yields = ChunkSegment<F::Chunk, F::Metadata>)]
 pub async fn read_chunks<F>(
     io: &mut impl ReceiverAccess<Family = F>,
     maximum: usize,
@@ -182,11 +208,11 @@ where
     let mut completed = 0;
     while let Some(request) = NonZeroUsize::new((maximum - completed).min(chunk_maximum.get())) {
         match io.read_chunk(request).await {
-            Ok(Some(chunk)) => {
-                let count = chunk.remaining();
+            Ok(Some(segment)) => {
+                let count = segment.chunk.remaining();
                 assert!(count > 0 && count <= request.get(), "invalid chunk length");
                 completed += count;
-                yield chunk;
+                yield segment;
             }
             Ok(None) => break,
             Err(source) => return Err(ReadChunksSnafu { completed }.into_error(source)),
@@ -215,8 +241,9 @@ impl<E> ReadChunksError<E> {
     }
 }
 
-/// Yield exactly `length` bytes, reporting premature EOF with prior progress.
-#[call(sync, yields = F::Chunk)]
+/// Yield exactly `length` bytes in chunks, each with its metadata, reporting
+/// premature EOF with prior progress.
+#[call(sync, yields = ChunkSegment<F::Chunk, F::Metadata>)]
 pub async fn read_chunks_exact<F>(
     io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
@@ -281,13 +308,27 @@ impl<E> ReadChunksExactError<E> {
 #[call(sync)]
 pub async fn read_array<const LENGTH: usize, F>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<[u8; LENGTH], ReadArrayError<F::Error>>
+) -> Result<ReadValue<[u8; LENGTH], <F as ReadHost>::Metadata>, ReadArrayError<F::Error>>
 where
     F: ReadHost,
+    <F as ReadHost>::Metadata: Combine,
 {
     let mut bytes = [0; LENGTH];
-    fill(io, &mut bytes.as_mut_slice(), LENGTH).await?;
-    Ok(bytes)
+    let metadata = fill(io, &mut bytes.as_mut_slice(), LENGTH).await?;
+    Ok(ReadValue {
+        value: bytes,
+        metadata,
+    })
+}
+
+/// A value decoded from bytes read whole, with the combined metadata of
+/// those bytes: what [`read_array`], [`read_le`] and [`read_be`] return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReadValue<T, M> {
+    /// The value.
+    pub value: T,
+    /// The combined metadata of its bytes.
+    pub metadata: M,
 }
 
 /// Failures that [`read_array`] can produce.
@@ -322,16 +363,20 @@ impl<E> ReadArrayError<E> {
 #[call(sync)]
 pub async fn read_le<T: EndianValue, F>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<T, ReadLeError<F::Error>>
+) -> Result<ReadValue<T, <F as ReadHost>::Metadata>, ReadLeError<F::Error>>
 where
     F: ReadHost,
+    <F as ReadHost>::Metadata: Combine,
 {
     let mut bytes = T::Bytes::default();
     let length = bytes.as_mut().len();
-    fill(io, &mut bytes.as_mut(), length)
+    let metadata = fill(io, &mut bytes.as_mut(), length)
         .await
         .map_err(ReadLeError::from_fill)?;
-    Ok(T::from_le(bytes))
+    Ok(ReadValue {
+        value: T::from_le(bytes),
+        metadata,
+    })
 }
 
 /// Failures that [`read_le`] can produce.
@@ -378,16 +423,20 @@ impl<E> ReadLeError<E> {
 #[call(sync)]
 pub async fn read_be<T: EndianValue, F>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<T, ReadBeError<F::Error>>
+) -> Result<ReadValue<T, <F as ReadHost>::Metadata>, ReadBeError<F::Error>>
 where
     F: ReadHost,
+    <F as ReadHost>::Metadata: Combine,
 {
     let mut bytes = T::Bytes::default();
     let length = bytes.as_mut().len();
-    fill(io, &mut bytes.as_mut(), length)
+    let metadata = fill(io, &mut bytes.as_mut(), length)
         .await
         .map_err(ReadBeError::from_fill)?;
-    Ok(T::from_be(bytes))
+    Ok(ReadValue {
+        value: T::from_be(bytes),
+        metadata,
+    })
 }
 
 /// Failures that [`read_be`] can produce.

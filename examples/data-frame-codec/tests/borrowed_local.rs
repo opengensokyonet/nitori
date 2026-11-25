@@ -16,11 +16,12 @@ struct Output {
 
 impl Write for Output {
     type Error = Infallible;
+    type Report = ();
     fn poll_write<'visit, Input: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, !>>
     where
         Self: 'visit,
     {
@@ -34,7 +35,7 @@ impl Write for Output {
         let count = input.chunk().len().min(2);
         this.bytes.extend_from_slice(&input.chunk()[..count]);
         input.advance(count);
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(written(count)))
     }
 }
 
@@ -43,9 +44,15 @@ async fn write_local_buffer<A: ReceiverAccess<Family: Write<Error = Infallible>>
     io: &mut A,
 ) -> Result<(Bytes, usize, Bytes, usize), Infallible> {
     let mut buf = Bytes::from_static(b"abc");
-    let first_count = io.write(&mut buf).await?;
+    let first_count = io
+        .write(&mut buf)
+        .await?
+        .map_or(0, |segment| segment.count.get());
     let tail = buf.clone();
-    let second_count = io.write(&mut buf).await?;
+    let second_count = io
+        .write(&mut buf)
+        .await?
+        .map_or(0, |segment| segment.count.get());
     Ok((buf, first_count, tail, second_count))
 }
 
@@ -77,3 +84,7 @@ fn named_call_reborrows_local_buf_across_pending() {
 }
 
 nitori_call::family_receiver!(impl [] for Output);
+
+fn written(count: usize) -> Option<nitori_io::WriteSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::WriteSegment { count, report: () })
+}

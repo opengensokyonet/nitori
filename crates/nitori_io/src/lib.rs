@@ -1,6 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(impl_trait_in_assoc_type, yield_expr)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![doc = include_str!("../README.md")]
 #![warn(
     clippy::std_instead_of_core,
@@ -51,31 +51,41 @@ pub trait ExactLen: nitori_call::ReceiverFamily {
         Self: 'visit;
 }
 
-/// Fill a caller-selected buffer, advancing it by the returned byte count.
+/// Fill a caller-selected buffer, advancing it by the segment's byte count.
 ///
-/// On a nonempty destination, `Ok(0)` means EOF. On an empty destination it
-/// means no progress and says nothing about EOF. Empty requests still reach
-/// the host, which can report its terminal error before returning zero.
-/// `Pending` and `Err` must not consume source bytes or advance the destination.
-/// Report a completed prefix before a subsequent error. Register the waker
-/// before returning `Pending`; retain no pointer into this temporary borrow.
+/// `Some` reports one segment: the bytes this poll put into the destination
+/// and their [`Metadata`](Read::Metadata). A segment has a single metadata
+/// value, so a fill stops where the attributes of the source's bytes change,
+/// even if that leaves the destination short. On a nonempty destination,
+/// `None` means EOF. On an empty destination it means no progress and says
+/// nothing about EOF. Empty requests still reach the host, which can report
+/// its terminal error first. `Pending` and `Err` must not consume source
+/// bytes or advance the destination. Report a completed prefix before a
+/// subsequent error. Register the waker before returning `Pending`; retain
+/// no pointer into this temporary borrow.
 #[nitori_call::capability(sync)]
 pub trait Read: nitori_call::ReceiverFamily {
     type Error;
+    /// The attributes shared by the bytes of one segment, such as whether
+    /// they arrived in 0-RTT; `()` for a source whose bytes have none. An
+    /// adapter that forwards a source names the source's metadata.
+    type Metadata;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<ReadResult<Self>>
     where
         Self: 'visit;
 }
 
 /// Transfer an owned buffer from the same stream as [`Read`].
 ///
-/// `Some` contains between one and `maximum` bytes; `None` means EOF.
-/// A chunk need not be contiguous or zero-copy and does not borrow this poll's
-/// host access. `Pending` and `Err` consume nothing. There are no recursive
+/// `Some` contains a chunk of between one and `maximum` bytes with the
+/// [`Metadata`](Read::Metadata) of all of them: a chunk ends where the
+/// attributes of the source's bytes change. `None` means EOF. A chunk need
+/// not be contiguous or zero-copy and does not borrow this poll's host
+/// access. `Pending` and `Err` consume nothing. There are no recursive
 /// defaults: use an explicit conversion helper when one path is not native.
 #[nitori_call::capability(sync)]
 pub trait ReadChunk: Read {
@@ -84,7 +94,7 @@ pub trait ReadChunk: Read {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Self::Chunk>, <Self as Read>::Error>>
+    ) -> Poll<ChunkResult<Self>>
     where
         Self: 'visit;
 }
@@ -130,23 +140,87 @@ pub trait Skip: Read {
 
 /// Accept a prefix of a caller-selected buffer and advance its cursor.
 ///
-/// The return count equals the decrease in `remaining()`. `Pending` and `Err`
-/// leave the cursor and accepted byte count unchanged. Waiting is `Pending`,
-/// never `Ok(0)`; [`calls::write_all`] reports zero progress as an error.
-/// Acceptance does not imply flushing or remote delivery. Empty requests reach
-/// the host. The buffer borrow lasts only for this poll.
+/// `Some` reports one segment: the accepted count, which equals the decrease
+/// in `remaining()`, and the [`Report`](Write::Report) the write produced.
+/// `None` means nothing was accepted: the input is empty, or the sink
+/// accepts no byte, such as a full fixed-size buffer or a composed budget
+/// such as [`adapters::WriteLimit`] at its boundary, which
+/// [`calls::write_all`] reports as zero progress. Waiting is `Pending`. `Pending` and `Err` leave
+/// the cursor and accepted byte count unchanged. Acceptance does not imply
+/// flushing or remote delivery. Empty requests reach the host. The buffer
+/// borrow lasts only for this poll. What the caller wants done with the bytes
+/// (send parameters, a destination) is not part of this capability.
 #[nitori_call::capability(sync)]
 pub trait Write: nitori_call::ReceiverFamily {
     type Error;
+    /// What one accepted segment produced, beyond its count; `()` for a
+    /// sink that reports nothing. An adapter that forwards a sink names the
+    /// sink's report.
+    type Report;
     fn poll_write<'visit, Input: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<WriteResult<Self>>
     where
         Self: 'visit;
 }
 
+/// Lend a writable region of the sink's own storage for the caller to fill,
+/// and keep what was put there, as one segment of the stream that [`Write`]
+/// writes.
+///
+/// In one poll the sink grants between one and `wanted` bytes, lends a
+/// [`LentBuffer`] that holds at most the granted count, and calls `fill`
+/// with it. `fill` puts a prefix into the buffer and returns its value, or
+/// gives up with its own `A`. The sink then counts what it keeps from its own
+/// storage, whatever `fill` reports, and returns the rest of the grant:
+/// [`LentOutcome::Kept`] reports the count, at least one, the
+/// [`Report`](Write::Report) and the value. When no byte was put, or the
+/// loan was broken, the sink keeps nothing and hands the value back in
+/// [`LentOutcome::NotKept`]. When `fill` gives up,
+/// [`LentOutcome::GaveUp`], nothing is written, whatever it put into the
+/// buffer.
+///
+/// `Ok(None)` means the sink accepts no byte, as [`Write`] answers `None`
+/// to nonempty input: a full fixed-size buffer, or a composed budget such as
+/// [`adapters::WriteLimit`] at its boundary. Waiting is `Pending`.
+///
+/// `fill` is called at most once per poll, and not at all on `Pending`,
+/// `None` or `Err`, which write nothing; the sink drops it then. It cannot
+/// await: a source it reads from polls synchronously, and a fill that would
+/// wait gives up, keeping nothing. Register the waker before returning
+/// `Pending`. There is no generated operation for this capability, since
+/// `fill` lives for one poll; an operation calls `poll_write_lent` inside
+/// the sink access's `poll_access`.
+///
+/// Every sink that lends also implements [`Write`]; neither is derived from
+/// the other. A source that can produce bytes into a buffer, such as a
+/// [`Read`] source or a generator, pairs with this capability, as a
+/// [`ReadChunk`] source pairs with [`Write`].
+pub trait WriteLent: Write {
+    /// The storage the sink lends, seen as a [`BufMut`], such as
+    /// `&'l mut BytesMut` for the spare capacity at its end.
+    type Buffer<'l>: BufMut;
+    fn poll_write_lent<'visit, T, A, Fill>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        wanted: NonZeroUsize,
+        fill: Fill,
+    ) -> Poll<WriteLentResult<Self, T, A>>
+    where
+        Self: 'visit,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>;
+}
+
+mod combine;
+pub use combine::Combine;
 mod ext;
 pub use ext::*;
+mod lent_buffer;
+pub use lent_buffer::{LentBuffer, LentOutcome};
+mod segment;
+mod spare_capacity;
+pub use segment::{ChunkSegment, LentSegment, ReadSegment, WriteSegment};
+pub use spare_capacity::VecSpareCapacity;
 pub use split::{SplitTo, SplitToError};

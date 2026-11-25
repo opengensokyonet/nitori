@@ -7,10 +7,10 @@ use snafu::{ResultExt, Snafu};
 
 // This parser can be reused with either an unrestricted or a limited receiver.
 #[call(sync)]
-async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_word<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<[u8; 2], ReadArrayError<F::Error>> {
-    io.read_array::<2>().await
+    io.read_array::<2>().await.map(|read| read.value)
 }
 
 #[derive(Debug, Snafu)]
@@ -22,10 +22,10 @@ enum ReadRecordError<E> {
 }
 
 #[call(sync)]
-async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_record<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<[u8; 2], ReadRecordError<F::Error>> {
-    let [length] = io.read_array::<1>().await.context(LengthSnafu)?;
+    let [length] = io.read_array::<1>().await.context(LengthSnafu)?.value;
     io.compose(ReadLimit(usize::from(length)))
         .read_word()
         .await

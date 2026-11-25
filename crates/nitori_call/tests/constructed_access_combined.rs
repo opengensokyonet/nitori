@@ -179,7 +179,7 @@ fn release_point_through_composed() {
     let mut cx = Context::from_waker(Waker::noop());
     let mut composed = access.compose(nitori_io::adapters::ReadLimit(2usize));
     assert!(pin!(composed.release_view()).poll(&mut cx).is_ready());
-    assert_eq!(block(composed.read_array::<2>()).unwrap(), *b"ab");
+    assert_eq!(block(composed.read_array::<2>()).unwrap().value, *b"ab");
 }
 
 /// A view is constructed at each access: per-view state lasts one access.

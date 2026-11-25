@@ -20,7 +20,7 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
 
 /// Waits until `open` is set, then writes `message`.
 #[call(sync)]
-async fn write_when_open<A: ReceiverAccess<Family: Write>>(
+async fn write_when_open<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
     io: &mut A,
     open: &Cell<bool>,
     message: &[u8],
@@ -30,19 +30,19 @@ async fn write_when_open<A: ReceiverAccess<Family: Write>>(
         false => Poll::Pending,
     })
     .await;
-    io.write_all(message).await
+    io.write_all(message).await.map(|_| ())
 }
 
 /// Writes, computes without the view, and writes again.
 #[call(sync)]
-async fn write_compute_write<A: ReceiverAccess<Family: Write>>(
+async fn write_compute_write<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
     io: &mut A,
     during: &dyn Fn(),
 ) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
     io.write_all(&b"a"[..]).await?;
     io.release_view().await;
     during();
-    io.write_all(&b"b"[..]).await
+    io.write_all(&b"b"[..]).await.map(|_| ())
 }
 
 #[test]
@@ -134,11 +134,12 @@ impl<L: Lock<Value = Connection>> Compose<Lent<Locked<L>>> for StreamOf {
 struct Closed;
 impl Write for Stream {
     type Error = Closed;
+    type Report = ();
     fn poll_write<'v, I: Buf + ?Sized>(
         view: Pin<&mut StreamView<'v>>,
         _: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Closed>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Closed>>
     where
         Self: 'v,
     {
@@ -152,7 +153,7 @@ impl Write for Stream {
             let length = chunk.len();
             input.advance(length);
         }
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(written(count)))
     }
 }
 
@@ -224,7 +225,7 @@ mod tokio_sync {
 
     /// Reads one byte, using the value only on polls while `wanted` is set.
     #[call]
-    async fn read_when_wanted<A: ReceiverAccess<Family: Read>>(
+    async fn read_when_wanted<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
         io: &mut A,
         wanted: &Cell<bool>,
     ) -> Result<[u8; 1], ReadArrayError<<A::Family as Read>::Error>> {
@@ -239,6 +240,7 @@ mod tokio_sync {
             false => Poll::Pending,
         })
         .await
+        .map(|read| read.value)
     }
 
     #[test]
@@ -308,8 +310,8 @@ impl<A: nitori_call::Receivers, B: nitori_call::Receivers> nitori_call::Operatio
 }
 impl<'s, 'a, A, B> nitori_call::Start<'s, (A, B)> for WriteBoth<'a>
 where
-    A: ReceiverAccess<Family: Write>,
-    B: ReceiverAccess<Family: Write>,
+    A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
     fn start(
@@ -377,18 +379,19 @@ impl ReceiverFamily for Ledger {
 }
 impl Write for Ledger {
     type Error = std::convert::Infallible;
+    type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
     {
         let count = input.remaining();
         host.get_mut()
             .extend_from_slice(&input.copy_to_bytes(count));
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(written(count)))
     }
 }
 
@@ -436,9 +439,9 @@ impl<A: nitori_call::Receivers, B: nitori_call::Receivers, C: nitori_call::Recei
 }
 impl<'s, A, B, C> nitori_call::Start<'s, (A, B, C)> for WriteThree
 where
-    A: ReceiverAccess<Family: Write>,
-    B: ReceiverAccess<Family: Write>,
-    C: ReceiverAccess<Family: Write>,
+    A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    C: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
     fn start(
@@ -479,12 +482,13 @@ async fn copy_bytes<F, G>(
     length: usize,
 ) -> usize
 where
-    F: Read,
-    G: Write,
+    F: Read<Metadata: nitori_io::Combine>,
+    G: Write<Report: nitori_io::Combine>,
 {
     let mut copied = 0;
     while copied < length {
-        let Ok([byte]) = source.read_array::<1>().await else {
+        let Ok(nitori_io::calls::ReadValue { value: [byte], .. }) = source.read_array::<1>().await
+        else {
             break;
         };
         if sink.write_all(&[byte][..]).await.is_err() {
@@ -497,7 +501,10 @@ where
 
 /// Copies through `copy_bytes` as a sub-operation, emitting each count.
 #[call(yields = usize)]
-async fn copy_in_steps<A: ReceiverAccess<Family: Read>, B: ReceiverAccess<Family: Write>>(
+async fn copy_in_steps<
+    A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+>(
     source: &mut A,
     sink: &mut B,
     steps: usize,
@@ -547,4 +554,8 @@ fn a_call_over_two_receivers_emits_and_calls_another() {
     use std::ops::ControlFlow::{Break, Continue};
     assert_eq!(events, [Continue(1), Continue(2), Break(2)]);
     assert_eq!(hosts.1, b"ab");
+}
+
+fn written(count: usize) -> Option<nitori_io::WriteSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::WriteSegment { count, report: () })
 }

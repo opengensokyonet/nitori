@@ -31,15 +31,23 @@ enum ReadPairError<E> {
 }
 
 #[call(sync)]
-async fn read_pair<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_pair<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<u16, ReadPairError<F::Error>> {
-    let first = io.read_be::<u8>().await.context(OperandSnafu {
-        position: OperandPosition::First,
-    })?;
-    let second = io.read_be::<u8>().await.context(OperandSnafu {
-        position: OperandPosition::Second,
-    })?;
+    let first = io
+        .read_be::<u8>()
+        .await
+        .context(OperandSnafu {
+            position: OperandPosition::First,
+        })?
+        .value;
+    let second = io
+        .read_be::<u8>()
+        .await
+        .context(OperandSnafu {
+            position: OperandPosition::Second,
+        })?
+        .value;
     Ok(u16::from(first) + u16::from(second))
 }
 
@@ -61,15 +69,23 @@ fn main() {
         }
 
         #[call]
-        async fn sum<A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+        async fn sum<A: ReceiverAccess<Family: Read<Error = !, Metadata = ()>>>(
             io: &mut A,
         ) -> Result<u16, SumError> {
-            let first = io.read_be::<u8>().await.context(OperandSnafu {
-                position: OperandPosition::First,
-            })?;
-            let second = io.read_be::<u8>().await.context(OperandSnafu {
-                position: OperandPosition::Second,
-            })?;
+            let first = io
+                .read_be::<u8>()
+                .await
+                .context(OperandSnafu {
+                    position: OperandPosition::First,
+                })?
+                .value;
+            let second = io
+                .read_be::<u8>()
+                .await
+                .context(OperandSnafu {
+                    position: OperandPosition::Second,
+                })?
+                .value;
             Ok(u16::from(first) + u16::from(second))
         }
         let execution = pin!(CallExecutor::execute(Pin::new(&mut input), Sum::new()));

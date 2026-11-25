@@ -14,22 +14,22 @@ use std::{
 };
 
 #[call(sync)]
-async fn header<A: ReceiverAccess<Family: Read>>(
+async fn header<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<[u8; 3], ReadArrayError<<A::Family as Read>::Error>> {
-    let [tag] = io.read_array::<1>().await?;
-    let rest = io.read_array::<2>().await?;
+    let [tag] = io.read_array::<1>().await?.value;
+    let rest = io.read_array::<2>().await?.value;
     Ok([tag, rest[0], rest[1]])
 }
 #[call(sync)]
-async fn encode<A: ReceiverAccess<Family: Write>>(
+async fn encode<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
     io: &mut A,
     input: &mut &[u8],
 ) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
-    io.write_all(input).await
+    io.write_all(input).await.map(|_| ())
 }
 #[call(sync, yields = [u8; 3])]
-async fn headers<A: ReceiverAccess<Family: Read>>(
+async fn headers<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     io: &mut A,
     count: usize,
 ) -> Result<(), ReadArrayError<<A::Family as Read>::Error>> {
@@ -71,11 +71,12 @@ struct Delayed<'a> {
 }
 impl Read for Delayed<'_> {
     type Error = std::convert::Infallible;
+    type Metadata = ();
     fn poll_read<'visit, Output: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {

@@ -58,10 +58,16 @@ fn a_zero_maximum_makes_no_progress_and_eof_stays_eof() {
 #[test]
 fn chunked_skips_on_its_inner_source_between_chunks() {
     let mut chunked = Chunked::new(&b"abcdef"[..], NonZeroUsize::new(4).unwrap());
-    let chunk = chunked.sync_read_chunk_unpin(NonZeroUsize::MIN).unwrap();
+    let chunk = chunked
+        .sync_read_chunk_unpin(NonZeroUsize::MIN)
+        .unwrap()
+        .map(|segment| segment.chunk);
     assert_eq!(chunk.as_deref(), Some(&b"a"[..]));
     assert_eq!(chunked.sync_skip_unpin(2u8), Ok(Some(2usize)));
-    let chunk = chunked.sync_read_chunk_unpin(NonZeroUsize::MAX).unwrap();
+    let chunk = chunked
+        .sync_read_chunk_unpin(NonZeroUsize::MAX)
+        .unwrap()
+        .map(|segment| segment.chunk);
     assert_eq!(chunk.as_deref(), Some(&b"def"[..]));
     assert_eq!(chunked.sync_skip_unpin(Infinite), Ok(None));
 }
@@ -161,11 +167,12 @@ impl Delayed<'_> {
 }
 impl Read for Delayed<'_> {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'v,
     {
@@ -173,7 +180,7 @@ impl Read for Delayed<'_> {
         let before = this.bytes;
         let count = core::task::ready!(this.take(cx, out.remaining_mut()));
         out.put_slice(&before[..count]);
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
 }
 impl Skip for Delayed<'_> {
@@ -306,11 +313,12 @@ struct Broken;
 nitori_call::family_receiver!(impl [] for Failing);
 impl Read for Failing {
     type Error = Broken;
+    type Metadata = ();
     fn poll_read<'v, B: bytes::BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Broken>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Broken>>
     where
         Self: 'v,
     {
@@ -336,15 +344,16 @@ struct Overskip;
 nitori_call::family_receiver!(impl [] for Overskip);
 impl Read for Overskip {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, !>>
     where
         Self: 'v,
     {
-        Poll::Ready(Ok(0))
+        Poll::Ready(Ok(None))
     }
 }
 impl Skip for Overskip {
@@ -366,4 +375,11 @@ impl Skip for Overskip {
 fn a_parent_skipping_past_the_budget_panics() {
     let mut framed = ComposedReceiver::new(Overskip, ReadLimit(2usize));
     let _ = framed.sync_skip_unpin(Infinite);
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

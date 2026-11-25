@@ -73,7 +73,7 @@ fn cursor_length_stops_at_zero_past_eof() {
 }
 
 #[call(sync)]
-async fn bounded<F: ReadChunk + ExactLen<Length = usize>>(
+async fn bounded<F: ReadChunk<Metadata: nitori_io::Combine> + ExactLen<Length = usize>>(
     io: &mut impl ReceiverAccess<Family = F>,
     quota: u8,
 ) -> (u8, u8, u8, u8)
@@ -119,18 +119,19 @@ impl ExactLen for Endless {
 }
 impl Read for Endless {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, O: BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         out: &mut O,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, !>>
     where
         Self: 'v,
     {
         // Deliberately short reads.
         let n = out.remaining_mut().min(2);
         out.put_bytes(0, n);
-        Poll::Ready(Ok(n))
+        Poll::Ready(Ok(segment(n)))
     }
 }
 
@@ -146,7 +147,14 @@ where
     let mut inner = outer.compose(ReadLimit(u128::MAX));
     let before = query(&mut inner).await;
     let mut dst = [0xff; 4];
-    assert_eq!(inner.read(&mut dst.as_mut_slice()).await.unwrap(), 2);
+    assert_eq!(
+        inner
+            .read(&mut dst.as_mut_slice())
+            .await
+            .unwrap()
+            .map(|segment| segment.count.get()),
+        Some(2)
+    );
     (before, query(&mut inner).await, inner.into_state().0)
 }
 #[test]
@@ -189,11 +197,12 @@ struct Unknown {
 nitori_call::family_receiver!(impl [] for Unknown);
 impl Read for Unknown {
     type Error = ();
+    type Metadata = ();
     fn poll_read<'v, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut O,
-    ) -> Poll<Result<usize, ()>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, ()>>
     where
         Self: 'v,
     {
@@ -207,7 +216,7 @@ impl Read for Unknown {
             2 => Poll::Ready(Err(())),
             _ => {
                 out.put_u8(7);
-                Poll::Ready(Ok(1))
+                Poll::Ready(Ok(segment(1)))
             }
         }
     }
@@ -223,7 +232,7 @@ fn pending_and_error_leave_quota_untouched_even_for_an_unknown_source() {
     for (want, left) in [
         (Poll::Pending, 255),
         (Poll::Ready(Err(())), 255),
-        (Poll::Ready(Ok(1)), 254),
+        (Poll::Ready(Ok(segment(1))), 254),
     ] {
         let view = <ReadLimit<u8> as Compose<Unknown>>::compose(
             Pin::new(&mut quota),
@@ -259,7 +268,7 @@ fn unsigned_minimum_matches_mathematical_minimum_at_each_width() {
 }
 
 #[call(sync)]
-async fn nested<F: Read + ExactLen<Length = usize>>(
+async fn nested<F: Read<Metadata: nitori_io::Combine> + ExactLen<Length = usize>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> (usize, u8, u64, u8, usize)
 where
@@ -347,7 +356,7 @@ impl core::ops::SubAssign for OpaqueQuota {
 }
 
 #[call(sync)]
-async fn non_debug_quota<F: Read + ExactLen<Length = usize>>(
+async fn non_debug_quota<F: Read<Metadata: nitori_io::Combine> + ExactLen<Length = usize>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> (u8, u8)
 where
@@ -363,4 +372,11 @@ fn reading_and_querying_do_not_require_a_debug_quota() {
     let mut src = &b"ab"[..];
     assert_eq!(src.sync_non_debug_quota_unpin(), (1, 2));
     assert_eq!(src, b"b");
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

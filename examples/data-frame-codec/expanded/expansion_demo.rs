@@ -23,6 +23,7 @@ unsafe impl ::core::clone::TrivialClone for OperandPosition { }
 #[automatically_derived]
 impl ::core::clone::Clone for OperandPosition {
     #[inline]
+    #[rustc_trivial_field_reads]
     fn clone(&self) -> Self { *self }
 }
 #[automatically_derived]
@@ -30,6 +31,7 @@ impl ::core::marker::Copy for OperandPosition { }
 #[automatically_derived]
 impl ::core::fmt::Debug for OperandPosition {
     #[inline]
+    #[rustc_trivial_field_reads]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::write_str(f,
             match self {
@@ -50,6 +52,7 @@ enum ReadPairError<E> {
 #[automatically_derived]
 impl<E: ::core::fmt::Debug> ::core::fmt::Debug for ReadPairError<E> {
     #[inline]
+    #[rustc_trivial_field_reads]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             Self::Operand { position: __self_0, source: __self_1 } =>
@@ -66,6 +69,7 @@ struct OperandSnafu<__T0> {
 #[automatically_derived]
 impl<__T0: ::core::fmt::Debug> ::core::fmt::Debug for OperandSnafu<__T0> {
     #[inline]
+    #[rustc_trivial_field_reads]
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         ::core::fmt::Formatter::debug_struct_field1_finish(f,
             "OperandSnafu position", &&self.position)
@@ -77,6 +81,7 @@ impl<__T0: ::core::marker::Copy> ::core::marker::Copy for OperandSnafu<__T0> {
 #[automatically_derived]
 impl<__T0: ::core::clone::Clone> ::core::clone::Clone for OperandSnafu<__T0> {
     #[inline]
+    #[rustc_trivial_field_reads]
     fn clone(&self) -> Self {
         OperandSnafu { position: ::core::clone::Clone::clone(&self.position) }
     }
@@ -133,16 +138,17 @@ impl<E> ::snafu::ErrorCompat for ReadPairError<E> where  {
         }
     }
 }
-async fn read_pair<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A)
+async fn read_pair<F: Read<Metadata = ()>,
+    A: ReceiverAccess<Family = F>>(io: &mut A)
     -> Result<u16, ReadPairError<F::Error>> {
     let first =
         io.read_be::<u8>().await.context(OperandSnafu {
-                    position: OperandPosition::First,
-                })?;
+                        position: OperandPosition::First,
+                    })?.value;
     let second =
         io.read_be::<u8>().await.context(OperandSnafu {
-                    position: OperandPosition::Second,
-                })?;
+                        position: OperandPosition::Second,
+                    })?.value;
     Ok(u16::from(first) + u16::from(second))
 }
 #[doc = "The `read_pair` operation."]
@@ -153,18 +159,18 @@ impl ReadPair<> where  {
     #[allow(clippy :: too_many_arguments)]
     fn new() -> Self { Self {} }
 }
-impl<F: ::nitori_call::ReceiverFamily + Read> ::nitori_call::Operation<F> for
-    ReadPair<> where  {
+impl<F: ::nitori_call::ReceiverFamily + Read<Metadata = ()>>
+    ::nitori_call::Operation<F> for ReadPair<> where  {
     type Output = Result<u16, ReadPairError<F::Error>>;
     type Yield = ::core::convert::Infallible;
 }
-impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read>
+impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read<Metadata = ()>>
     ::nitori_call::Start<'__s, __A> for ReadPair<> where
     __A: ::nitori_call::ReceiverAccess,
     __A: ::nitori_call::ReceiverAccess<Family = F>,
     <__A as
     ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
-    Read {
+    Read<Metadata = ()> {
     type Fut =
         impl ::core::future::Future<Output =
         <Self as ::nitori_call::Operation<F>>::Output>;
@@ -184,7 +190,7 @@ impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read>
 trait ReadPairExt: ::nitori_call::ReceiverAccess where
     <Self as
     ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
-    Read {
+    Read<Metadata = ()> {
     fn read_pair<'__a>(&'__a mut self)
         -> <ReadPair<> as ::nitori_call::Start<'static, &'__a mut Self>>::Fut
         where Self: ::core::marker::Sized {
@@ -196,11 +202,11 @@ impl<__Receiver: ::nitori_call::ReceiverAccess + ?Sized> ReadPairExt for
     __Receiver where
     <__Receiver as
     ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
-    Read {}
+    Read<Metadata = ()> {}
 trait ReadPairHostExt: ::nitori_call::CallExecutor where
     <Self as
     ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
-    Read {
+    Read<Metadata = ()> {
     fn read_pair<'__d>(self: ::core::pin::Pin<&'__d mut Self>)
         -> <Self as ::nitori_call::CallExecutor>::Execution<'__d, ReadPair<>>
         where ReadPair<>: '__d {
@@ -232,7 +238,7 @@ impl<__Receiver: ::nitori_call::CallExecutor + ?Sized> ReadPairHostExt for
     __Receiver where
     <__Receiver as
     ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
-    Read {}
+    Read<Metadata = ()> {}
 fn main() {
     let mut input = b"\x01\x02".as_slice();
     {
@@ -263,6 +269,7 @@ fn main() {
             #[automatically_derived]
             impl ::core::fmt::Debug for SumError {
                 #[inline]
+                #[rustc_trivial_field_reads]
                 fn fmt(&self, f: &mut ::core::fmt::Formatter)
                     -> ::core::fmt::Result {
                     match self {
@@ -282,6 +289,7 @@ fn main() {
             impl<__T0: ::core::fmt::Debug> ::core::fmt::Debug for
                 OperandSnafu<__T0> {
                 #[inline]
+                #[rustc_trivial_field_reads]
                 fn fmt(&self, f: &mut ::core::fmt::Formatter)
                     -> ::core::fmt::Result {
                     ::core::fmt::Formatter::debug_struct_field1_finish(f,
@@ -296,6 +304,7 @@ fn main() {
             impl<__T0: ::core::clone::Clone> ::core::clone::Clone for
                 OperandSnafu<__T0> {
                 #[inline]
+                #[rustc_trivial_field_reads]
                 fn clone(&self) -> Self {
                     OperandSnafu {
                         position: ::core::clone::Clone::clone(&self.position),
@@ -352,16 +361,16 @@ fn main() {
                 }
             }
             async fn sum<A: ReceiverAccess<Family
-                : Read<Error = Infallible>>>(io: &mut A)
+                : Read<Error = !, Metadata = ()>>>(io: &mut A)
                 -> Result<u16, SumError> {
                 let first =
                     io.read_be::<u8>().await.context(OperandSnafu {
-                                position: OperandPosition::First,
-                            })?;
+                                    position: OperandPosition::First,
+                                })?.value;
                 let second =
                     io.read_be::<u8>().await.context(OperandSnafu {
-                                position: OperandPosition::Second,
-                            })?;
+                                    position: OperandPosition::Second,
+                                })?.value;
                 Ok(u16::from(first) + u16::from(second))
             }
             #[doc = "The `sum` operation."]
@@ -373,8 +382,8 @@ fn main() {
                 fn new() -> Self { Self {} }
             }
             impl<__F: ::nitori_call::ReceiverFamily +
-                Read<Error = Infallible>> ::nitori_call::Operation<__F> for
-                Sum<> where  {
+                Read<Error = !, Metadata = ()>> ::nitori_call::Operation<__F>
+                for Sum<> where  {
                 type Output = Result<u16, SumError>;
                 type Yield = ::core::convert::Infallible;
             }
@@ -382,7 +391,7 @@ fn main() {
                 __A: ::nitori_call::ReceiverAccess,
                 <__A as
                 ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
-                Read<Error = Infallible> {
+                Read<Error = !, Metadata = ()> {
                 type Fut =
                     impl ::core::future::Future<Output =
                     <Self as
@@ -405,7 +414,7 @@ fn main() {
             trait SumExt: ::nitori_call::ReceiverAccess where
                 <Self as
                 ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
-                Read<Error = Infallible> {
+                Read<Error = !, Metadata = ()> {
                 fn sum<'__a>(&'__a mut self)
                     ->
                         <Sum<> as
@@ -419,11 +428,11 @@ fn main() {
                 for __Receiver where
                 <__Receiver as
                 ::nitori_call::ReceiverAccess>::Family: ::nitori_call::ReceiverFamily +
-                Read<Error = Infallible> {}
+                Read<Error = !, Metadata = ()> {}
             trait SumHostExt: ::nitori_call::CallExecutor where
                 <Self as
                 ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
-                Read<Error = Infallible> {
+                Read<Error = !, Metadata = ()> {
                 fn sum<'__d>(self: ::core::pin::Pin<&'__d mut Self>)
                     ->
                         <Self as
@@ -443,7 +452,7 @@ fn main() {
                 for __Receiver where
                 <__Receiver as
                 ::nitori_call::CallExecutor>::Receivers: ::nitori_call::ReceiverFamily +
-                Read<Error = Infallible> {}
+                Read<Error = !, Metadata = ()> {}
             let execution =
                 {
                     super let mut pinned: ::core::pin::PinMacroHelper<_> =

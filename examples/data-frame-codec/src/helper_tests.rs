@@ -47,11 +47,12 @@ impl Memory {
 }
 impl Read for Memory {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -64,7 +65,7 @@ impl ReadChunk for Memory {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -79,7 +80,10 @@ impl ReadChunk for Memory {
         Poll::Ready(Ok(if count == 0 {
             None
         } else {
-            Some(this.bytes.split_to(count))
+            Some(nitori_io::ChunkSegment {
+                chunk: this.bytes.split_to(count),
+                metadata: (),
+            })
         }))
     }
 }
@@ -100,11 +104,12 @@ struct PinnedMemory {
 }
 impl Read for PinnedMemory {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -117,7 +122,7 @@ impl ReadChunk for PinnedMemory {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -360,7 +365,7 @@ async fn through_trait_only<T: ReadVarintHostExt + ?Sized>(
     target: Pin<&mut T>,
 ) -> Result<u64, ReadVarintError<<T::Receivers as Read>::Error>>
 where
-    T::Receivers: Read,
+    T::Receivers: Read<Metadata = ()>,
 {
     target.read_varint().await
 }
@@ -407,13 +412,13 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
 }
 
 async fn write_through_trait_only<
-    F: nitori_io::Write,
+    F: nitori_io::Write<Report = ()>,
     T: CallExecutor<Receivers = F> + ?Sized + Unpin,
 >(
     target: &mut T,
     input: Bytes,
 ) -> Result<(), WriteAllError<F::Error>> {
-    target.write_all_unpin(input).await
+    target.write_all_unpin(input).await.map(|_| ())
 }
 
 nitori_call::family_receiver!(impl [] for Memory);

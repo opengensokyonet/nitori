@@ -18,13 +18,13 @@ type Reads<E> = (
 /// Reads two bytes within a budget of one, then one byte from the parent
 /// access that `into_parts` returns.
 #[call(sync)]
-async fn read_within_then_after<F: Read>(
+async fn read_within_then_after<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Reads<F::Error> {
     let mut limited = limit(io, 1);
-    let within = limited.read_array::<2>().await;
+    let within = limited.read_array::<2>().await.map(|read| read.value);
     let (io, ReadLimit(left)) = limited.into_parts();
-    let after = io.read_array::<1>().await;
+    let after = io.read_array::<1>().await.map(|read| read.value);
     (within, left, after)
 }
 
@@ -50,17 +50,17 @@ type Nested<E> = (
 /// borrowed inner budget, the nested budget and the outer budget, with what
 /// each budget has left.
 #[call(sync)]
-async fn compose_on_composed<F: Read>(
+async fn compose_on_composed<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Nested<F::Error> {
     let mut outer = limit(io, 3);
     let mut inner = outer.compose(ReadLimit(1usize));
-    let first = inner.read_array::<2>().await;
+    let first = inner.read_array::<2>().await.map(|read| read.value);
     let inner_left = inner.into_state().0;
     let mut nested = limit(outer, 1);
-    let second = nested.read_array::<1>().await;
+    let second = nested.read_array::<1>().await.map(|read| read.value);
     let (mut outer, ReadLimit(nested_left)) = nested.into_parts();
-    let third = outer.read_array::<1>().await;
+    let third = outer.read_array::<1>().await.map(|read| read.value);
     let outer_left = outer.into_state().0;
     (first, second, third, [inner_left, nested_left, outer_left])
 }

@@ -27,8 +27,8 @@ impl<A: Receivers, B: Receivers> Operation<(A, B)> for WriteFirstThenSecond<'_> 
 }
 impl<'s, A, B> Start<'s, (A, B)> for WriteFirstThenSecond<'_>
 where
-    A: ReceiverAccess<Family: Write>,
-    B: ReceiverAccess<Family: Write>,
+    A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
     fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {

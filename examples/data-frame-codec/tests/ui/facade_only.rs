@@ -14,9 +14,9 @@ fn main() {
     {
         let reading = Reading { execution: input.read_array_unpin::<2>() };
         let execution = pin!(reading.execution);
-        assert!(matches!(execution.poll(&mut cx), Poll::Ready(Ok(bytes)) if bytes == *b"ab"));
+        assert!(matches!(execution.poll(&mut cx), Poll::Ready(Ok(read)) if read.value == *b"ab"));
     }
     let mut execution = pin!(Pin::new(&mut input).read_array::<2>());
-    assert!(matches!(execution.as_mut().poll_next(&mut cx), Poll::Ready(Some(ControlFlow::Break(Ok(bytes)))) if bytes == *b"cd"));
+    assert!(matches!(execution.as_mut().poll_next(&mut cx), Poll::Ready(Some(ControlFlow::Break(Ok(read)))) if read.value == *b"cd"));
     assert!(matches!(execution.as_mut().poll_next(&mut cx), Poll::Ready(None)));
 }

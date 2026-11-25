@@ -92,11 +92,12 @@ impl Source {
 }
 impl ReadHost for Source {
     type Error = io::Error;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         mut out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -110,17 +111,18 @@ impl ReadHost for Source {
             .min(this.fail_at.map_or(usize::MAX, |at| at - this.consumed));
         BufMut::put(&mut out, this.bytes.split_to(count));
         this.consumed += count;
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(segment(count)))
     }
 }
 struct ChunkSource(Source);
 impl ReadHost for ChunkSource {
     type Error = io::Error;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -137,7 +139,7 @@ impl ChunkHost for ChunkSource {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -153,7 +155,10 @@ impl ChunkHost for ChunkSource {
             return Poll::Ready(Ok(None));
         }
         this.consumed += count;
-        Poll::Ready(Ok(Some(this.bytes.split_to(count))))
+        Poll::Ready(Ok(Some(nitori_io::ChunkSegment {
+            chunk: this.bytes.split_to(count),
+            metadata: (),
+        })))
     }
 }
 struct Sink {
@@ -174,11 +179,12 @@ impl Sink {
 }
 impl WriteHost for Sink {
     type Error = io::Error;
+    type Report = ();
     fn poll_write<'visit, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -194,11 +200,11 @@ impl WriteHost for Sink {
         }
         this.pending = true;
         if this.zero {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(None));
         }
         let count = 2.min(input.remaining());
         this.bytes.put(input.take(count));
-        Poll::Ready(Ok(count))
+        Poll::Ready(Ok(written(count)))
     }
 }
 
@@ -267,7 +273,8 @@ fn read_to_end_appends_and_requires_confirmed_eof() {
             Pin::new(&mut source),
             ReadToEnd::new(&mut out)
         ))
-        .unwrap(),
+        .unwrap()
+        .count,
         4
     );
     assert_eq!(out, b"prefixabcd");
@@ -298,7 +305,8 @@ fn chunks_are_lazy_bounded_and_share_the_fill_cursor() {
             Pin::new(&mut source),
             ReadArray::<1>::new()
         ))
-        .unwrap(),
+        .unwrap()
+        .value,
         *b"a"
     );
     let mut bound = pin!(CallExecutor::execute(
@@ -308,7 +316,7 @@ fn chunks_are_lazy_bounded_and_share_the_fill_cursor() {
     for expected in [b"bc", b"de"] {
         let before = polls.get();
         match run(next(bound.as_mut())).unwrap() {
-            ControlFlow::Continue(bytes) => assert_eq!(bytes, expected[..]),
+            ControlFlow::Continue(bytes) => assert_eq!(bytes.chunk, expected[..]),
             _ => panic!(),
         }
         assert_eq!(polls.get(), before + 2); // one Pending, one chunk; no prefetch
@@ -353,7 +361,7 @@ fn write_ownership_borrowing_and_partial_errors() {
         Pin::new(&mut sink),
         write::Write::new(&mut input),
     ));
-    assert_eq!(result.unwrap(), 2);
+    assert_eq!(result.unwrap().map(|segment| segment.count.get()), Some(2));
     assert_eq!(input, b"cd"[..]);
     let mut input = Bytes::from_static(b"efghij");
     sink.fail_at = Some(4);
@@ -434,7 +442,7 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
         |_| panic!("must reuse storage"),
         BytesMut::freeze,
     );
-    let Poll::Ready(Ok(Some(chunk))) = result else {
+    let Poll::Ready(Ok(Some(nitori_io::ChunkSegment { chunk, .. }))) = result else {
         panic!()
     };
     assert_eq!(chunk, b"a"[..]);
@@ -443,13 +451,14 @@ fn fill_to_chunk_retains_storage_and_respects_changed_maximum() {
 }
 
 #[call]
-async fn local_codec<A: ReceiverAccess<Family: ReadHost>>(
+async fn local_codec<A: ReceiverAccess<Family: ReadHost<Metadata: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<[u8; 3], LocalCodecError<<A::Family as ReadHost>::Error>> {
     let [first] = io
         .read_array::<1>()
         .await
-        .context(local_codec_error::FirstSnafu)?;
+        .context(local_codec_error::FirstSnafu)?
+        .value;
     let mut rest = [0; 2];
     let mut destination = rest.as_mut_slice();
     io.read_exact(&mut destination, 2)
@@ -469,10 +478,10 @@ enum LocalCodecError<E> {
     },
 }
 #[call]
-async fn number_codec<A: ReceiverAccess<Family: ReadHost>>(
+async fn number_codec<A: ReceiverAccess<Family: ReadHost<Metadata: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<u32, nitori_io::calls::ReadLeError<<A::Family as ReadHost>::Error>> {
-    io.read_le::<u32>().await
+    io.read_le::<u32>().await.map(|read| read.value)
 }
 #[test]
 fn family_calls_capture_local_buffers_across_pending() {
@@ -543,7 +552,8 @@ fn zero_composites_are_noops_but_basic_requests_reach_host() {
             Pin::new(&mut source),
             ReadArray::<0>::new()
         ))
-        .unwrap(),
+        .unwrap()
+        .value,
         []
     );
     assert!(
@@ -579,14 +589,16 @@ fn endian_numbers_preserve_bits() {
                 Pin::new(&mut source),
                 ReadLe::<$ty>::new(),
             ))
-            .unwrap();
+            .unwrap()
+            .value;
             assert_eq!(actual.to_le_bytes(), value.to_le_bytes());
             let mut source = Source::new(&value.to_be_bytes());
             let actual = run(CallExecutor::execute(
                 Pin::new(&mut source),
                 ReadBe::<$ty>::new(),
             ))
-            .unwrap();
+            .unwrap()
+            .value;
             assert_eq!(actual.to_be_bytes(), value.to_be_bytes());
         }};
     }
@@ -615,8 +627,9 @@ fn basic_calls_and_chunk_termination() {
             Pin::new(&mut source),
             read::Read::new(&mut out)
         ))
-        .unwrap(),
-        2
+        .unwrap()
+        .map(|segment| segment.count.get()),
+        Some(2)
     );
     assert_eq!(out, b"ab");
     assert_eq!(
@@ -625,7 +638,8 @@ fn basic_calls_and_chunk_termination() {
             read_chunk::ReadChunk::new(nz(1))
         ))
         .unwrap()
-        .unwrap(),
+        .unwrap()
+        .chunk,
         b"c"[..]
     );
     run(CallExecutor::execute(
@@ -704,7 +718,8 @@ fn fill_to_chunk_clears_storage_on_eof_error_and_cancel() {
             Pin::new(&mut source),
             ReadArray::<3>::new()
         ))
-        .unwrap(),
+        .unwrap()
+        .value,
         *b"abc"
     );
 }
@@ -733,11 +748,12 @@ pin_project_lite::pin_project! {
 }
 impl ReadHost for PinnedHost {
     type Error = io::Error;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -753,18 +769,21 @@ fn host_does_not_need_unpin() {
     };
     let mut host = pin!(host);
     assert_eq!(
-        run(CallExecutor::execute(host.as_mut(), ReadArray::<3>::new())).unwrap(),
+        run(CallExecutor::execute(host.as_mut(), ReadArray::<3>::new()))
+            .unwrap()
+            .value,
         *b"abc"
     );
 }
 struct BorrowedErrorHost<'a>(&'a str);
 impl<'a> ReadHost for BorrowedErrorHost<'a> {
     type Error = &'a str;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -785,11 +804,11 @@ fn host_errors_need_neither_error_trait_nor_static_lifetime() {
 }
 
 #[call]
-async fn borrowed_write<A: ReceiverAccess<Family: WriteHost>>(
+async fn borrowed_write<A: ReceiverAccess<Family: WriteHost<Report: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<(), nitori_io::calls::WriteAllError<<A::Family as WriteHost>::Error>> {
     let mut input = Bytes::from_static(b"abc");
-    io.write_all(&mut input).await
+    io.write_all(&mut input).await.map(|_| ())
 }
 #[test]
 fn family_write_borrows_local_input() {
@@ -809,16 +828,17 @@ struct RawHost<'a> {
 }
 impl<'a> ReadHost for RawHost<'a> {
     type Error = RawFailure<'a>;
+    type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
         let this = host.get_pin_mut();
-        Poll::Ready(this.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
+        Poll::Ready(this.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
     }
 }
 impl ChunkHost for RawHost<'_> {
@@ -827,7 +847,7 @@ impl ChunkHost for RawHost<'_> {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::ChunkSegment<Bytes, Self::Metadata>>, Self::Error>>
     where
         Self: 'visit,
     {
@@ -837,16 +857,17 @@ impl ChunkHost for RawHost<'_> {
 }
 impl<'a> WriteHost for RawHost<'a> {
     type Error = RawFailure<'a>;
+    type Report = ();
     fn poll_write<'visit, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
     {
         let this = host.get_pin_mut();
-        Poll::Ready(this.failure.map_or(Ok(0), |text| Err(RawFailure(text))))
+        Poll::Ready(this.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
     }
 }
 
@@ -1002,7 +1023,7 @@ fn local_validation_and_zero_length_composites_do_not_request_a_view() {
     let empty = pin!(Call::<F, _>::new(ReadArray::<0>::new()));
     assert!(matches!(
         empty.poll_return_with(None, &mut cx),
-        CallPoll::Ready(Ok([]))
+        CallPoll::Ready(Ok(ReadValue { value: [], .. }))
     ));
     let empty = pin!(Call::<F, _>::new(WriteAll::new(&b""[..])));
     assert!(matches!(
@@ -1023,4 +1044,15 @@ fn incomplete_error_requires_completed_below_expected() {
             format!("{completed} completed bytes are not below 4 expected bytes")
         );
     }
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
+}
+
+fn written(count: usize) -> Option<nitori_io::WriteSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::WriteSegment { count, report: () })
 }

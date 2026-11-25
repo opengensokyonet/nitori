@@ -153,6 +153,12 @@ fn ready<T>(value: Poll<io::Result<T>>) -> T {
         Poll::Pending => panic!("unexpected Pending"),
     }
 }
+fn read_len<M>(segment: Option<nitori_io::ReadSegment<M>>) -> usize {
+    segment.map_or(0, |segment| segment.count.get())
+}
+fn write_len<R>(segment: Option<nitori_io::WriteSegment<R>>) -> usize {
+    segment.map_or(0, |segment| segment.count.get())
+}
 fn check<T: nitori_call::Receiver>(host: T, action: Rc<Cell<Action>>)
 where
     T::Family: Read<Error = io::Error> + Write<Error = io::Error>,
@@ -190,9 +196,15 @@ where
         Poll::Ready(Err(_))
     ));
     action.set(Action::Ready);
-    assert_eq!(ready(host.as_mut().poll_read(&mut cx, &mut output)), 2);
+    assert_eq!(
+        read_len(ready(host.as_mut().poll_read(&mut cx, &mut output))),
+        2
+    );
     assert_eq!(output, b"xab");
-    assert_eq!(ready(host.as_mut().poll_write(&mut cx, &mut input)), 2);
+    assert_eq!(
+        write_len(ready(host.as_mut().poll_write(&mut cx, &mut input))),
+        2
+    );
     assert_eq!(input, b"345"[..]);
     // Cancellation while waiting for a chunk must consume nothing.
     action.set(Action::Pending);
@@ -214,16 +226,17 @@ where
         host.as_mut()
             .poll_read_chunk(&mut cx, NonZeroUsize::new(1).unwrap()),
     )
-    .unwrap();
+    .unwrap()
+    .chunk;
     assert_eq!(chunk, b"c"[..]);
     let mut left = [0; 1];
     let mut right = [0; 2];
     let mut output = left.as_mut_slice().chain_mut(right.as_mut_slice());
     assert_eq!(
-        ready(
+        read_len(ready(
             host.as_mut()
                 .poll_read(&mut cx, &mut output as &mut dyn BufMut)
-        ),
+        )),
         2
     );
     assert_eq!(left, *b"d");
@@ -232,7 +245,8 @@ where
         host.as_mut()
             .poll_read_chunk(&mut cx, NonZeroUsize::new(99).unwrap()),
     )
-    .unwrap();
+    .unwrap()
+    .chunk;
     assert_eq!(chunk, b"f"[..]);
     assert!(
         ready(

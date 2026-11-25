@@ -64,31 +64,40 @@ fn extend(value: u64, bytes: &[u8]) -> u64 {
 }
 
 #[call]
-pub async fn read_varint<F: Read, A: ReceiverAccess<Family = F>>(
+pub async fn read_varint<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<u64, ReadVarintError<F::Error>> {
-    let [first] = io.read_array::<1>().await.context(FirstByteSnafu)?;
+    let [first] = io.read_array::<1>().await.context(FirstByteSnafu)?.value;
     let value = u64::from(first & 0x3f);
     // The top two bits give the width: 1, 2, 4 or 8 bytes in all.
     Ok(match first >> 6 {
         0 => value,
         1 => extend(
             value,
-            &io.read_array::<1>().await.context(RemainingBytesSnafu)?,
+            &io.read_array::<1>()
+                .await
+                .context(RemainingBytesSnafu)?
+                .value,
         ),
         2 => extend(
             value,
-            &io.read_array::<3>().await.context(RemainingBytesSnafu)?,
+            &io.read_array::<3>()
+                .await
+                .context(RemainingBytesSnafu)?
+                .value,
         ),
         _ => extend(
             value,
-            &io.read_array::<7>().await.context(RemainingBytesSnafu)?,
+            &io.read_array::<7>()
+                .await
+                .context(RemainingBytesSnafu)?
+                .value,
         ),
     })
 }
 
 #[call(sync, yields = F::Chunk)]
-pub async fn read_data_frame<F: ReadChunk, A: ReceiverAccess<Family = F>>(
+pub async fn read_data_frame<F: ReadChunk<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     chunk_size: NonZeroUsize,
 ) -> Result<usize, CodecError<F::Error>> {
@@ -101,7 +110,7 @@ pub async fn read_data_frame<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     let mut chunks = pin!(io.read_chunks_exact(length, chunk_size));
     loop {
         match chunks.as_mut().step().await {
-            ControlFlow::Continue(chunk) => yield chunk,
+            ControlFlow::Continue(chunk) => yield chunk.chunk,
             ControlFlow::Break(result) => break result.context(PayloadSnafu)?,
         }
     }

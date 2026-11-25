@@ -73,11 +73,11 @@ enum ReadFrameError<E> {
 }
 
 #[call(sync)]
-async fn read_frame<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_frame<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     payload: &mut Vec<u8>,
 ) -> Result<u8, ReadFrameError<F::Error>> {
-    let [kind, length] = io.read_array::<2>().await.context(HeaderSnafu)?;
+    let [kind, length] = io.read_array::<2>().await.context(HeaderSnafu)?.value;
     io.read_exact(payload, usize::from(length))
         .await
         .context(PayloadSnafu)?;
@@ -224,11 +224,11 @@ enum ReadRecordError<E> {
 }
 
 #[call(sync)]
-async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_record<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     output: &mut Vec<u8>,
 ) -> Result<usize, ReadRecordError<F::Error>> {
-    let [length] = io.read_array::<1>().await.context(LengthSnafu)?;
+    let [length] = io.read_array::<1>().await.context(LengthSnafu)?.value;
     io.read_exact(output, usize::from(length))
         .await
         .context(PayloadSnafu)?;
@@ -362,9 +362,9 @@ async fn count_chunks<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     let mut count = 0;
     loop {
         match chunks.as_mut().step().await {
-            ControlFlow::Continue(chunk) => {
+            ControlFlow::Continue(segment) => {
                 count += 1;
-                yield bytes::Buf::remaining(&chunk);
+                yield bytes::Buf::remaining(&segment.chunk);
             }
             ControlFlow::Break(result) => return result.map(|_| count),
         }
@@ -405,10 +405,10 @@ use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
 use snafu::{ResultExt, Snafu};
 
 #[call(sync)]
-async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_word<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<[u8; 2], ReadArrayError<F::Error>> {
-    io.read_array::<2>().await
+    Ok(io.read_array::<2>().await?.value)
 }
 
 #[derive(Debug, Snafu)]
@@ -420,10 +420,10 @@ enum ReadRecordError<E> {
 }
 
 #[call(sync)]
-async fn read_record<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_record<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<[u8; 2], ReadRecordError<F::Error>> {
-    let [length] = io.read_array::<1>().await.context(LengthSnafu)?;
+    let [length] = io.read_array::<1>().await.context(LengthSnafu)?.value;
     io.compose(ReadLimit(usize::from(length)))
         .read_word()
         .await
@@ -525,16 +525,18 @@ struct Counting<I> {
     io: I,
     count: usize,
 }
-impl<I: ReceiverAccess<Family: Read>> Counting<I> {
+impl<I: ReceiverAccess<Family: Read<Metadata = ()>>> Counting<I> {
     async fn next_byte(&mut self) -> Option<u8> {
-        let [byte] = self.io.read_array::<1>().await.ok()?;
+        let [byte] = self.io.read_array::<1>().await.ok()?.value;
         self.count += 1;
         Some(byte)
     }
 }
 
 #[call(sync)]
-async fn first_two<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A) -> [Option<u8>; 2] {
+async fn first_two<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> [Option<u8>; 2] {
     let mut counting = Counting { io, count: 0 };
     [counting.next_byte().await, counting.next_byte().await]
 }
@@ -590,14 +592,15 @@ use std::pin::pin;
 
 /// Copies up to `length` bytes, one at a time.
 #[call(sync)]
-async fn copy_bytes<F: Read, G: Write>(
+async fn copy_bytes<F: Read<Metadata = ()>, G: Write<Report = ()>>(
     source: &mut impl ReceiverAccess<Family = F>,
     sink: &mut impl ReceiverAccess<Family = G>,
     length: usize,
 ) -> usize {
     let mut copied = 0;
     while copied < length {
-        let Ok([byte]) = source.read_array::<1>().await else { break };
+        let Ok(read) = source.read_array::<1>().await else { break };
+        let [byte] = read.value;
         if sink.write_all(&[byte][..]).await.is_err() {
             break;
         }
@@ -813,14 +816,15 @@ enum ReadRecordsError<E> {
 
 /// Length-prefixed records, until an empty one.
 #[call(yields = Vec<u8>)]
-async fn read_records<F: Read, A: ReceiverAccess<Family = F>>(
+async fn read_records<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<(), ReadRecordsError<F::Error>> {
     for index in 0usize.. {
         let [length] = io
             .read_array::<1>()
             .await
-            .context(LengthSnafu { index })?;
+            .context(LengthSnafu { index })?
+            .value;
         if length == 0 {
             break;
         }
@@ -834,7 +838,7 @@ async fn read_records<F: Read, A: ReceiverAccess<Family = F>>(
 }
 
 #[call(sync)]
-async fn collect_records<F: Read, A: ReceiverAccess<Family = F>>(
+async fn collect_records<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     records: &mut Vec<Vec<u8>>,
 ) -> Result<(), ReadRecordsError<F::Error>> {

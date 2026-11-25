@@ -8,10 +8,12 @@
 //! and IO happen when it is polled. Derived operations preserve completed
 //! prefixes on Pending, errors, and cancellation; they never roll back.
 
+mod copy;
 mod read;
 mod skip;
 mod write;
 
+pub use copy::*;
 pub use read::*;
 pub use skip::*;
 pub use write::*;

@@ -1,6 +1,6 @@
 //! Write operations and their operation-specific failures.
 use crate::{
-    Write as WriteHost, WriteExt as _,
+    Combine, Write as WriteHost, WriteExt as _, WriteSegment,
     calls::EndianValue,
     error::{self, WriteZeroError},
 };
@@ -8,37 +8,41 @@ use bytes::Buf;
 use nitori_call::{ReceiverAccess, call};
 use snafu::{IntoError, Snafu};
 
-/// Accept all of `input`. Pass `&mut buffer` to keep the cursor: after a
-/// failure or cancellation it holds the unaccepted tail.
+/// Accept all of `input` and return the combined report of the segments
+/// accepted. Pass `&mut buffer` to keep the cursor: after a failure or
+/// cancellation it holds the unaccepted tail.
 #[call(sync)]
 pub async fn write_all<F, B>(
     io: &mut impl ReceiverAccess<Family = F>,
     input: B,
-) -> Result<(), WriteAllError<F::Error>>
+) -> Result<<F as WriteHost>::Report, WriteAllError<F::Error>>
 where
     F: WriteHost,
+    <F as WriteHost>::Report: Combine,
     B: Buf,
 {
     let mut input = input;
     let mut completed = 0;
+    let mut combined = <F as WriteHost>::Report::default();
     while input.has_remaining() {
         let before = input.remaining();
         match io.write(&mut input).await {
-            Ok(0) => return Err(error::WriteZeroSnafu { completed }.build().into()),
-            Ok(count) => {
+            Ok(None) => return Err(error::WriteZeroSnafu { completed }.build().into()),
+            Ok(Some(WriteSegment { count, report })) => {
                 assert_eq!(
                     before.checked_sub(input.remaining()),
-                    Some(count),
+                    Some(count.get()),
                     "write cursor/count mismatch"
                 );
-                completed += count;
+                completed += count.get();
+                combined = combined.combine(report);
             }
             Err(source) => {
                 return Err(write_all_error::ReceiverSnafu { completed }.into_error(source));
             }
         }
     }
-    Ok(())
+    Ok(combined)
 }
 
 /// Failures that [`write_all`] can produce.
@@ -69,19 +73,19 @@ impl<E> WriteAllError<E> {
     }
 }
 
-/// Write a fixed-size array completely.
+/// Write a fixed-size array completely and return the combined report.
 #[call(sync)]
 pub async fn write_array<const LENGTH: usize, F>(
     io: &mut impl ReceiverAccess<Family = F>,
     bytes: [u8; LENGTH],
-) -> Result<(), WriteArrayError<F::Error>>
+) -> Result<<F as WriteHost>::Report, WriteArrayError<F::Error>>
 where
     F: WriteHost,
+    <F as WriteHost>::Report: Combine,
 {
     write_all(io, bytes.as_ref())
         .await
-        .map_err(WriteArrayError::from_write_all)?;
-    Ok(())
+        .map_err(WriteArrayError::from_write_all)
 }
 
 /// Failures that [`write_array`] can produce.
@@ -124,20 +128,21 @@ impl<E> WriteArrayError<E> {
     }
 }
 
-/// Encode a primitive number in little endian and write it completely.
+/// Encode a primitive number in little endian, write it completely and return
+/// the combined report.
 #[call(sync)]
 pub async fn write_le<T: EndianValue, F>(
     io: &mut impl ReceiverAccess<Family = F>,
     value: T,
-) -> Result<(), WriteLeError<F::Error>>
+) -> Result<<F as WriteHost>::Report, WriteLeError<F::Error>>
 where
     F: WriteHost,
+    <F as WriteHost>::Report: Combine,
 {
     let bytes = value.to_le();
     write_all(io, bytes.as_ref())
         .await
-        .map_err(WriteLeError::from_write_all)?;
-    Ok(())
+        .map_err(WriteLeError::from_write_all)
 }
 
 /// Failures that [`write_le`] can produce.
@@ -180,20 +185,21 @@ impl<E> WriteLeError<E> {
     }
 }
 
-/// Encode a primitive number in big endian and write it completely.
+/// Encode a primitive number in big endian, write it completely and return
+/// the combined report.
 #[call(sync)]
 pub async fn write_be<T: EndianValue, F>(
     io: &mut impl ReceiverAccess<Family = F>,
     value: T,
-) -> Result<(), WriteBeError<F::Error>>
+) -> Result<<F as WriteHost>::Report, WriteBeError<F::Error>>
 where
     F: WriteHost,
+    <F as WriteHost>::Report: Combine,
 {
     let bytes = value.to_be();
     write_all(io, bytes.as_ref())
         .await
-        .map_err(WriteBeError::from_write_all)?;
-    Ok(())
+        .map_err(WriteBeError::from_write_all)
 }
 
 /// Failures that [`write_be`] can produce.

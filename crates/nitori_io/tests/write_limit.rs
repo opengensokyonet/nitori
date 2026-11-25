@@ -16,15 +16,16 @@ struct Overcounting;
 nitori_call::family_receiver!(impl [] for Overcounting);
 impl Write for Overcounting {
     type Error = Infallible;
+    type Report = ();
     fn poll_write<'v, I: Buf + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, !>>
     where
         Self: 'v,
     {
-        Poll::Ready(Ok(input.remaining() + 10))
+        Poll::Ready(Ok(written(input.remaining() + 10)))
     }
 }
 
@@ -42,4 +43,8 @@ fn a_write_counted_beyond_the_limit_panics() {
         &mut Context::from_waker(Waker::noop()),
         &mut &b"abcdef"[..],
     );
+}
+
+fn written(count: usize) -> Option<nitori_io::WriteSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::WriteSegment { count, report: () })
 }

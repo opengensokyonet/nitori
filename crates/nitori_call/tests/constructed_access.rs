@@ -42,12 +42,12 @@ async fn read_length<A: ReceiverAccess<Family: Read>>(
 ) -> Result<Option<u8>, ReadError<A>> {
     let mut byte = [0u8; 1];
     let read = io.read(&mut &mut byte[..]).await?;
-    Ok((read == 1).then_some(byte[0]))
+    Ok(read.is_some().then_some(byte[0]))
 }
 
 async fn drain<A: ReceiverAccess<Family: Read>>(io: &mut A) -> Result<(), ReadError<A>> {
     let mut byte = [0u8; 1];
-    while io.read(&mut &mut byte[..]).await? != 0 {}
+    while io.read(&mut &mut byte[..]).await?.is_some() {}
     Ok(())
 }
 
@@ -95,13 +95,20 @@ impl<I: ReceiverAccess<Family: Read>> RecordStream<I> {
 
 /// A payload reader, written once for both.
 #[call(sync)]
-async fn read_word<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A) -> Option<u16> {
-    io.read_array::<2>().await.ok().map(u16::from_be_bytes)
+async fn read_word<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> Option<u16> {
+    io.read_array::<2>()
+        .await
+        .ok()
+        .map(|read| u16::from_be_bytes(read.value))
 }
 
 /// Inside an operation: the stream holds the operation's access.
 #[call(sync)]
-async fn words<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A) -> Vec<Option<u16>> {
+async fn words<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> Vec<Option<u16>> {
     let mut words = Vec::new();
     let Ok(Some(mut stream)) = RecordStream::read(&mut *io).await else {
         return words;
@@ -115,9 +122,11 @@ async fn words<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A) -> Vec<Option
 
 /// Each byte of the payload, as an item.
 #[call(yields = u8)]
-async fn bytes<F: Read, A: ReceiverAccess<Family = F>>(io: &mut A) -> usize {
+async fn bytes<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> usize {
     let mut count = 0;
-    while let Ok([byte]) = io.read_array::<1>().await {
+    while let Ok(nitori_io::calls::ReadValue { value: [byte], .. }) = io.read_array::<1>().await {
         yield byte;
         count += 1;
     }
@@ -152,9 +161,9 @@ fn across_awaits_on_a_receiver_held_by_value() {
         .unwrap();
     assert_eq!(block(stream.record().read_word()), Some(7));
     let mut record = block(stream.next_record()).unwrap().unwrap();
-    assert_eq!(block(record.read_array::<1>()).unwrap(), [0]);
+    assert_eq!(block(record.read_array::<1>()).unwrap().value, [0]);
     // What is left of the record is kept in the stream.
-    assert_eq!(block(stream.record().read_array::<1>()).unwrap(), [8]);
+    assert_eq!(block(stream.record().read_array::<1>()).unwrap().value, [8]);
     assert!(block(stream.next_record()).unwrap().is_some());
     assert_eq!(stream.length, 0);
     assert_eq!(block(stream.record().read_word()), None);
@@ -181,7 +190,7 @@ fn on_a_borrowed_receiver() {
 #[test]
 fn the_receiver_between_accesses() {
     let mut access = ConstructedAccess::new(INPUT);
-    assert_eq!(block(access.read_array::<1>()).unwrap(), [2]);
+    assert_eq!(block(access.read_array::<1>()).unwrap().value, [2]);
     assert_eq!(access.get_ref().len(), INPUT.len() - 1);
     *access.get_mut() = &INPUT[1..];
     assert_eq!(block(access.read_word()), Some(7));
@@ -195,17 +204,18 @@ struct Dribble<'a> {
 family_receiver!(impl ['a] for Dribble<'a>);
 impl Read for Dribble<'_> {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, O: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, !>>
     where
         Self: 'v,
     {
         let this = host.get_pin_mut().get_mut();
         if destination.remaining_mut() == 0 || this.data.is_empty() {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(None));
         }
         if !this.ready {
             this.ready = true;
@@ -215,7 +225,7 @@ impl Read for Dribble<'_> {
         this.ready = false;
         destination.put_u8(this.data[0]);
         this.data = &this.data[1..];
-        Poll::Ready(Ok(1))
+        Poll::Ready(Ok(segment(1)))
     }
 }
 
@@ -285,11 +295,12 @@ impl<'a> Fixed<'a> {
 family_receiver!(impl ['a] for Fixed<'a>);
 impl Read for Fixed<'_> {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, O: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, !>>
     where
         Self: 'v,
     {
@@ -298,7 +309,7 @@ impl Read for Fixed<'_> {
         let length = destination.remaining_mut().min(this.data.len());
         destination.put_slice(&this.data[..length]);
         this.data = &this.data[length..];
-        Poll::Ready(Ok(length))
+        Poll::Ready(Ok(segment(length)))
     }
 }
 
@@ -359,7 +370,7 @@ fn a_release_point_completes_at_once() {
     let mut access = ConstructedAccess::new(INPUT);
     let mut cx = Context::from_waker(Waker::noop());
     assert!(pin!(access.release_view()).poll(&mut cx).is_ready());
-    assert_eq!(block(access.read_array::<1>()).unwrap(), [2]);
+    assert_eq!(block(access.read_array::<1>()).unwrap().value, [2]);
 }
 
 #[test]
@@ -399,11 +410,18 @@ fn composed_once_and_twice() {
     let mut outer = access.compose(ReadLimit(5usize));
     {
         let mut inner = outer.compose(ReadLimit(2usize));
-        assert_eq!(block(inner.read_array::<2>()).unwrap(), [2, 0]);
+        assert_eq!(block(inner.read_array::<2>()).unwrap().value, [2, 0]);
         assert!(block(inner.read_array::<1>()).is_err());
     }
-    assert_eq!(block(outer.read_array::<3>()).unwrap(), [7, 3, 0]);
+    assert_eq!(block(outer.read_array::<3>()).unwrap().value, [7, 3, 0]);
     assert!(block(outer.read_array::<1>()).is_err());
     assert_eq!(outer.into_state().0, 0);
-    assert_eq!(block(access.read_array::<1>()).unwrap(), [8]);
+    assert_eq!(block(access.read_array::<1>()).unwrap().value, [8]);
+}
+
+fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
+    core::num::NonZeroUsize::new(count).map(|count| nitori_io::ReadSegment {
+        count,
+        metadata: (),
+    })
 }

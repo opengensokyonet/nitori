@@ -14,11 +14,12 @@ struct Delayed<'a> {
 family_receiver!(impl ['a] for Delayed<'a>);
 impl Read for Delayed<'_> {
     type Error = Infallible;
+    type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         out: &mut B,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<Option<nitori_io::ReadSegment<Self::Metadata>>, !>>
     where
         Self: 'v,
     {

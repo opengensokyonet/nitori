@@ -1,7 +1,8 @@
 //! Explicit capability adapters: chunk reads with caller-selected allocation
 //! limits, byte budgets for composed accesses, and skipping built from reads.
 use crate::{
-    PollReadExt as _, PollWriteExt as _, Read, ReadChunk, Skip, Write,
+    ChunkResult, ChunkSegment, LentBuffer, LentOutcome, PollReadExt as _, PollWriteExt as _, Read,
+    ReadChunk, ReadResult, Skip, Write, WriteLent, WriteLentResult, WriteResult,
     helpers::poll_chunk_from_read,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -64,11 +65,12 @@ where
     T::Family: Read,
 {
     type Error = <T::Family as Read>::Error;
+    type Metadata = <T::Family as Read>::Metadata;
     fn poll_read<'visit, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<ReadResult<Self>>
     where
         Self: 'visit,
     {
@@ -85,7 +87,7 @@ where
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<Bytes>, Self::Error>>
+    ) -> Poll<ChunkResult<Self>>
     where
         Self: 'visit,
     {
@@ -148,16 +150,36 @@ where
     T::Family: Write,
 {
     type Error = <T::Family as Write>::Error;
+    type Report = <T::Family as Write>::Report;
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<WriteResult<Self>>
     where
         Self: 'visit,
     {
         let this = host.get_pin_mut();
         this.project().inner.poll_write(cx, input)
+    }
+}
+impl<T: Receiver> WriteLent for Direct<Chunked<T>>
+where
+    T::Family: WriteLent,
+{
+    type Buffer<'l> = <T::Family as WriteLent>::Buffer<'l>;
+    fn poll_write_lent<'visit, U, A, Fill>(
+        host: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+        wanted: NonZeroUsize,
+        fill: Fill,
+    ) -> Poll<WriteLentResult<Self, U, A>>
+    where
+        Self: 'visit,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<U, A>,
+    {
+        let this = host.get_pin_mut();
+        this.project().inner.poll_write_lent(cx, wanted, fill)
     }
 }
 
@@ -189,7 +211,8 @@ pub struct ReadLimit<L = usize>(pub L);
 ///
 /// At the boundary the composed access accepts nothing itself, without polling
 /// the parent; within the budget, requests (empty ones included) reach the
-/// parent. Only [`Write`] is available through the composed access.
+/// parent. Only [`Write`] and [`WriteLent`] are available through the
+/// composed access.
 ///
 /// [`write_all`]: crate::calls::write_all
 /// [`ComposedReceiver`]: nitori_call::ComposedReceiver
@@ -285,28 +308,32 @@ where
     usize: crate::Min<L>,
 {
     type Error = F::Error;
+    type Metadata = F::Metadata;
     fn poll_read<'v, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<ReadResult<Self>>
     where
         Self: 'v,
     {
         let view = host.project();
         let remaining = crate::Min::min(view.limit.0.clone(), usize::MAX);
         if remaining == 0 {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(None));
         }
         let allowed = remaining.min(destination.remaining_mut());
-        let count = ready!(F::poll_read(
+        let segment = ready!(F::poll_read(
             view.parent,
             cx,
             &mut destination.limit(allowed)
         ))?;
-        assert!(count <= allowed, "read exceeded the requested capacity");
-        view.limit.consume(count);
-        Poll::Ready(Ok(count))
+        if let Some(segment) = &segment {
+            let count = segment.count.get();
+            assert!(count <= allowed, "read exceeded the requested capacity");
+            view.limit.consume(count);
+        }
+        Poll::Ready(Ok(segment))
     }
 }
 impl<F: ReadChunk, L> ReadChunk for Limited<F, ReadLimit<L>>
@@ -321,7 +348,7 @@ where
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<F::Chunk>, Self::Error>>
+    ) -> Poll<ChunkResult<Self>>
     where
         Self: 'v,
     {
@@ -331,7 +358,7 @@ where
             return Poll::Ready(Ok(None));
         };
         let chunk = ready!(F::poll_read_chunk(view.parent, cx, allowed))?;
-        if let Some(chunk) = &chunk {
+        if let Some(ChunkSegment { chunk, .. }) = &chunk {
             let count = chunk.remaining();
             assert!(
                 count > 0 && count <= allowed.get(),
@@ -402,11 +429,12 @@ where
 }
 impl<F: Write> Write for Limited<F, WriteLimit> {
     type Error = F::Error;
+    type Report = F::Report;
     fn poll_write<'v, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<WriteResult<Self>>
     where
         Self: 'v,
     {
@@ -414,16 +442,48 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
         let remaining = view.limit.0;
         // The boundary accepts nothing, without polling the parent.
         if remaining == 0 {
-            return Poll::Ready(Ok(0));
+            return Poll::Ready(Ok(None));
         }
-        let count = ready!(F::poll_write(
+        let segment = ready!(F::poll_write(
             view.parent,
             cx,
             &mut (&mut *input).take(remaining)
         ))?;
-        assert!(count <= remaining, "write exceeded the offered input");
-        view.limit.0 -= count;
-        Poll::Ready(Ok(count))
+        if let Some(segment) = &segment {
+            let count = segment.count.get();
+            assert!(count <= remaining, "write exceeded the offered input");
+            view.limit.0 -= count;
+        }
+        Poll::Ready(Ok(segment))
+    }
+}
+
+/// Lends at most the remaining budget of the parent's storage. At the
+/// boundary it accepts no byte itself, without polling the parent.
+impl<F: WriteLent> WriteLent for Limited<F, WriteLimit> {
+    type Buffer<'l> = F::Buffer<'l>;
+    fn poll_write_lent<'v, T, A, Fill>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        wanted: NonZeroUsize,
+        fill: Fill,
+    ) -> Poll<WriteLentResult<Self, T, A>>
+    where
+        Self: 'v,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>,
+    {
+        let view = host.project();
+        let Some(remaining) = NonZeroUsize::new(view.limit.0) else {
+            return Poll::Ready(Ok(None));
+        };
+        let allowed = wanted.min(remaining);
+        let result = ready!(F::poll_write_lent(view.parent, cx, allowed, fill))?;
+        if let Some(LentOutcome::Kept(segment)) = &result {
+            let count = segment.count.get();
+            assert!(count <= allowed.get(), "write exceeded the granted count");
+            view.limit.0 -= count;
+        }
+        Poll::Ready(Ok(result))
     }
 }
 
@@ -433,11 +493,12 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
 /// Reads from the lent view.
 impl<F: Read> Read for Lent<F> {
     type Error = F::Error;
+    type Metadata = F::Metadata;
     fn poll_read<'v, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<ReadResult<Self>>
     where
         Self: 'v,
     {
@@ -452,7 +513,7 @@ impl<F: ReadChunk> ReadChunk for Lent<F> {
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<F::Chunk>, Self::Error>>
+    ) -> Poll<ChunkResult<Self>>
     where
         Self: 'v,
     {
@@ -463,16 +524,34 @@ impl<F: ReadChunk> ReadChunk for Lent<F> {
 /// Writes to the lent view.
 impl<F: Write> Write for Lent<F> {
     type Error = F::Error;
+    type Report = F::Report;
     fn poll_write<'v, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<WriteResult<Self>>
     where
         Self: 'v,
     {
         host.get_mut()
             .with(|parent| F::poll_write(parent.into_pin(), cx, input))
+    }
+}
+/// Lends the storage of the lent view.
+impl<F: WriteLent> WriteLent for Lent<F> {
+    type Buffer<'l> = F::Buffer<'l>;
+    fn poll_write_lent<'v, T, A, Fill>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        wanted: NonZeroUsize,
+        fill: Fill,
+    ) -> Poll<WriteLentResult<Self, T, A>>
+    where
+        Self: 'v,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>,
+    {
+        host.get_mut()
+            .with(|parent| F::poll_write_lent(parent.into_pin(), cx, wanted, fill))
     }
 }
 /// Skips on the lent view.

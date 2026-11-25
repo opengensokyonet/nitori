@@ -5,18 +5,23 @@ verified with 1.100.0-nightly, 2026-09-19).
 
 ## Capabilities and operations
 
-`Read`, `ReadChunk`, `Skip`, and `Write` are capabilities on `ReceiverFamily` types.
+`Read`, `ReadChunk`, `Skip`, `Write`, and `WriteLent` are capabilities on `ReceiverFamily` types.
 Each method accepts a pinned `Self::ReceiverView<'visit>` for any valid visit lifetime;
 errors and chunks are stable associated types independent of that visit.
 `Read` fills any `BufMut`; `ReadChunk: Read` additionally returns owned `Buf`
 chunks from the same cursor, and `Skip: Read` advances that cursor without
-delivering the bytes (see [Skipping](#skipping)). `Write` accepts any `Buf`. Buffer generics belong
+delivering the bytes (see [Skipping](#skipping)). `Write` accepts any `Buf`;
+`WriteLent: Write` lends the sink's own storage to be filled in place (see
+[Lending storage](#lending-storage)). Reads report their bytes in segments with
+metadata and writes with a report (see [Metadata and reports](#metadata-and-reports)). Buffer generics belong
 to the methods. Neither hosts nor buffers require `Send`, `Sync`, `Unpin`, or
 `'static`. These traits are not dyn-compatible; buffer arguments can be unsized.
 
 `#[capability]` generates a primitive operation for each poll method: `read::Read`,
 `read_chunk::ReadChunk`, `skip::Skip` and `write::Write`. Each borrows its buffer and completes
-with the poll's result. The operations derived from them live in `calls`,
+with the poll's result. `WriteLent` has none: its fill runs within one poll and
+is dropped on `Pending`, so an operation that lends calls `poll_write_lent`
+inside the sink access's `poll_access`, as `calls::copy_into_lent` does. The operations derived from them live in `calls`,
 together with their errors. Import the generated extension traits to call them:
 `ReadExt`, `ReadChunkExt`, `SkipExt`, `WriteExt` and `calls::{Name}Ext` on receiver
 accesses inside operations, and `ReadHostExt`, `ReadChunkHostExt`, `SkipHostExt`,
@@ -41,10 +46,10 @@ enum HeaderError<E> {
 }
 
 #[call(sync)]
-async fn header<F: Read, A: ReceiverAccess<Family = F>>(
+async fn header<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<[u8; 3], HeaderError<F::Error>> {
-    let [tag] = io.read_array::<1>().await.context(TagSnafu)?;
+    let [tag] = io.read_array::<1>().await.context(TagSnafu)?.value;
     let mut bytes = [0; 2];
     let mut destination = bytes.as_mut_slice();
     io.read_exact(&mut destination, 2)
@@ -63,24 +68,29 @@ Crates that define operations enable `impl_trait_in_assoc_type`; using the
 generated host methods needs no features. Local buffers and their cursor views
 may stay borrowed across Pending.
 
+In the table `M` is `F::Metadata` and `R` is `F::Report`.
+
 | Operation | Final value |
 | --- | --- |
-| `read::Read::new(&mut destination)` | `Result<usize, F::Error>` |
-| `read_chunk::ReadChunk::new(nonzero_maximum)` | `Result<Option<F::Chunk>, F::Error>` |
+| `read::Read::new(&mut destination)` | `Result<Option<ReadSegment<M>>, F::Error>` |
+| `read_chunk::ReadChunk::new(nonzero_maximum)` | `Result<Option<ChunkSegment<F::Chunk, M>>, F::Error>` |
 | `skip::Skip::new(maximum)` | `Result<Option<F::Count>, F::Error>` |
-| `write::Write::new(&mut input)` | `Result<usize, F::Error>` |
-| `ReadExact::new(&mut destination, length)` | `Result<(), ReadExactError<F::Error>>` |
-| `ReadToEnd::new(&mut destination)` | `Result<usize, ReadToEndError<F::Error>>` |
-| `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields chunks; `Result<usize, ReadChunksError<F::Error>>` |
-| `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields chunks; `Result<(), ReadChunksExactError<F::Error>>` |
+| `write::Write::new(&mut input)` | `Result<Option<WriteSegment<R>>, F::Error>` |
+| `ReadExact::new(&mut destination, length)` | `Result<M, ReadExactError<F::Error>>` |
+| `ReadToEnd::new(&mut destination)` | `Result<ReadTotal<M>, ReadToEndError<F::Error>>` |
+| `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields `ChunkSegment`s; `Result<usize, ReadChunksError<F::Error>>` |
+| `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields `ChunkSegment`s; `Result<(), ReadChunksExactError<F::Error>>` |
 | `SkipExact::new(length)` | `Result<(), SkipExactError<F::Error, F::Count>>` |
 | `SkipToEnd::new()` | `Result<(), F::Error>` |
-| `WriteAll::new(input)` | `Result<(), WriteAllError<F::Error>>` |
-| `ReadArray::<LENGTH>::new()` | `Result<[u8; LENGTH], ReadArrayError<F::Error>>` |
-| `ReadLe::<T>::new()` | `Result<T, ReadLeError<F::Error>>` |
-| `ReadBe::<T>::new()` | `Result<T, ReadBeError<F::Error>>` |
-| `WriteArray::<LENGTH>::new(bytes)` | `Result<(), WriteArrayError<F::Error>>` |
-| `WriteLe::new(value)`, `WriteBe::new(value)` | `Result<(), WriteLeError<F::Error>>`, `Result<(), WriteBeError<F::Error>>` |
+| `WriteAll::new(input)` | `Result<R, WriteAllError<F::Error>>` |
+| `ReadArray::<LENGTH>::new()` | `Result<ReadValue<[u8; LENGTH], M>, ReadArrayError<F::Error>>` |
+| `ReadLe::<T>::new()` | `Result<ReadValue<T, M>, ReadLeError<F::Error>>` |
+| `ReadBe::<T>::new()` | `Result<ReadValue<T, M>, ReadBeError<F::Error>>` |
+| `WriteArray::<LENGTH>::new(bytes)` | `Result<R, WriteArrayError<F::Error>>` |
+| `WriteLe::new(value)`, `WriteBe::new(value)` | `Result<R, WriteLeError<F::Error>>`, `Result<R, WriteBeError<F::Error>>` |
+
+The operations that combine segments need `M: Combine` or `R: Combine`. The
+copies, which take a source and a sink, are listed under [Copying](#copying).
 
 The derived operations are also functions, such as `calls::read_exact(io,
 destination, length)`, for use inside other operations.
@@ -91,7 +101,8 @@ before synchronous decoding. Pointer-sized encodings depend on the target width.
 
 Host methods have pinned and `_unpin` entries, plus `sync_` entries for
 resources that never wait. Receivers also provide `PollReadExt` and
-`PollWriteExt` for one synchronous poll through their family. Access methods
+`PollWriteExt` for one synchronous poll through their family; the latter
+includes `poll_write_lent`. Access methods
 work on the root access and on composed ones. A local resource can use
 `nitori_call::family_receiver!` and implement the capability on itself; custom
 wrapper families define their own views. Host methods also work on custom
@@ -99,21 +110,27 @@ wrapper families define their own views. Host methods also work on custom
 
 ## Built-in hosts and bridges
 
-| Receiver | Read | Write | Native ReadChunk | Native Skip |
-| --- | --- | --- | --- | --- |
-| `&[u8]` | yes | — | borrowed subslice | advance |
-| `&mut [u8]` | — | bounded | — | — |
-| `Bytes` | yes | — | zero-copy split | advance |
-| `BytesMut` | yes | append | zero-copy split | advance |
-| `Vec<u8>` | — | append | — | — |
-| `VecDeque<u8>` | consume front | append | — | consume front |
-| `std::io::Cursor<T>` | when `T: AsRef<[u8]> + Unpin` | when the cursor implements `std::io::Write` and `T: Unpin` | — | when `T: AsRef<[u8]> + Unpin` |
+| Receiver | Read | Write | Native ReadChunk | Native Skip | WriteLent |
+| --- | --- | --- | --- | --- | --- |
+| `&[u8]` | yes | — | borrowed subslice | advance | — |
+| `&mut [u8]` | — | bounded | — | — | the unwritten rest |
+| `Bytes` | yes | — | zero-copy split | advance | — |
+| `BytesMut` | yes | append | zero-copy split | advance | spare capacity, split off |
+| `Vec<u8>` | — | append | — | — | spare capacity, `VecSpareCapacity` |
+| `VecDeque<u8>` | consume front | append | — | consume front | — |
+| `std::io::Cursor<T>` | when `T: AsRef<[u8]> + Unpin` | when the cursor implements `std::io::Write` and `T: Unpin` | — | when `T: AsRef<[u8]> + Unpin` | — |
 
-Memory operations use `Infallible`, except cursor writes which preserve
-`std::io::Error`. A full slice writer returns zero. A cursor write offers one
+Memory hosts have no metadata and no report: both are `()`. Memory
+operations use `!`, except cursor writes which preserve
+`std::io::Error`. A full slice writer accepts nothing, `None`. A cursor write offers one
 contiguous input segment; `WriteAll` handles the remaining segments. Use a
 cursor for reading a Vec without removing its prefix. Borrowed slice chunks
-retain the slice's original lifetime and need not be `'static`.
+retain the slice's original lifetime and need not be `'static`. A lending
+`BytesMut` splits its spare capacity off and lends it as an empty buffer; a
+lending `Vec<u8>` lends its spare capacity as a `VecSpareCapacity`, which
+counts what is put into it and becomes part of the vector only when kept.
+Either way the fill cannot reach the bytes written before, and nothing is
+copied or zeroed.
 
 `&mut T` and `Box<T>` forward supported capabilities when `T: Unpin`.
 `Pin<P>` forwards when `P: DerefMut + Unpin`, without requiring its target to
@@ -130,11 +147,14 @@ The `bridge` module adapts external IO **into** nitori capabilities:
 - `bridge::Futures<T>` accepts the traits re-exported by `futures::io` with
   feature `futures`, depending only on `futures-io`.
 
-In the other direction, `bridge::ReadAccess<A>` wraps a receiver access inside
+In the other direction, `bridge::ReadAccess<A, M>` wraps a receiver access inside
 an operation and implements `tokio::io::AsyncRead` and `futures_io::AsyncRead`
 with the corresponding feature, so codecs written for those traits can run
 inside an operation. It reads through the access on each poll, buffers nothing,
-and converts the family's read errors into `std::io::Error`. Writing is not yet
+and converts the family's read errors into `std::io::Error`. The async reader
+traits carry no metadata, so it keeps the family's: `metadata()` is the
+metadata of every segment read, merged with `Combine`, and `take_metadata()`
+hands it over, for example once per decoded message. Writing is not yet
 adapted, since flush and close are not part of `Write`.
 
 The default feature is `std`, which adds the `bridge` module and the
@@ -155,14 +175,14 @@ explicit operations on the underlying object; dropping a bridge adds no flush.
 `adapters::Chunked<T>` adds copying `ReadChunk` to a host whose family implements `Read`, including a bridge,
 with an explicit nonzero chunk capacity. It caps each read by both that capacity
 and the requested maximum, retains empty allocated storage across Pending, and
-returns owned `Bytes` on success. A larger subsequent request replaces scratch
+returns owned `Bytes` on success, with the metadata of the read that filled it. A larger subsequent request replaces scratch
 storage if necessary instead of growing it geometrically beyond the limit. Ordinary Read and Write calls pass through to
 the same host. It does not prefetch, and cancellation cannot lose an unread tail.
 Allocation uses `BytesMut`'s infallible allocation policy; the allocator may round
 capacity up. Native chunk hosts do not need this adapter.
 
 ```rust
-use nitori_io::{adapters::Chunked, bridge::Std, PollReadExt};
+use nitori_io::{adapters::Chunked, bridge::Std, ChunkSegment, PollReadExt};
 use std::{io::Cursor, num::NonZeroUsize, pin::Pin, task::{Context, Poll, Waker}};
 
 let mut io = Chunked::new(
@@ -170,7 +190,7 @@ let mut io = Chunked::new(
     NonZeroUsize::new(1024).unwrap(),
 );
 let mut cx = Context::from_waker(Waker::noop());
-let Poll::Ready(Ok(Some(chunk))) = Pin::new(&mut io)
+let Poll::Ready(Ok(Some(ChunkSegment { chunk, .. }))) = Pin::new(&mut io)
     .poll_read_chunk(&mut cx, NonZeroUsize::new(3).unwrap())
 else { panic!("synchronous memory IO completes immediately") };
 assert_eq!(chunk, &b"hel"[..]);
@@ -223,7 +243,7 @@ what remains. A budget kept with a receiver,
 `nitori_call::ComposedReceiver::new(receiver, ReadLimit(n))`, bounds every
 call on that receiver together and outlives each of them. A read budget forwards the parent's read capabilities and can
 also report an exact length when the parent supplies one. A write budget
-forwards `Write`.
+forwards `Write` and `WriteLent`, lending at most what is left.
 
 `ReadLimit<L = usize>` stores a logical quota of type `L`. All unsigned
 integer widths and `Infinite` are supported. A single transfer is still
@@ -253,7 +273,7 @@ use nitori_io::{adapters::WriteLimit, calls::WriteAllError, prelude::*};
 
 /// Write `payload` only if it fits in `room` bytes; report what is left.
 #[call(sync)]
-async fn write_bounded<F: Write, A: ReceiverAccess<Family = F>>(
+async fn write_bounded<F: Write<Report = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     payload: &[u8],
     room: usize,
@@ -340,6 +360,122 @@ let mut reader = ComposedReceiver::new(Std::new(Cursor::new(b"abcdef")), ReadSki
 assert_eq!(reader.sync_skip_unpin(4u8).unwrap(), Some(4usize));
 ```
 
+## Metadata and reports
+
+Each `poll_read` reports one `ReadSegment { count, metadata }`: the bytes it
+put into the destination and the `Read::Metadata` they share, such as whether
+they arrived in 0-RTT. A segment has one metadata value, so a fill stops where
+the attributes of the source's bytes change, leaving the destination short;
+a chunk of `ReadChunk` likewise ends there, in a `ChunkSegment { chunk,
+metadata }`. Each `poll_write` reports one `WriteSegment { count, report }`,
+with what accepting the bytes produced as `Write::Report`. What the caller
+wants done with the bytes, such as send parameters, is not part of `Write`.
+`None` is no segment: EOF or no progress for reads, nothing accepted for
+writes.
+
+The associated types have no defaults. A host without attributes writes
+`type Metadata = ()` or `type Report = ()`, and an adapter that forwards a
+host names the host's types, so a forgotten forward fails to compile instead
+of dropping the attributes. The operations made of several segments return
+the segments' values merged with `Combine`, whose `Default` value is what
+no segments merge to; `()` implements it. The chunk sequences yield each
+`ChunkSegment` instead.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{Combine, calls::ReadExactError, prelude::*};
+
+/// Whether some bytes arrived early.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Early(bool);
+impl Combine for Early {
+    fn combine(self, next: Self) -> Self {
+        Early(self.0 || next.0)
+    }
+}
+
+/// A request's bytes and whether some of them arrived early.
+struct Received {
+    bytes: [u8; 4],
+    early: Early,
+}
+
+#[call(sync)]
+async fn request<F: Read<Metadata = Early>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<Received, ReadExactError<F::Error>> {
+    let mut bytes = [0; 4];
+    let early = io.read_exact(&mut bytes.as_mut_slice(), 4).await?;
+    Ok(Received { bytes, early })
+}
+```
+
+## Lending storage
+
+A sink that implements `WriteLent` lends its own storage, so a source can
+produce bytes straight into it. In one poll `poll_write_lent` grants between
+one and `wanted` bytes and calls the fill with a `&mut LentBuffer` that holds
+at most the granted count. The fill puts a prefix into `buffer()`, a
+`bytes::buf::Limit` it can pass to `Read::poll_read`, and returns its value,
+or gives up with its own error, which writes nothing. The sink then counts
+what it keeps from its own storage, not from what the fill reports, and
+answers a `LentOutcome`: `Kept(LentSegment { count, report, value })` with at
+least one byte, `NotKept(value)` when no byte was put or the loan was broken
+by bypassing the limit, or `GaveUp(error)`. `None` means the sink accepts no
+byte, like a full slice or a write budget at its boundary. The fill runs at
+most once per poll and not at all on `Pending`; it cannot await, so a source
+it reads from polls synchronously.
+
+A sink lends with `LentBuffer::new` on storage that has room for the grant,
+and takes the storage back with `into_storage` if it counts through it. A
+sink that lends also implements `Write`; neither is derived from the other.
+
+```rust
+use bytes::BufMut;
+use nitori_io::{LentOutcome, LentSegment, PollWriteExt};
+use std::{num::NonZeroUsize, pin::Pin, task::{Context, Poll, Waker}};
+
+let mut sink = bytes::BytesMut::new();
+let mut cx = Context::from_waker(Waker::noop());
+let Poll::Ready(Ok(Some(LentOutcome::Kept(LentSegment { count, .. })))) = Pin::new(&mut sink)
+    .poll_write_lent(&mut cx, NonZeroUsize::new(8).unwrap(), |lent| {
+        lent.buffer().put_slice(b"abc");
+        Ok::<_, !>(())
+    })
+else { panic!("a memory sink lends at once") };
+assert_eq!((count.get(), &sink[..]), (3, &b"abc"[..]));
+```
+
+## Copying
+
+Three operations copy from a source to a sink until the source ends, chosen by
+what the two implement, with no specialization:
+
+- `calls::copy_chunks(source, sink, chunk_maximum)` takes chunks from a
+  `ReadChunk` source and writes each completely; owned chunks such as `Bytes`
+  can reach the sink without a copy.
+- `calls::copy_into_lent(source, sink, chunk_maximum)` reads from a `Read`
+  source straight into the storage a `WriteLent` sink lends, in the same
+  poll. A source that has to wait gives the loan up, so cancellation loses
+  nothing. When the sink accepts no byte, one byte is read to tell the
+  source's end, which succeeds, from zero progress.
+- `calls::copy_buffered(source, sink, buffer)` reads into a buffer of the
+  caller's and writes it out, for a source and a sink with only `Read` and
+  `Write`. An empty buffer is an `InsufficientCapacityError` before any IO.
+
+Each returns a `CopyTotal { count, metadata, report }` with the count as a
+`u64` and the segments' metadata and reports merged with `Combine`. Their
+errors carry the bytes copied before the failure; a sink that accepts nothing
+is a `WriteZeroError<u64>`. To copy exactly `n` bytes, compose
+`ReadLimit(n)` on the source and compare the count with `n`. Dropping
+`copy_chunks` or `copy_buffered` while it writes loses the bytes it has taken
+from the source and the sink has not accepted, and so does a write failure or
+zero progress, which reports only the count.
+
+They take two accesses, so they are called as functions inside operations or
+through their `{Name}HostExt` on a pair of receivers.
+
 ## Splitting a buffer
 
 `SplitTo` cuts the first bytes of a buffer off as a piece of their own and
@@ -395,8 +531,8 @@ Array/numeric failures report progress but do not return the partial array.
 `write::Write` borrows its input cursor and advances it by the accepted count.
 `WriteAll` takes any `Buf` by value; pass `&mut buffer` to keep the cursor,
 which after a failure or cancellation holds the unaccepted tail. Its errors
-report the total accepted bytes. A nonempty successful zero write is a
-`WriteZeroError` failure. Accepted bytes do not imply flushing or remote delivery.
+report the total accepted bytes. A write that accepts nothing of nonempty input,
+`None`, is a `WriteZeroError` failure. Accepted bytes do not imply flushing or remote delivery.
 
 Derived operations retain progress across Pending. Dropping a call does not
 roll back earlier successful reads or writes. External borrowed cursors retain
@@ -405,18 +541,19 @@ dropped with their owner. Cancellation has no ordinary completion result.
 
 Empty basic Read/Write requests still reach the host, allowing terminal errors
 to take precedence. Zero-length Exact/Array/Chunks and an empty WriteAll complete
-locally without checking the host. ReadToEnd with zero destination capacity
+locally without checking the host, with the default metadata or report. ReadToEnd with zero destination capacity
 fails locally. Empty basic reads do not establish EOF.
 
 ## Chunks and conversion helpers
 
 Chunk sequences yield one nonempty bounded chunk per poll and never collect
 the whole sequence. Read an execution as a Stream to receive
-`ControlFlow::Continue(chunk)` for each chunk, then one `Break` with the final
+`ControlFlow::Continue(segment)` for each `ChunkSegment`, then one `Break` with the final
 value; awaiting it drops the chunks. Inside an operation, pin the child and
 await `child.as_mut().next()` to relay its chunks and observe its final value.
 
-`helpers::poll_read_from_chunk` copies a single bounded chunk into the destination.
+`helpers::poll_read_from_chunk` copies a single bounded chunk into the destination,
+reporting the chunk's metadata.
 The host must perform its terminal-error checks before delegating, especially
 for an empty destination. `helpers::poll_chunk_from_read` takes explicit
 `&mut Option<Storage>`, creation, and finalization arguments. It retains empty

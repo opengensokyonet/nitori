@@ -1,6 +1,9 @@
 //! Skipping built from reading: composition states that give a reader the
 //! [`Skip`] capability by reading and dropping what it reads.
-use crate::{ExactLen, Read, ReadChunk, Skip, Write};
+use crate::{
+    ChunkResult, ExactLen, LentBuffer, Read, ReadChunk, ReadResult, Skip, Write, WriteLent,
+    WriteLentResult, WriteResult,
+};
 use bytes::{Buf, BufMut};
 use core::{
     marker::PhantomData,
@@ -43,8 +46,8 @@ pub struct ReadChunkSkip;
 
 /// The family of a view of `F` composed with [`ReadSkip`] or
 /// [`ReadChunkSkip`] (`S`): its views are the views of `F` themselves. It
-/// forwards [`Read`], [`ReadChunk`], [`ExactLen`] and [`Write`] when `F` has
-/// them, and skips through `S`.
+/// forwards [`Read`], [`ReadChunk`], [`ExactLen`], [`Write`] and
+/// [`WriteLent`] when `F` has them, and skips through `S`.
 pub struct Skippable<F, S>(PhantomData<fn(F) -> F>, PhantomData<S>);
 
 impl<F: ReceiverFamily, S> ReceiverFamily for Skippable<F, S> {
@@ -72,11 +75,12 @@ skip_compose!(ReadSkip, ReadChunkSkip);
 
 impl<F: Read, S> Read for Skippable<F, S> {
     type Error = F::Error;
+    type Metadata = F::Metadata;
     fn poll_read<'v, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         destination: &mut O,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<ReadResult<Self>>
     where
         Self: 'v,
     {
@@ -89,7 +93,7 @@ impl<F: ReadChunk, S> ReadChunk for Skippable<F, S> {
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<Result<Option<F::Chunk>, Self::Error>>
+    ) -> Poll<ChunkResult<Self>>
     where
         Self: 'v,
     {
@@ -108,15 +112,32 @@ impl<F: ExactLen, S> ExactLen for Skippable<F, S> {
 
 impl<F: Write, S> Write for Skippable<F, S> {
     type Error = F::Error;
+    type Report = F::Report;
     fn poll_write<'v, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<usize, Self::Error>>
+    ) -> Poll<WriteResult<Self>>
     where
         Self: 'v,
     {
         F::poll_write(host, cx, input)
+    }
+}
+
+impl<F: WriteLent, S> WriteLent for Skippable<F, S> {
+    type Buffer<'l> = F::Buffer<'l>;
+    fn poll_write_lent<'v, T, A, Fill>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+        wanted: NonZeroUsize,
+        fill: Fill,
+    ) -> Poll<WriteLentResult<Self, T, A>>
+    where
+        Self: 'v,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>,
+    {
+        F::poll_write_lent(host, cx, wanted, fill)
     }
 }
 
@@ -133,7 +154,8 @@ impl<F: Read> Skip for Skippable<F, ReadSkip> {
     {
         let mut scratch = [0; SCRATCH_LEN];
         let allowed = crate::Min::min(maximum, SCRATCH_LEN);
-        let count = ready!(F::poll_read(host, cx, &mut &mut scratch[..allowed]))?;
+        let segment = ready!(F::poll_read(host, cx, &mut &mut scratch[..allowed]))?;
+        let count = segment.map_or(0, |segment| segment.count.get());
         assert!(count <= allowed, "read exceeded the requested capacity");
         // An empty read cannot report EOF; only a nonempty one can.
         Poll::Ready(Ok((allowed == 0 || count != 0).then_some(count)))
@@ -157,8 +179,8 @@ impl<F: ReadChunk> Skip for Skippable<F, ReadChunkSkip> {
             return Poll::Ready(Ok(Some(0)));
         };
         let chunk = ready!(F::poll_read_chunk(host, cx, allowed))?;
-        Poll::Ready(Ok(chunk.map(|chunk| {
-            let count = chunk.remaining();
+        Poll::Ready(Ok(chunk.map(|segment| {
+            let count = segment.chunk.remaining();
             assert!(
                 count > 0 && count <= allowed.get(),
                 "invalid read chunk length"

@@ -14,12 +14,12 @@ use std::{
 };
 
 #[call(sync)]
-async fn write_twice<F: Write, A: ReceiverAccess<Family = F>>(
+async fn write_twice<F: Write<Report: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     bytes: &[u8],
 ) -> Result<(), WriteAllError<F::Error>> {
     io.write_all(bytes).await?;
-    io.write_all(bytes).await
+    io.write_all(bytes).await.map(|_| ())
 }
 
 /// The family bounded in the where clause, with an anonymous access, calling
@@ -30,7 +30,7 @@ async fn write_four<F>(
     bytes: &[u8],
 ) -> Result<(), WriteAllError<F::Error>>
 where
-    F: Write,
+    F: Write<Report: nitori_io::Combine>,
 {
     write_twice(io, bytes).await?;
     io.write_twice(bytes).await
@@ -38,7 +38,7 @@ where
 
 /// An operation with a family bound calling one with a named family.
 #[call(sync)]
-async fn write_eight<A: ReceiverAccess<Family: Write>>(
+async fn write_eight<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
     io: &mut A,
     bytes: &[u8],
 ) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
@@ -61,7 +61,7 @@ async fn chunks<F: ReadChunk, A: ReceiverAccess<Family = F>>(
     let mut chunks = pin!(io.read_chunks_exact(length, NonZeroUsize::new(2).unwrap()));
     loop {
         match chunks.as_mut().step().await {
-            ControlFlow::Continue(chunk) => yield chunk,
+            ControlFlow::Continue(chunk) => yield chunk.chunk,
             ControlFlow::Break(result) => return result,
         }
     }
