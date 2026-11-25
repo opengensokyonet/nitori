@@ -11,36 +11,7 @@ use frunk_core::{
     traits::{ToMut, ToRef},
 };
 
-use super::{Child, ChildIndex, ChildList, ChildStorage, NodeKind, StoreOf};
-
-/// The share the part `Self` keeps in each node of the kind `K`: a list of
-/// components (`HNil` for none).
-pub trait Share<K> {
-    /// The components.
-    type Data: HList + 'static;
-    /// The reactions of the part at the nodes of this kind: a list of
-    /// [`ReactsTo`](crate::react::ReactsTo)`<point, reaction>`, none by
-    /// default.
-    type Reacts: 'static = HNil;
-    /// The kinds of the calls the part keeps at each node of this kind, an
-    /// `HList`; none by default. A new node's calls start after its
-    /// components are built, in the order of the parts, then in this order
-    /// ([`CallKind::start`](crate::call::CallKind::start)).
-    type Calls: HList + 'static = HNil;
-}
-
-/// The shares of a list of parts in a node of the kind `K`, one list per
-/// part, in the order of the parts.
-pub trait Shares<K>: 'static {
-    /// The list of the shares.
-    type Data: 'static;
-}
-impl<K> Shares<K> for HNil {
-    type Data = HNil;
-}
-impl<K, Pt: Share<K> + 'static, T: Shares<K>> Shares<K> for HCons<Pt, T> {
-    type Data = HCons<Pt::Data, T::Data>;
-}
+use super::{Child, ChildIndex, ChildList, ChildStorage, NodeKind, StoreOf, share::Shares};
 
 /// A kind whose nodes are built for the list of parts `P`: every part has
 /// a share in it and in every kind below it.

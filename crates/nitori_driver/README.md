@@ -15,9 +15,10 @@ and what each kind of node can be asked.
 
 - `structure`: node kinds declare their children (a kind and a storage
   kind each), what a new node starts from, why it ends, and the request it
-  handles. A kind is at one place of the structure only. Each part keeps a
-  share in each kind of node: components, the calls that run there, and
-  its reactions. Key addresses follow from the kinds alone.
+  handles. A kind is at one place of the structure only. Each part lists
+  a share (`Share`) for each kind of node it extends, in `Part::Shares`:
+  components, the calls that run there, and its reactions; in the other
+  kinds it keeps nothing. Key addresses follow from the kinds alone.
 - `need`: what is taken from the tree around a lend point, in terms of
   components: on the way up to the root (`Mut`, `Ref`), at every node of
   one kind below an anchor (`Under`), from another lend point (`At`, or a
@@ -52,8 +53,8 @@ and what each kind of node can be asked.
   `Driver::operate` lends at a node by key address from outside.
   Dropping the driver ends every node, the nodes below first; after a
   panic through it, no component's operation runs again.
-- `id`: the type-level numbers of components (`#[derive(Numbered)]`), by
-  which needs are checked.
+- `id`: the type-level numbers of components and node kinds
+  (`#[derive(Numbered)]`), by which needs are checked and shares found.
 
 The crate re-exports `frunk_core`, whose lists the structure, the needs and
 the views are made of.

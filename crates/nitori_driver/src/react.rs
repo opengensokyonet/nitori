@@ -4,8 +4,8 @@
 //! The part that defines an action defines its reaction point
 //! ([`ReactionPoint`]) and what it carries ([`ReactionPoint::Payload`]).
 //! A part that reacts lists, in its share of a kind of node, which
-//! reaction it has to which point ([`Share::Reacts`](crate::structure::Share::Reacts),
-//! a list of [`ReactsTo`]); a reaction ([`Reaction`]) is needs and what
+//! reaction it has to which point (the `Reacts` of its
+//! [`Share`](crate::structure::Share), a list of [`ReactsTo`]); a reaction ([`Reaction`]) is needs and what
 //! it does with their view and the payload. Points are told apart by
 //! their numbers, so a part that does not list a point does not react to
 //! it, and parts of crates that do not know each other compose.
@@ -132,7 +132,7 @@ pub trait Reaction<P: Point>: 'static {
     fn run<Q: Pos>(view: View<'_, Self::Needs, Q>, payload: P::Payload<'_>);
 }
 
-/// An item of [`Share::Reacts`](crate::structure::Share::Reacts): the
+/// An item of the `Reacts` of a [`Share`](crate::structure::Share): the
 /// reaction `R` to the point `P`.
 pub struct ReactsTo<P, R>(PhantomData<fn() -> (P, R)>);
 

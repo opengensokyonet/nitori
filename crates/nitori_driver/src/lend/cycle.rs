@@ -106,9 +106,9 @@ impl<Rt, Pt, S, P, W> NoCycle<Rt, Pt, S> for Reactions<P, W>
 where
     P: Point + NotIn<S>,
     Rt: AllKinds,
-    Pt: ListReactions<P, Rt::Kinds>,
-    <Pt as ListReactions<P, Rt::Kinds>>::Rs: ReactionNeeds<P>,
-    <<Pt as ListReactions<P, Rt::Kinds>>::Rs as ReactionNeeds<P>>::Needs:
+    Pt: ListReactions<P, Rt::Kinds, Pt>,
+    <Pt as ListReactions<P, Rt::Kinds, Pt>>::Rs: ReactionNeeds<P>,
+    <<Pt as ListReactions<P, Rt::Kinds, Pt>>::Rs as ReactionNeeds<P>>::Needs:
         NoCycle<Rt, Pt, HCons<P, S>>,
 {
 }

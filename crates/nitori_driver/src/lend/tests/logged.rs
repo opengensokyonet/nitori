@@ -7,6 +7,7 @@ use frunk_core::{HList, hlist, hlist_pat};
 
 use super::fixtures::{LinkId, lend};
 use crate::{
+    component::Part,
     id::Numbered,
     need::{Mut, Under},
     structure::{AtMostOne, Child, End, Node, NodeKind, Share, SlotVec, insert},
@@ -45,14 +46,13 @@ impl NodeKind for Conn {
     type Children = HList![Child<Link, SlotVec<LinkId>>];
 }
 struct Logs;
-impl Share<Conn> for Logs {
-    type Data = HList![Logged<Conn>];
-}
-impl Share<Link> for Logs {
-    type Data = HList![Logged<Link>];
-}
-impl Share<Rec> for Logs {
-    type Data = HList![Logged<Rec>, Logged<Link>];
+impl<L> Part<L> for Logs {
+    type Args = ();
+    type Shares = HList![
+        Share<Conn, HList![Logged<Conn>]>,
+        Share<Link, HList![Logged<Link>]>,
+        Share<Rec, HList![Logged<Rec>, Logged<Link>]>,
+    ];
 }
 type Parts = HList![Logs];
 

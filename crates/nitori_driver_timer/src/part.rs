@@ -2,14 +2,9 @@
 
 use core::marker::PhantomData;
 
-use nitori_clock::MonotonicClock;
 use nitori_driver::{
     call::{ClockOf, Composition, PriorityOf, RootOf},
-    frunk_core::{
-        HList,
-        hlist::{HList as HListTrait, HNil},
-    },
-    id::{False, NumberEq, Numbered, True},
+    frunk_core::HList,
     structure::Share,
 };
 
@@ -23,37 +18,17 @@ use crate::{FireTimers, TimerCallPriority, TimerTable};
 /// ([`TimerCallPriority`]).
 pub struct Part<Q>(PhantomData<fn() -> Q>);
 
-impl<L, Q> nitori_driver::component::Part<L> for Part<Q> {
-    type Args = ();
-}
-
-impl<K, Q> Share<K> for Part<Q>
+impl<L, Q> nitori_driver::component::Part<L> for Part<Q>
 where
-    Q: Composition<Root: Numbered>,
-    K: Numbered,
-    K::Number: NumberEq<<RootOf<Q> as Numbered>::Number, Out: AtRoot<ClockOf<Q>, PriorityOf<Q>>>,
+    Q: Composition,
+    PriorityOf<Q>: TimerCallPriority,
 {
-    type Data = <IsRoot<K, Q> as AtRoot<ClockOf<Q>, PriorityOf<Q>>>::Data;
-    type Calls = <IsRoot<K, Q> as AtRoot<ClockOf<Q>, PriorityOf<Q>>>::Calls;
-}
-
-/// Whether the kind `K` is the root of `Q`: [`True`] or [`False`].
-type IsRoot<K, Q> = <<K as Numbered>::Number as NumberEq<<RootOf<Q> as Numbered>::Number>>::Out;
-
-/// What [`Part`] keeps at a kind, by whether it is the root. Not for use
-/// otherwise.
-#[doc(hidden)]
-pub trait AtRoot<C, P> {
-    /// The components.
-    type Data: HListTrait + 'static;
-    /// The calls.
-    type Calls: HListTrait + 'static;
-}
-impl<C: MonotonicClock + 'static, P: TimerCallPriority> AtRoot<C, P> for True {
-    type Data = HList![TimerTable<C, P>];
-    type Calls = HList![FireTimers<C, P>];
-}
-impl<C, P> AtRoot<C, P> for False {
-    type Data = HNil;
-    type Calls = HNil;
+    type Args = ();
+    type Shares = HList![
+        Share<
+            RootOf<Q>,
+            HList![TimerTable<ClockOf<Q>, PriorityOf<Q>>],
+            HList![FireTimers<ClockOf<Q>, PriorityOf<Q>>],
+        >
+    ];
 }

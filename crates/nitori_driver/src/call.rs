@@ -19,7 +19,7 @@
 //! A composition ([`Composition`], written with
 //! [`composition!`](crate::composition!)) names a root kind, a list of
 //! parts, a clock and a priority. The calls come from the parts' shares
-//! ([`Share::Calls`](crate::structure::Share::Calls)), kind by kind; every
+//! (the `Calls` of a [`Share`](crate::structure::Share)), kind by kind; every
 //! call, every component's operations, every kind's build and the
 //! driver's reaction points are proved once, where it is written, into
 //! the opaque [`Composition::Pack`], through which the driver lends them.
@@ -59,13 +59,10 @@
 //! struct Counter;
 //! impl<L> Part<L> for Counter {
 //!     type Args = ();
-//! }
-//! impl Share<Root> for Counter {
-//!     type Data = HList![Total];
-//!     type Calls = HList![Counting];
-//! }
-//! impl Share<Item> for Counter {
-//!     type Data = HList![Count];
+//!     type Shares = HList![
+//!         Share<Root, HList![Total], HList![Counting]>,
+//!         Share<Item, HList![Count]>,
+//!     ];
 //! }
 //! struct Q;
 //! composition!(impl for Q: Root, HList![Counter], StillClock, u8);

@@ -8,6 +8,7 @@
 //! needs on it.
 use crate::{
     capability::Capability,
+    component::Part,
     frunk_core::{HList, hlist_pat},
     id::Numbered,
     need::{At, Cap, Locator, Mut, OneOrNone, Pos, Ref, Under, View},
@@ -41,21 +42,25 @@ pub struct PathKey(pub u32);
 pub struct LinkId(pub u32);
 
 /// The connection, the root.
+#[derive(Numbered)]
 pub struct Conn;
 impl NodeKind for Conn {
     type Children = HList![Child<LogicalPath, SlotVec<PathKey>>];
 }
 /// A logical path.
+#[derive(Numbered)]
 pub struct LogicalPath;
 impl NodeKind for LogicalPath {
     type Children = HList![Child<LinkPath, SlotVec<LinkId>>];
 }
 /// A link path.
+#[derive(Numbered)]
 pub struct LinkPath;
 impl NodeKind for LinkPath {
     type Children = HList![Child<Recovery, AtMostOne>];
 }
 /// A link path's recovery.
+#[derive(Numbered)]
 pub struct Recovery;
 impl NodeKind for Recovery {
     type Children = HList![];
@@ -63,24 +68,24 @@ impl NodeKind for Recovery {
 
 /// The one part.
 pub struct V1;
-impl Share<Conn> for V1 {
-    type Data = HList![ConnCore, Label];
-    type Reacts = HList![
-        ReactsTo<Echo, Repeat>,
-        ReactsTo<Tick, TickToTock>,
-        ReactsTo<Tock, TockToTick>,
-        ReactsTo<Loop, LoopBack>,
+impl<L> Part<L> for V1 {
+    type Args = ();
+    type Shares = HList![
+        Share<
+            Conn,
+            HList![ConnCore, Label],
+            HList![],
+            HList![
+                ReactsTo<Echo, Repeat>,
+                ReactsTo<Tick, TickToTock>,
+                ReactsTo<Tock, TockToTick>,
+                ReactsTo<Loop, LoopBack>,
+            ],
+        >,
+        Share<LogicalPath, HList![SentRecords]>,
+        Share<LinkPath, HList![LinkCore, Planner, Label], HList![], HList![ReactsTo<Sent, CountSent>]>,
+        Share<Recovery, HList![Congestion]>,
     ];
-}
-impl Share<LogicalPath> for V1 {
-    type Data = HList![SentRecords];
-}
-impl Share<LinkPath> for V1 {
-    type Data = HList![LinkCore, Planner, Label];
-    type Reacts = HList![ReactsTo<Sent, CountSent>];
-}
-impl Share<Recovery> for V1 {
-    type Data = HList![Congestion];
 }
 /// The parts.
 pub type Parts = HList![V1];

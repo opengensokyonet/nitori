@@ -7,9 +7,11 @@
 //! structure is a tree of kinds with one root. A kind may not be its own
 //! child or descendant, and is at one place of the structure only.
 //!
-//! What a node holds comes from the parts: each part keeps a share
-//! ([`Share`]) in each kind of node, and a node's data is the list of the
-//! parts' shares ([`KindFor::Data`]). The parts do not enter the structure:
+//! What a node holds comes from the parts: each part lists a share
+//! ([`Share`]) for each kind of node it extends
+//! ([`Part::Shares`](crate::component::Part::Shares)) and keeps nothing in
+//! the other kinds; a node's data is the list of the parts' shares
+//! ([`KindFor::Data`]). The parts do not enter the structure:
 //! a typed path ([`Step`], [`End`]) and an address ([`Address`]) follow from
 //! the kinds alone, whatever the parts are.
 mod address;
@@ -17,6 +19,7 @@ mod edit;
 mod kind;
 mod node;
 mod path;
+mod share;
 mod storage;
 
 pub(crate) use address::resolve_ident;
@@ -29,8 +32,10 @@ pub use kind::{
     NoStore, NodeKind, StorageAt,
 };
 pub(crate) use node::NodeIdent;
-pub use node::{ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node, Share, Shares};
+pub use node::{ChildAt, ChildStores, FlatMut, FlatRef, KindFor, Node};
 pub use path::{
     Append, End, FromAddress, KeyedPath, NodePath, ParentPath, PathFrom, SplitLast, Step,
 };
+pub use share::Share;
+pub(crate) use share::{ShareAt, Shares};
 pub use storage::{AtMostOne, ChildStorage, Occupied, SlotVec, SlotVecStore, Store, StoreOf};

@@ -46,12 +46,15 @@ pub struct LossArgs {
 pub struct WatchArgs;
 impl<L> Part<L> for Core {
     type Args = CoreArgs;
+    type Shares = CoreShares;
 }
 impl<L> Part<L> for Loss {
     type Args = LossArgs;
+    type Shares = LossShares;
 }
 impl<L> Part<L> for Watch {
     type Args = WatchArgs;
+    type Shares = WatchShares;
 }
 /// What a link core reads of one part's arguments.
 pub trait WindowArgs {

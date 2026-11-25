@@ -69,9 +69,7 @@
 //! struct Base;
 //! impl<L> Part<L> for Base {
 //!     type Args = ();
-//! }
-//! impl Share<Conn> for Base {
-//!     type Data = HList![Idle];
+//!     type Shares = HList![Share<Conn, HList![Idle]>];
 //! }
 //!
 //! struct Q;
@@ -102,8 +100,6 @@ mod part;
 mod table;
 
 pub use fire::{FireTimers, TimerCallPriority};
-#[doc(hidden)]
-pub use part::AtRoot;
 pub use part::Part;
 pub use table::TimerTable;
 #[doc(hidden)]

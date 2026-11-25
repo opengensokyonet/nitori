@@ -29,11 +29,28 @@ use crate::{
 pub struct Watch;
 impl<L> Part<L> for Watch {
     type Args = ();
+    type Shares = HList![
+        Share<
+            Top,
+            HList![],
+            HList![],
+            HList![ReactsTo<NodeStarted<Leaf>, LeafStarted>, ReactsTo<NodeEnding<Leaf>, LeafEnding>],
+        >,
+        Share<
+            Leaf,
+            HList![],
+            HList![],
+            HList![ReactsTo<NodeStarted<Twig>, TwigStarted>, ReactsTo<NodeEnding<Twig>, TwigEnding>],
+        >,
+    ];
 }
 /// Notes the top added, and ends it.
 pub struct Quit;
 impl<L> Part<L> for Quit {
     type Args = ();
+    type Shares = HList![
+        Share<Top, HList![], HList![], HList![ReactsTo<NodeStarted<Top>, EndTopAtStart>]>,
+    ];
 }
 
 /// At the top, to a leaf added.
@@ -81,34 +98,6 @@ impl Reaction<NodeStarted<Top>> for EndTopAtStart {
         note("started top".into());
         tops.push(NodeRequest::new(KeyAddress::here(), TopAsk::EndSelf));
     }
-}
-
-impl Share<Top> for Watch {
-    type Data = HList![];
-    type Reacts = HList![
-        ReactsTo<NodeStarted<Leaf>, LeafStarted>,
-        ReactsTo<NodeEnding<Leaf>, LeafEnding>,
-    ];
-}
-impl Share<Leaf> for Watch {
-    type Data = HList![];
-    type Reacts = HList![
-        ReactsTo<NodeStarted<Twig>, TwigStarted>,
-        ReactsTo<NodeEnding<Twig>, TwigEnding>,
-    ];
-}
-impl Share<Twig> for Watch {
-    type Data = HList![];
-}
-impl Share<Top> for Quit {
-    type Data = HList![];
-    type Reacts = HList![ReactsTo<NodeStarted<Top>, EndTopAtStart>];
-}
-impl Share<Leaf> for Quit {
-    type Data = HList![];
-}
-impl Share<Twig> for Quit {
-    type Data = HList![];
 }
 
 /// The fixture's structure with `Watch` beside its part.

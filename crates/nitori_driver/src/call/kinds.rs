@@ -14,7 +14,7 @@ use crate::{
         tree::{InKid, IsSelf, KHead, KTail},
     },
     request::NodeRequest,
-    structure::{Child, KeyRoute, NodeKind, Share},
+    structure::{Child, KeyRoute, NodeKind, ShareAt},
 };
 
 // ------------------------------------------------------------------ where a kind is
@@ -149,16 +149,17 @@ impl<H, T: ListRest> ListRest for HCons<H, T> {
     type Rest = T;
 }
 
-/// The calls of a list of parts `Self` at the kind `K`: every part's
-/// [`Share::Calls`], in the order of the parts.
-pub trait PartsCalls<K> {
+/// The calls of a list of parts `Self` of the composition of the parts
+/// `L` at the kind `K`: every part's calls there, in the order of the
+/// parts.
+pub trait PartsCalls<K, L> {
     /// The kinds of calls.
     type Calls: HList + ListRest;
 }
-impl<K> PartsCalls<K> for HNil {
+impl<K, L> PartsCalls<K, L> for HNil {
     type Calls = HNil;
 }
-impl<K, O: Share<K>, Os: PartsCalls<K>> PartsCalls<K> for HCons<O, Os>
+impl<K, L, O: ShareAt<K, L>, Os: PartsCalls<K, L>> PartsCalls<K, L> for HCons<O, Os>
 where
     O::Calls: Add<Os::Calls, Output: HList + ListRest>,
 {
@@ -178,16 +179,18 @@ impl<O> InPart<O> for HNil {
 impl<O, C, T: InPart<O>> InPart<O> for HCons<C, T> {
     type Out = HCons<Comp<O, C>, T::Out>;
 }
-/// The components of a list of parts `Self` at the kind `K`, each as a
-/// [`Comp`], in the order of the parts.
-pub trait PartsComps<K> {
+/// The components of a list of parts `Self` of the composition of the
+/// parts `L` at the kind `K`, each as a [`Comp`], in the order of the
+/// parts.
+pub trait PartsComps<K, L> {
     /// The components.
     type Comps: HList + ListRest;
 }
-impl<K> PartsComps<K> for HNil {
+impl<K, L> PartsComps<K, L> for HNil {
     type Comps = HNil;
 }
-impl<K, O: Share<K, Data: InPart<O>>, Os: PartsComps<K>> PartsComps<K> for HCons<O, Os>
+impl<K, L, O: ShareAt<K, L, Data: InPart<O>>, Os: PartsComps<K, L>> PartsComps<K, L>
+    for HCons<O, Os>
 where
     <O::Data as InPart<O>>::Out: Add<Os::Comps, Output: HList + ListRest>,
 {

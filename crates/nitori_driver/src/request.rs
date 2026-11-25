@@ -96,9 +96,7 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// struct One;
 /// impl<L> Part<L> for One {
 ///     type Args = ();
-/// }
-/// impl Share<Top> for One {
-///     type Data = HList![Total];
+///     type Shares = HList![Share<Top, HList![Total]>];
 /// }
 /// struct Q;
 /// composition!(impl for Q: Top, HList![One], StillClock, u8);
@@ -139,9 +137,7 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// # struct One;
 /// # impl<L> Part<L> for One {
 /// #     type Args = ();
-/// # }
-/// # impl Share<Top> for One {
-/// #     type Data = HList![Total];
+/// #     type Shares = HList![Share<Top, HList![Total]>];
 /// # }
 /// struct Q;
 /// composition!(impl for Q: Top, HList![One], StillClock, u16);

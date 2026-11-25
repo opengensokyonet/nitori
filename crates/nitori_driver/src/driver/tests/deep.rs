@@ -84,18 +84,7 @@ impl<L: PartList<L>> Component<Deep, L, Bud> for Mark {
 pub struct Deep;
 impl<L> Part<L> for Deep {
     type Args = ();
-}
-impl Share<Root> for Deep {
-    type Data = HList![];
-}
-impl Share<Mid> for Deep {
-    type Data = HList![];
-}
-impl Share<Arm> for Deep {
-    type Data = HList![];
-}
-impl Share<Bud> for Deep {
-    type Data = HList![Mark];
+    type Shares = HList![Share<Bud, HList![Mark]>];
 }
 
 pub struct QD;

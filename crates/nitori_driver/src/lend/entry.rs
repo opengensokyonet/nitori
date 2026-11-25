@@ -25,7 +25,7 @@ use crate::{
     id::Numbered,
     need::{EmptyPos, Need, Pos, View},
     react::{AboveLendPoint, NodeEnding, NodeStarted, Reactions, WithLendPoint},
-    structure::{KindFor, Node, NodeKind, Share},
+    structure::{KindFor, Node, NodeKind, ShareAt},
 };
 
 // ------------------------------------------------------------------ lending
@@ -255,7 +255,7 @@ where
     R: KindFor<Pt>,
     Pt: PartList<Pt>,
     K: NodeKind,
-    O: Share<K>,
+    O: ShareAt<K, Pt>,
     O::Data: BuildComps<R, Pt, K, IK, X, Fk, O, PO>,
     Os: BuildShares<R, Pt, K, IK, X, Fk, PT>,
 {
@@ -366,7 +366,7 @@ impl<R: NodeKind, Pt: PartList<Pt>> BuildRootShares<R, Pt> for HNil {
 }
 impl<R: NodeKind, Pt: PartList<Pt>, O, Os> BuildRootShares<R, Pt> for HCons<O, Os>
 where
-    O: Share<R>,
+    O: ShareAt<R, Pt>,
     O::Data: BuildRootComps<R, Pt, O>,
     Os: BuildRootShares<R, Pt>,
 {

@@ -204,12 +204,7 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
 pub struct Run;
 impl<L> nitori_driver::component::Part<L> for Run {
     type Args = ();
-}
-impl Share<Top> for Run {
-    type Data = HList![];
-}
-impl Share<Leaf> for Run {
-    type Data = HList![Alarm];
+    type Shares = HList![Share<Leaf, HList![Alarm]>];
 }
 
 /// A waker that counts its wakes.

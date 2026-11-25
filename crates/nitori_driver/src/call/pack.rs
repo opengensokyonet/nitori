@@ -103,15 +103,15 @@ where
     RootOf<Q>: FindKind<K> + Locate<K, FoundIl<Q, K>>,
     PointCx<RootOf<Q>, PartsOf<Q>, K, FoundIl<Q, K>, ContextOf<Q>>: Ctx,
     FoundIl<Q, K>: NewAtOf<Q, K, PointFk<RootOf<Q>, PartsOf<Q>, K, FoundIl<Q, K>, ContextOf<Q>>>,
-    PartsOf<Q>: PartsCalls<K> + PartsComps<K>,
+    PartsOf<Q>: PartsCalls<K, PartsOf<Q>> + PartsComps<K, PartsOf<Q>>,
 {
     type Kind = K;
     type Il = FoundIl<Q, K>;
     type Fk = PointFk<RootOf<Q>, PartsOf<Q>, K, FoundIl<Q, K>, ContextOf<Q>>;
     type NewAt = <FoundIl<Q, K> as NewAt<Q, K>>::Out;
     type Data = <K as KindFor<PartsOf<Q>>>::Data;
-    type Calls = <PartsOf<Q> as PartsCalls<K>>::Calls;
-    type Comps = <PartsOf<Q> as PartsComps<K>>::Comps;
+    type Calls = <PartsOf<Q> as PartsCalls<K, PartsOf<Q>>>::Calls;
+    type Comps = <PartsOf<Q> as PartsComps<K, PartsOf<Q>>>::Comps;
     fn new_at(fk: &Self::Fk) -> Self::NewAt {
         <FoundIl<Q, K> as NewAtOf<Q, K, Self::Fk>>::new_at(fk)
     }

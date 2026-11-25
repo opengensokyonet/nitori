@@ -20,7 +20,7 @@ use crate::{
     id::{False, NumberEq, Numbered, True},
     need::Pos,
     react::{AboveLendPoint, LentReactions, Point, Reaction, Reactions, ReactsTo, WithLendPoint},
-    structure::{Child, NodeKind, Share},
+    structure::{Child, NodeKind, ShareAt},
 };
 
 // ------------------------------------------------------------------ the kinds
@@ -123,34 +123,38 @@ where
     type Out = <<Q::Number as NumberEq<P::Number>>::Out as Keep<R, T::Out>>::Out;
 }
 
-/// The reactions to `P` of the part `Self` in the kinds `Ks`, the kinds in
-/// order.
-pub trait PartReactions<P, Ks> {
+/// The reactions to `P` of the part `Self` of the composition of the parts
+/// `L` in the kinds `Ks`, the kinds in order.
+pub trait PartReactions<P, Ks, L> {
     /// The reactions.
     type Rs;
 }
-impl<O, P> PartReactions<P, HNil> for O {
+impl<O, P, L> PartReactions<P, HNil, L> for O {
     type Rs = HNil;
 }
-impl<O: Share<K> + PartReactions<P, Ks>, P, K, Ks> PartReactions<P, HCons<K, Ks>> for O
+impl<O, P, K, Ks, L> PartReactions<P, HCons<K, Ks>, L> for O
 where
+    O: ShareAt<K, L> + PartReactions<P, Ks, L>,
     O::Reacts: Filter<P>,
-    <O::Reacts as Filter<P>>::Out: Append<<O as PartReactions<P, Ks>>::Rs>,
+    <O::Reacts as Filter<P>>::Out: Append<<O as PartReactions<P, Ks, L>>::Rs>,
 {
-    type Rs = <<O::Reacts as Filter<P>>::Out as Append<<O as PartReactions<P, Ks>>::Rs>>::Out;
+    type Rs = <<O::Reacts as Filter<P>>::Out as Append<<O as PartReactions<P, Ks, L>>::Rs>>::Out;
 }
 
-/// The reactions to `P` of the parts `Self` in the kinds `Ks`: the parts
-/// in order, and within a part the kinds.
-pub trait ListReactions<P, Ks> {
+/// The reactions to `P` of the parts `Self` of the composition of the
+/// parts `L` in the kinds `Ks`: the parts in order, and within a part the
+/// kinds.
+pub trait ListReactions<P, Ks, L> {
     /// The reactions.
     type Rs;
 }
-impl<P, Ks> ListReactions<P, Ks> for HNil {
+impl<P, Ks, L> ListReactions<P, Ks, L> for HNil {
     type Rs = HNil;
 }
-impl<P, Ks, O: PartReactions<P, Ks>, Os: ListReactions<P, Ks>> ListReactions<P, Ks> for HCons<O, Os>
+impl<P, Ks, L, O, Os> ListReactions<P, Ks, L> for HCons<O, Os>
 where
+    O: PartReactions<P, Ks, L>,
+    Os: ListReactions<P, Ks, L>,
     O::Rs: Append<Os::Rs>,
 {
     type Rs = <O::Rs as Append<Os::Rs>>::Out;
@@ -169,8 +173,11 @@ impl<P: Point, R: Reaction<P>, T: ReactionNeeds<P>> ReactionNeeds<P> for HCons<R
 }
 
 /// The reactions to `P` lent at `C` from the kinds `W` picks.
-pub type RsAt<C, P, W> =
-    <<C as Ctx>::Parts as ListReactions<P, <W as ReactionKinds<<C as Ctx>::Chain>>::Kinds>>::Rs;
+pub type RsAt<C, P, W> = <<C as Ctx>::Parts as ListReactions<
+    P,
+    <W as ReactionKinds<<C as Ctx>::Chain>>::Kinds,
+    <C as Ctx>::Parts,
+>>::Rs;
 /// Their needs.
 pub type NeedsAt<C, P, W> = <RsAt<C, P, W> as ReactionNeeds<P>>::Needs;
 
@@ -215,7 +222,7 @@ where
     F: Clone + PartialEq + 'static,
     P: Point,
     W: ReactionKinds<C::Chain>,
-    C::Parts: ListReactions<P, W::Kinds>,
+    C::Parts: ListReactions<P, W::Kinds, C::Parts>,
     RsAt<C, P, W>: ReactionNeeds<P> + RunAll<C, P, Ps, U>,
     NeedsAt<C, P, W>: CatCols<C, Ps>,
     <NeedsAt<C, P, W> as CatCols<C, Ps>>::Cat: Dedup<Out = U>,
@@ -236,7 +243,7 @@ impl<C: Ctx, P, W, Ps, U, F> Check<C, PlusPos<Ps, U, F>> for Reactions<P, W>
 where
     P: Point,
     W: ReactionKinds<C::Chain>,
-    C::Parts: ListReactions<P, W::Kinds>,
+    C::Parts: ListReactions<P, W::Kinds, C::Parts>,
     RsAt<C, P, W>: ReactionNeeds<P>,
     NeedsAt<C, P, W>: CheckBranches<C, Ps> + DisjointBranches<C, Ps>,
 {
@@ -245,7 +252,7 @@ impl<C: Ctx, P, W, Ps, U, F> Takes<C, PlusPos<Ps, U, F>> for Reactions<P, W>
 where
     P: Point,
     W: ReactionKinds<C::Chain>,
-    C::Parts: ListReactions<P, W::Kinds>,
+    C::Parts: ListReactions<P, W::Kinds, C::Parts>,
     RsAt<C, P, W>: ReactionNeeds<P>,
     NeedsAt<C, P, W>: TakesBranches<C, Ps>,
     <NeedsAt<C, P, W> as TakesBranches<C, Ps>>::Touches: OneEach,

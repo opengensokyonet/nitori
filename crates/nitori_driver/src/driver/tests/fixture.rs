@@ -238,17 +238,11 @@ pub struct Hub;
 pub struct Run;
 impl<L> Part<L> for Run {
     type Args = ();
-}
-impl Share<Top> for Run {
-    type Data = HList![Hub];
-}
-impl Share<Leaf> for Run {
-    type Data = HList![Ctl];
-    type Calls = HList![Script];
-}
-impl Share<Twig> for Run {
-    type Data = HList![Tip];
-    type Calls = HList![Tidy];
+    type Shares = HList![
+        Share<Top, HList![Hub]>,
+        Share<Leaf, HList![Ctl], HList![Script]>,
+        Share<Twig, HList![Tip], HList![Tidy]>,
+    ];
 }
 
 /// A twig's component: its number, and whether its call ends it.

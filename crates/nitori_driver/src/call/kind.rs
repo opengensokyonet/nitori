@@ -57,13 +57,10 @@ use crate::{
 /// struct Counter;
 /// impl<L> Part<L> for Counter {
 ///     type Args = ();
-/// }
-/// impl Share<Root> for Counter {
-///     type Data = HList![Total];
-///     type Calls = HList![Counting];
-/// }
-/// impl Share<Item> for Counter {
-///     type Data = HList![Count];
+///     type Shares = HList![
+///         Share<Root, HList![Total], HList![Counting]>,
+///         Share<Item, HList![Count]>,
+///     ];
 /// }
 /// struct Q;
 /// composition!(impl for Q: Root, HList![Counter], StillClock, u8);

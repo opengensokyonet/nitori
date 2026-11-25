@@ -137,76 +137,42 @@ type LossAtConnReacts = HList![
     ReactsTo<Probe, LossAtConn>,
 ];
 
-impl Share<Conn1> for Core {
-    type Data = HList![ConnCore, Keys];
-    type Reacts = CoreAtConnReacts;
-}
-impl Share<Conn1> for Loss {
-    type Data = HList![RecoveryFactory];
-    type Reacts = LossAtConnReacts;
-}
-impl Share<Conn2> for Core {
-    type Data = HList![ConnCore, Keys];
-    type Reacts = CoreAtConnReacts;
-}
-impl Share<Conn2> for Loss {
-    type Data = HList![SentRecords, RecoveryFactory];
-    type Reacts = LossAtConnReacts;
-}
-impl Share<Entry> for Core {
-    type Data = HList![Credit, LinkLimit];
-}
-impl Share<Entry> for Loss {
-    type Data = HList![];
-}
-impl Share<LogicalPath> for Core {
-    type Data = HList![];
-}
-impl Share<LogicalPath> for Loss {
-    type Data = HList![SentRecords];
-}
-impl Share<LinkPath> for Core {
-    type Data = HList![LinkCore, Planner];
-    type Calls = crate::call::tests::CoreLinkCalls;
-    type Reacts = HList![
-        ReactsTo<PacketsSent, RA1>,
-        ReactsTo<P1, RC1>,
-        ReactsTo<Probe, CoreAtLink>,
-        ReactsTo<NodeStarted<LinkPath>, StartedAtLink>,
-        ReactsTo<NodeEnding<LinkPath>, EndingAtLink>,
-        ReactsTo<Pinged, PingIt>,
-    ];
-}
-impl Share<LinkPath> for Loss {
-    type Data = HList![];
-    type Calls = crate::call::tests::LossLinkCalls;
-    type Reacts = HList![ReactsTo<Probe, LossAtLink>, ReactsTo<Survey, SurveyAtLink>];
-}
-impl Share<Recovery> for Core {
-    type Data = HList![];
-}
-impl Share<Recovery> for Loss {
-    type Data = HList![Congestion];
-}
-impl Share<Conn1> for Watch {
-    type Data = HList![];
-}
-impl Share<Conn2> for Watch {
-    type Data = HList![];
-}
-impl Share<Entry> for Watch {
-    type Data = HList![];
-}
-impl Share<LogicalPath> for Watch {
-    type Data = HList![];
-}
-impl Share<LinkPath> for Watch {
-    type Data = HList![Held<Rtt>];
-    type Reacts = HList![ReactsTo<Unrelated, RZ>];
-}
-impl Share<Recovery> for Watch {
-    type Data = HList![];
-}
+/// The shares of the core part.
+pub type CoreShares = HList![
+    Share<Conn1, HList![ConnCore, Keys], HList![], CoreAtConnReacts>,
+    Share<Conn2, HList![ConnCore, Keys], HList![], CoreAtConnReacts>,
+    Share<Entry, HList![Credit, LinkLimit]>,
+    Share<
+        LinkPath,
+        HList![LinkCore, Planner],
+        crate::call::tests::CoreLinkCalls,
+        HList![
+            ReactsTo<PacketsSent, RA1>,
+            ReactsTo<P1, RC1>,
+            ReactsTo<Probe, CoreAtLink>,
+            ReactsTo<NodeStarted<LinkPath>, StartedAtLink>,
+            ReactsTo<NodeEnding<LinkPath>, EndingAtLink>,
+            ReactsTo<Pinged, PingIt>,
+        ],
+    >,
+];
+/// The shares of the loss part.
+pub type LossShares = HList![
+    Share<Conn1, HList![RecoveryFactory], HList![], LossAtConnReacts>,
+    Share<Conn2, HList![SentRecords, RecoveryFactory], HList![], LossAtConnReacts>,
+    Share<LogicalPath, HList![SentRecords]>,
+    Share<
+        LinkPath,
+        HList![],
+        crate::call::tests::LossLinkCalls,
+        HList![ReactsTo<Probe, LossAtLink>, ReactsTo<Survey, SurveyAtLink>],
+    >,
+    Share<Recovery, HList![Congestion]>,
+];
+/// The shares of the watch.
+pub type WatchShares = HList![
+    Share<LinkPath, HList![Held<Rtt>], HList![], HList![ReactsTo<Unrelated, RZ>]>,
+];
 
 fn entry(l: u32) -> Node<Entry, Parts> {
     Node::new(hlist![

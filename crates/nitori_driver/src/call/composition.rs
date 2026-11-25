@@ -165,7 +165,8 @@ pub(crate) fn set_now<Q: Composition>(
 /// Write a composition: `composition!(impl for Q: Root, Parts, Clock,
 /// Priority)`.
 ///
-/// The calls come from the parts' shares ([`Share::Calls`](crate::structure::Share::Calls));
+/// The calls come from the parts' shares (the `Calls` of a
+/// [`Share`](crate::structure::Share));
 /// every call, every component's operations, every kind's build and the
 /// driver's reaction points are proved where it is written, once, and
 /// what the compiler infers goes into the opaque
@@ -210,13 +211,10 @@ pub(crate) fn set_now<Q: Composition>(
 /// struct Counter;
 /// impl<L> Part<L> for Counter {
 ///     type Args = ();
-/// }
-/// impl Share<Root> for Counter {
-///     type Data = HList![Total];
-///     type Calls = HList![Counting];
-/// }
-/// impl Share<Item> for Counter {
-///     type Data = HList![Count];
+///     type Shares = HList![
+///         Share<Root, HList![Total], HList![Counting]>,
+///         Share<Item, HList![Count]>,
+///     ];
 /// }
 /// struct Q;
 /// composition!(impl for Q: Root, HList![Counter], StillClock, u8);
@@ -258,21 +256,69 @@ pub(crate) fn set_now<Q: Composition>(
 /// struct One;
 /// impl<L> Part<L> for One {
 ///     type Args = ();
-/// }
-/// impl Share<Top> for One {
-///     type Data = HList![Total];
-/// }
-/// impl Share<Left> for One {
-///     type Data = HList![];
-/// }
-/// impl Share<Right> for One {
-///     type Data = HList![];
-/// }
-/// impl Share<Leaf> for One {
-///     type Data = HList![Count];
+///     type Shares = HList![
+///         Share<Top, HList![Total]>,
+///         Share<Leaf, HList![Count]>,
+///     ];
 /// }
 /// struct Q;
 /// composition!(impl for Q: Top, HList![One], StillClock, u8);
+/// ```
+///
+/// A share at a kind the structure does not have is left out, so that
+/// one part can be composed in structures of different kinds; here
+/// `Elsewhere` is not below `Root`, and its share is not kept anywhere:
+///
+/// ```
+/// #![feature(impl_trait_in_assoc_type)]
+/// use nitori_driver::{
+///     __private::calls::{Count, Item, Root, StillClock, Total},
+///     component::Part,
+///     composition,
+///     frunk_core::HList,
+///     id::Numbered,
+///     structure::{NodeKind, Share},
+/// };
+/// #[derive(Numbered)]
+/// struct Elsewhere;
+/// impl NodeKind for Elsewhere {
+///     type Children = HList![];
+/// }
+/// struct Counter;
+/// impl<L> Part<L> for Counter {
+///     type Args = ();
+///     type Shares = HList![
+///         Share<Root, HList![Total]>,
+///         Share<Item, HList![Count]>,
+///         Share<Elsewhere, HList![]>,
+///     ];
+/// }
+/// struct Q;
+/// composition!(impl for Q: Root, HList![Counter], StillClock, u8);
+/// ```
+///
+/// A part that lists two shares at one kind:
+///
+/// ```compile_fail,E0277
+/// #![feature(impl_trait_in_assoc_type)]
+/// use nitori_driver::{
+///     __private::calls::{Count, Item, Root, StillClock, Total},
+///     component::Part,
+///     composition,
+///     frunk_core::HList,
+///     structure::Share,
+/// };
+/// struct Counter;
+/// impl<L> Part<L> for Counter {
+///     type Args = ();
+///     type Shares = HList![
+///         Share<Root, HList![Total]>,
+///         Share<Item, HList![Count]>,
+///         Share<Root, HList![]>,
+///     ];
+/// }
+/// struct Q;
+/// composition!(impl for Q: Root, HList![Counter], StillClock, u8);
 /// ```
 ///
 /// Written out by hand, the composition is refused the same way, by the
@@ -312,18 +358,10 @@ pub(crate) fn set_now<Q: Composition>(
 /// # struct One;
 /// # impl<L> Part<L> for One {
 /// #     type Args = ();
-/// # }
-/// # impl Share<Top> for One {
-/// #     type Data = HList![Total];
-/// # }
-/// # impl Share<Left> for One {
-/// #     type Data = HList![];
-/// # }
-/// # impl Share<Right> for One {
-/// #     type Data = HList![];
-/// # }
-/// # impl Share<Leaf> for One {
-/// #     type Data = HList![Count];
+/// #     type Shares = HList![
+/// #         Share<Top, HList![Total]>,
+/// #         Share<Leaf, HList![Count]>,
+/// #     ];
 /// # }
 /// use nitori_driver::call::{
 ///     Composition, KindsOf, RootNode,
