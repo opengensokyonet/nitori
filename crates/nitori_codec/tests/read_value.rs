@@ -90,17 +90,13 @@ fn a_base_value_is_read_with_the_metadata_of_its_bytes() {
 /// The payload of a frame decoded in stages: the source it is read from and
 /// what is left of it.
 struct Payload<S> {
-    io: S,
-    left: ReadLimit<u64>,
+    io: Composed<S, ReadLimit<u64>>,
 }
 impl<S: AsAccess<Family: Read>> AsAccess for &mut Payload<S> {
     type Family = Limited<Lent<S::Family>, ReadLimit<u64>>;
-    type Access<'a>
-        = Composed<S::Access<'a>, &'a mut ReadLimit<u64>>
-    where
-        Self: 'a;
-    fn access(&mut self) -> Self::Access<'_> {
-        Composed::new(self.io.access(), &mut self.left)
+    type Access = Composed<S, ReadLimit<u64>>;
+    fn access(&mut self) -> &mut Self::Access {
+        &mut self.io
     }
 }
 
@@ -128,8 +124,7 @@ where
             kind,
             length,
             payload: Payload {
-                io,
-                left: ReadLimit(u64::from(left)),
+                io: Composed::new(io, ReadLimit(u64::from(left))),
             },
         })
     }

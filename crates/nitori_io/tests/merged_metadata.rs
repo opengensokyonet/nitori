@@ -220,10 +220,7 @@ struct Holder<A> {
 }
 impl<A: ReceiverAccess> AsAccess for Holder<A> {
     type Family = A::Family;
-    type Access<'a>
-        = &'a mut A
-    where
-        Self: 'a;
+    type Access = A;
     fn access(&mut self) -> &mut A {
         &mut self.io
     }

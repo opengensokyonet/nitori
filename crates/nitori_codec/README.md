@@ -14,9 +14,10 @@ crate implements them for its own values over any source it supports.
 
 Sources and sinks are usually `nitori_call::AsAccess` values: every access
 is one, and so is a type of the caller's that lends an access, such as a
-payload that composes what is left of it on the stream it keeps. The
+payload that keeps its stream composed with what is left of it. The
 implementations in this crate are for every `S: AsAccess` whose family has
-the capabilities they need.
+the capabilities they need. Decoding from a borrowed source, as
+`io.decode::<V>()` does, is `Send` when the source is.
 
 Inside an operation, `Decode` and `Encode` turn the traits around into
 methods of an access: `io.decode::<V>()` and `io.encode(value)`, which

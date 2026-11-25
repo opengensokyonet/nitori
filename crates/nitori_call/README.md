@@ -452,7 +452,10 @@ state. The state must be `Unpin`; pass `pin!(state)` otherwise. `into_state`
 recovers it and ends the borrow. `Composed` holds its parent by value, so
 `Composed::new(io, state)` adapts an access passed in by value, such as the `I`
 of a function `fn(io: I) -> Composed<I, S>` that wraps the access it is given;
-`into_parts` returns the parent and the state. `Compose::compose` takes the parent view by
+`into_parts` returns the parent and the state, and `parent_mut` and
+`state_mut` reach them between accesses. The parent can also be any
+`AsAccess` source (below), so a type that keeps a source and the state keeps
+them as one `Composed`. `Compose::compose` takes the parent view by
 value. On an access the parent view is only borrowed for that access, so the
 state composes on `Lent<F>`, whose view is a `ViewLoan<'view, F>` that hides
 the parent view's inner lifetime: `loan.with(|access| ..)` lends it back for
@@ -557,13 +560,14 @@ Its view is always at hand: an access never waits for it, and a release point
 completes at once. The receiver must be `Unpin`; pin one that is not with
 `pin!` or `Box::pin` and hold the pinned pointer.
 
-Such a type can also stand for the access it holds. `AsAccess` lends an
-access for one borrow, by value, so that the type can compose it from the
-parts it keeps, such as `Composed::new(&mut self.io, &mut self.left)` for a
-payload that keeps how much of the stream is left for it; its `Family` is
-the same for every borrow. Every access lends itself, so code written for
-`S: AsAccess` takes accesses and such types alike, as the values of
-`nitori_codec` decode from any of them.
+Such a type can also stand for the access it holds. `AsAccess` lends the
+access the type keeps, as `&mut`; a type that adapts its stream keeps the
+adapted access, such as a payload that keeps `Composed<S, ReadLimit<u64>>`,
+its stream with how much of it is left. The access is a type of the value,
+not of each borrow, so a future that holds a lent access of a borrowed
+source is `Send` whenever the source is. Every access lends itself, so code
+written for `S: AsAccess` takes accesses and such types alike, as the values
+of `nitori_codec` decode from any of them.
 
 ## Calls
 

@@ -148,28 +148,26 @@ impl<F: crate::ExactLen, M> crate::ExactLen for Merging<F, M> {
 }
 
 /// A source that merges into a [`MergedMetadata`] the metadata of what is
-/// read through it: each access it lends is one of `source` composed with
-/// the state. It stands for any [`AsAccess`] source, an access or a type
+/// read through it: the access it lends is the one `source` lends, composed
+/// with the state. It stands for any [`AsAccess`] source, an access or a type
 /// that lends one, so a value that reads only from sources without metadata
 /// can be decoded from one with it.
 #[derive(Debug)]
-pub struct MergingSource<'x, S, M> {
-    source: &'x mut S,
-    merged: &'x mut MergedMetadata<M>,
+pub struct MergingSource<'x, S: AsAccess, M> {
+    access: Composed<&'x mut S::Access, &'x mut MergedMetadata<M>>,
 }
-impl<'x, S, M> MergingSource<'x, S, M> {
+impl<'x, S: AsAccess, M> MergingSource<'x, S, M> {
     /// Read from `source`, merging the metadata into `merged`.
     pub fn new(source: &'x mut S, merged: &'x mut MergedMetadata<M>) -> Self {
-        Self { source, merged }
+        Self {
+            access: Composed::new(source.access(), merged),
+        }
     }
 }
-impl<S: AsAccess, M: Unpin> AsAccess for MergingSource<'_, S, M> {
+impl<'x, S: AsAccess, M: Unpin> AsAccess for MergingSource<'x, S, M> {
     type Family = Merging<Lent<S::Family>, M>;
-    type Access<'a>
-        = Composed<S::Access<'a>, &'a mut MergedMetadata<M>>
-    where
-        Self: 'a;
-    fn access(&mut self) -> Self::Access<'_> {
-        Composed::new(self.source.access(), &mut *self.merged)
+    type Access = Composed<&'x mut S::Access, &'x mut MergedMetadata<M>>;
+    fn access(&mut self) -> &mut Self::Access {
+        &mut self.access
     }
 }

@@ -420,8 +420,8 @@ length pass through; skipping reports no metadata, so that of skipped bytes
 does not reach the state. Kept with a receiver in
 a `ComposedReceiver`, the state merges every call on it.
 `adapters::MergingSource` does the same for any `nitori_call::AsAccess`
-source, an access or a type that lends one, composing the state on each
-access it lends.
+source, an access or a type that lends one, composing the state on the
+access the source lends.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
