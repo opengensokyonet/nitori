@@ -53,9 +53,12 @@ pub trait Composition: 'static + Sized {
     /// that does not know the family, or a whole list of them spliced in;
     /// none by default. A part whose contribution to a family is here and
     /// in its own [`Contributions`](crate::component::Part::Contributions)
-    /// as well, or twice here, does not compile, nor does an item naming a
-    /// part the composition does not have. See
-    /// [`capability`](crate::capability).
+    /// as well, or twice in one of the two lists (the lists spliced in
+    /// counted), does not compile where the composition is written,
+    /// whether or not a need takes the family, nor does an item naming a
+    /// part the composition does not have. When the list is not empty,
+    /// every part of the composition is `#[derive(Numbered)]`: the parts
+    /// are found by their numbers. See [`capability`](crate::capability).
     type Contributions: 'static = HNil;
     /// What the driver keeps of the nodes of every kind: the tables of
     /// [`Pack`](Composition::Pack), opaque too. Named apart from the pack

@@ -112,6 +112,10 @@ impl<F, Q, O: ContributionTo<F, Q>, T: PartPieces<F, Q>> PartPieces<F, Q> for HC
 /// family `F`: the one written in its own list or in the composition's,
 /// or `()`.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the piece of the part `{Self}` for the family `{F}` is not found in `{Q}`",
+    note = "a part's piece is found by the numbers of the part and the family: the family is `#[derive(Numbered)]`, and, when the composition's own list of contributions is not empty, so is every part of the composition"
+)]
 pub trait ContributionTo<F, Q> {
     /// The contribution.
     type Contribution: Contribute<F>;
@@ -272,28 +276,88 @@ impl<O, F, C: Contribute<F>> Settle<O, F, Listed<C>> for Unlisted {
 }
 
 /// Every item of a composition's list `Self` names one of its parts
-/// `Parts`, by number; the lists spliced in too.
+/// `Parts`, by number, and is the one place the piece of that part for
+/// that family is written: not in the part's own list as well, nor twice
+/// in `All`, the composition's whole list; the lists spliced in too.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a list of contributions",
-    note = "a composition's `Contributions` lists `PartContribution<O, F, C>`, or whole lists of them, spliced in"
+    note = "a composition's `Contributions` lists `PartContribution<O, F, C>`, or whole lists of them, spliced in",
+    note = "the parts and the families are found by their numbers: when the list is not empty, every part of the composition, and every family it lists, is `#[derive(Numbered)]`"
 )]
-pub trait ListedKnown<Parts> {}
-impl<Parts> ListedKnown<Parts> for HNil {}
-impl<Parts, O, F, C, T> ListedKnown<Parts> for HCons<PartContribution<O, F, C>, T>
+pub trait ListedKnown<Parts, All> {}
+impl<Parts, All> ListedKnown<Parts, All> for HNil {}
+impl<Parts, All, O, F, C, T> ListedKnown<Parts, All> for HCons<PartContribution<O, F, C>, T>
 where
     Parts: AnyIs<O>,
-    <Parts as AnyIs<O>>::Out: PartOfComposition<O>,
-    T: ListedKnown<Parts>,
+    <Parts as AnyIs<O>>::Out: PartOfComposition<O> + ListedOnce<O, F, Parts, All>,
+    T: ListedKnown<Parts, All>,
 {
 }
-impl<Parts, H, HT, T> ListedKnown<Parts> for HCons<HCons<H, HT>, T>
+impl<Parts, All, H, HT, T> ListedKnown<Parts, All> for HCons<HCons<H, HT>, T>
 where
-    HCons<H, HT>: ListedKnown<Parts>,
-    T: ListedKnown<Parts>,
+    HCons<H, HT>: ListedKnown<Parts, All>,
+    T: ListedKnown<Parts, All>,
 {
 }
-impl<Parts, T: ListedKnown<Parts>> ListedKnown<Parts> for HCons<HNil, T> {}
+impl<Parts, All, T: ListedKnown<Parts, All>> ListedKnown<Parts, All> for HCons<HNil, T> {}
+
+/// The piece of the part `O` for the family `F`, listed in the
+/// composition's whole list `All`, is written there once and not in the
+/// part's own list: checked when `O` is one of the parts `Parts` (`Self`
+/// is [`True`]); when it is not, [`PartOfComposition`] says so.
+#[doc(hidden)]
+pub trait ListedOnce<O, F, Parts, All> {}
+impl<O, F, Parts, All> ListedOnce<O, F, Parts, All> for True
+where
+    O: Part<Parts>,
+    O::Contributions: FindOwn<F>,
+    All: FindListed<O, F>,
+    <O::Contributions as FindOwn<F>>::Out: WrittenOnce<O, F, <All as FindListed<O, F>>::Out>,
+{
+}
+impl<O, F, Parts, All> ListedOnce<O, F, Parts, All> for False {}
+
+/// Every part of the list `Self`, in a composition of the parts `Parts`,
+/// lists each family once in its own list.
+#[doc(hidden)]
+pub trait OwnListedOnce<Parts> {}
+impl<Parts> OwnListedOnce<Parts> for HNil {}
+impl<Parts, O, Os> OwnListedOnce<Parts> for HCons<O, Os>
+where
+    O: Part<Parts>,
+    O::Contributions: OwnOnce<O, O::Contributions>,
+    Os: OwnListedOnce<Parts>,
+{
+}
+/// Every family of the items `Self` of the part `O`'s own list `All` is
+/// in `All` once.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a list of contributions of the part `{O}`",
+    note = "a part's `Contributions` lists `Contribution<F, C>`, one per family; every family it lists is `#[derive(Numbered)]`"
+)]
+pub trait OwnOnce<O, All> {}
+impl<O, All> OwnOnce<O, All> for HNil {}
+impl<O, All, G, C, T> OwnOnce<O, All> for HCons<Contribution<G, C>, T>
+where
+    All: FindOwn<G>,
+    <All as FindOwn<G>>::Out: WrittenOnce<O, G, Unlisted>,
+    T: OwnOnce<O, All>,
+{
+}
+
+/// What the part's own list found (`Self`) and what the composition's
+/// found (`G`) are one item between them: checked where the composition
+/// is written, whether or not a need takes the family.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the piece of the part `{O}` for the family `{F}` is written in more than one place",
+    note = "a part's contribution to a family is written once: in the part's own `Contributions` or in the composition's, not both, and once in each list, the lists spliced into the composition's counted"
+)]
+pub trait WrittenOnce<O, F, G> {}
+impl<O, F, C> WrittenOnce<O, F, Listed<C>> for Unlisted {}
+impl<O, F, C> WrittenOnce<O, F, Unlisted> for Listed<C> {}
 /// The part `O` a composition's list names is one of its parts: [`True`]
 /// only.
 #[doc(hidden)]

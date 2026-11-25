@@ -22,12 +22,16 @@
 //! for a part that does not know the family. The crate of a family may
 //! export a list of these for the parts it knows, which the composition
 //! puts in its own list as one item, spliced in. The part and the family
-//! are found by their numbers: a family is `#[derive(Numbered)]`, and so
-//! is a part that the composition's list names. A part that writes nothing
+//! are found by their numbers: a family is `#[derive(Numbered)]`, and,
+//! when the composition's list is not empty, so is every part of the
+//! composition, not only those the list names (as every part is when a
+//! component finds another's arguments with
+//! [`part_args`](crate::component::part_args)). A part that writes nothing
 //! for the family, in either place, contributes `()`, with no needs. A
 //! contribution written in both places, or twice in one list (the lists
-//! spliced in counted), does not compile, and neither does a composition's
-//! list that names a part the composition does not have.
+//! spliced in counted), does not compile where the composition is written,
+//! whether or not a need takes the family, and neither does a
+//! composition's list that names a part the composition does not have.
 //!
 //! The pieces are lined up in the order of the parts, as an `HList`
 //! ([`PiecesOf`]); the family writes its rule on that list once. Two rules
@@ -110,13 +114,14 @@
 //! }
 //! ```
 //!
-//! The counter's contribution written in the composition's list as well:
+//! The counter's contribution written in the composition's list as well,
+//! though no need takes the family:
 //!
 //! ```compile_fail,E0277
 //! # #![feature(impl_trait_in_assoc_type)]
 //! # use nitori_driver::{
 //! #     __private::calls::{Count, Item, Root, StillClock, Total},
-//! #     capability::{Contribute, Contribution, PartContribution, PiecesOf},
+//! #     capability::{Contribute, Contribution, PartContribution},
 //! #     component::Part,
 //! #     composition,
 //! #     frunk_core::{HList, hlist_pat},
@@ -147,7 +152,122 @@
 //!     impl for Q: Root, HList![Counter], StillClock, u8,
 //!     HList![PartContribution<Counter, Tally, TotalTally>],
 //! );
-//! fn count(_: PiecesOf<'_, Q, Tally>) {}
+//! ```
+//!
+//! Written twice in the composition's list:
+//!
+//! ```compile_fail,E0277
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_driver::{
+//! #     __private::calls::{Count, Item, Root, StillClock, Total},
+//! #     capability::{Contribute, Contribution, PartContribution},
+//! #     component::Part,
+//! #     composition,
+//! #     frunk_core::{HList, hlist_pat},
+//! #     id::Numbered,
+//! #     need::{Pos, Ref, View},
+//! #     structure::Share,
+//! # };
+//! # #[derive(Numbered)]
+//! # struct Tally;
+//! # struct TotalTally;
+//! # impl Contribute<Tally> for TotalTally {
+//! #     type Needs = HList![Ref<Total>];
+//! #     type Piece<'t> = &'t Total;
+//! #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Total {
+//! #         let hlist_pat![total] = view;
+//! #         total
+//! #     }
+//! # }
+//! # #[derive(Numbered)]
+//! # struct Counter;
+//! # impl<L> Part<L> for Counter {
+//! #     type Args = ();
+//! #     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+//! # }
+//! struct Q;
+//! composition!(
+//!     impl for Q: Root, HList![Counter], StillClock, u8,
+//!     HList![
+//!         PartContribution<Counter, Tally, TotalTally>,
+//!         PartContribution<Counter, Tally, TotalTally>,
+//!     ],
+//! );
+//! ```
+//!
+//! Written twice in the part's own list:
+//!
+//! ```compile_fail,E0277
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_driver::{
+//! #     __private::calls::{Count, Item, Root, StillClock, Total},
+//! #     capability::{Contribute, Contribution, PartContribution},
+//! #     component::Part,
+//! #     composition,
+//! #     frunk_core::{HList, hlist_pat},
+//! #     id::Numbered,
+//! #     need::{Pos, Ref, View},
+//! #     structure::Share,
+//! # };
+//! # #[derive(Numbered)]
+//! # struct Tally;
+//! # struct TotalTally;
+//! # impl Contribute<Tally> for TotalTally {
+//! #     type Needs = HList![Ref<Total>];
+//! #     type Piece<'t> = &'t Total;
+//! #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Total {
+//! #         let hlist_pat![total] = view;
+//! #         total
+//! #     }
+//! # }
+//! # #[derive(Numbered)]
+//! # struct Counter;
+//! # impl<L> Part<L> for Counter {
+//! #     type Args = ();
+//! #     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+//! #     type Contributions = HList![Contribution<Tally, TotalTally>, Contribution<Tally, TotalTally>];
+//! # }
+//! struct Q;
+//! composition!(impl for Q: Root, HList![Counter], StillClock, u8);
+//! ```
+//!
+//! Written in a list spliced in and again beside it:
+//!
+//! ```compile_fail,E0277
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_driver::{
+//! #     __private::calls::{Count, Item, Root, StillClock, Total},
+//! #     capability::{Contribute, Contribution, PartContribution},
+//! #     component::Part,
+//! #     composition,
+//! #     frunk_core::{HList, hlist_pat},
+//! #     id::Numbered,
+//! #     need::{Pos, Ref, View},
+//! #     structure::Share,
+//! # };
+//! # #[derive(Numbered)]
+//! # struct Tally;
+//! # struct TotalTally;
+//! # impl Contribute<Tally> for TotalTally {
+//! #     type Needs = HList![Ref<Total>];
+//! #     type Piece<'t> = &'t Total;
+//! #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Total {
+//! #         let hlist_pat![total] = view;
+//! #         total
+//! #     }
+//! # }
+//! # #[derive(Numbered)]
+//! # struct Counter;
+//! # impl<L> Part<L> for Counter {
+//! #     type Args = ();
+//! #     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+//! # }
+//! type TallyOfCounter = HList![PartContribution<Counter, Tally, TotalTally>];
+//! struct Q;
+//! composition!(
+//!     impl for Q: Root, HList![Counter], StillClock, u8,
+//!     HList![TallyOfCounter, PartContribution<Counter, Tally, TotalTally>],
+//! );
 //! ```
 //!
 //! A composition's list that names a part the composition does not have:
@@ -320,6 +440,68 @@ pub trait Capability: 'static {
 /// them. The view does not depend on where it is lent. The pieces' needs
 /// are taken around the lend point and proved with the other needs; lent
 /// in a structure whose parts are not those of `Q`, it does not compile.
+///
+/// A call of the composition `Q` taking the pieces of another, `Q2`,
+/// whose parts are not `Q`'s:
+///
+/// ```compile_fail,E0277
+/// # #![feature(impl_trait_in_assoc_type)]
+/// # use nitori_call::{LentAccess, call};
+/// # use nitori_driver::{
+/// #     __private::calls::{Root, StillClock, Total},
+/// #     call::{CallFamily, CallKind, Composition, LoanNeeds},
+/// #     capability::{Contribute, Contributed, Contribution},
+/// #     component::Part,
+/// #     composition,
+/// #     frunk_core::{HList, hlist_pat},
+/// #     id::Numbered,
+/// #     need::{Pos, Ref, View},
+/// #     structure::{NodeKind, Share},
+/// # };
+/// # #[derive(Numbered)]
+/// # struct Tally;
+/// # struct TotalTally;
+/// # impl Contribute<Tally> for TotalTally {
+/// #     type Needs = HList![Ref<Total>];
+/// #     type Piece<'t> = &'t Total;
+/// #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Total {
+/// #         let hlist_pat![total] = view;
+/// #         total
+/// #     }
+/// # }
+/// # #[derive(Numbered)]
+/// # struct Counter;
+/// # impl<L> Part<L> for Counter {
+/// #     type Args = ();
+/// #     type Shares = HList![Share<Root, HList![Total]>];
+/// #     type Contributions = HList![Contribution<Tally, TotalTally>];
+/// # }
+/// # #[derive(Numbered)]
+/// # struct Audit;
+/// # impl<L> Part<L> for Audit {
+/// #     type Args = ();
+/// # }
+/// impl<Q: Composition, K: NodeKind> CallKind<Q, K> for Counting {
+///     type Needs = HList![Contributed<Tally, Q2>];
+///     type Op = Self;
+///     fn start(_: &mut K::Start) -> Self {
+///         Counting::new()
+///     }
+/// }
+/// #[call]
+/// async fn counting<W: CallFamily<C = Counting>>(host: &mut impl LentAccess<Family = W>) {
+///     host.with(|_| ());
+/// }
+/// struct Calls;
+/// impl<L> Part<L> for Calls {
+///     type Args = ();
+///     type Shares = HList![Share<Root, HList![], HList![Counting]>];
+/// }
+/// struct Q2;
+/// composition!(impl for Q2: Root, HList![Counter, Audit], StillClock, u8);
+/// struct Q;
+/// composition!(impl for Q: Root, HList![Counter, Calls], StillClock, u8);
+/// ```
 pub struct Contributed<F, Q>(PhantomData<fn() -> (F, Q)>);
 impl<F: 'static, Q: PieceList<F>> Need for Contributed<F, Q> {
     type View<'t, P: Pos> = Q::Pieces<'t>;

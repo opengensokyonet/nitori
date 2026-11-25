@@ -180,14 +180,23 @@ use crate::{
 
 /// The construction arguments of the part `Self` in a composition of the
 /// parts `L`; their type may depend on the whole list.
+///
+/// A part needs no number of its own unless it is looked for by one: when
+/// the composition's own list of contributions
+/// ([`Composition::Contributions`](crate::call::Composition::Contributions))
+/// is not empty, or a component finds a part's arguments with
+/// [`part_args`], every part of the composition is
+/// `#[derive(Numbered)]` ([`Numbered`]), not only the one looked for.
 pub trait Part<L> {
     /// The arguments.
     type Args;
     /// The shares of this part in the kinds of nodes it extends, one
     /// [`Share`](crate::structure::Share) per kind; none by default. On a
     /// kind it does not list, the part keeps nothing: no components, no
-    /// calls and no reactions. A share at a kind the structure it is
-    /// composed in does not have is left out, not refused.
+    /// calls and no reactions. A kind of the structure listed twice does
+    /// not compile; the shares at a kind the structure it is composed in
+    /// does not have are left out, not refused, and not checked for being
+    /// listed twice.
     type Shares = HNil;
     /// The part's contributions to the families of contributed
     /// capabilities, one [`Contribution`](crate::capability::Contribution)
@@ -215,7 +224,9 @@ pub type ArgsOf<L> = <L as PartList<L>>::Args;
 /// The arguments of the part `O` in `args`, those of every part of the
 /// list `L`, found by the part's number; `None` when `L` does not have
 /// `O`. What a component's [`build`](Component::build) reads another
-/// part's arguments with; its own it is handed.
+/// part's arguments with; its own it is handed. Every part of `L`, and
+/// `O`, is `#[derive(Numbered)]` ([`Numbered`]), whichever part is
+/// looked for and wherever it is in the list.
 pub fn part_args<O, L>(args: &ArgsOf<L>) -> Option<&<O as Part<L>>::Args>
 where
     O: Part<L>,

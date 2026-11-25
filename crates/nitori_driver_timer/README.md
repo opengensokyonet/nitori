@@ -19,6 +19,10 @@ own list of parts:
 composition!(impl for Conn: ConnRoot, HList![v1::Part, nitori_driver_timer::Part<Conn>], SysClock, ConnPriority);
 ```
 
+The part has a type-level number, the same whatever `Q` is, so that the
+composition can have its own list of contributions and its components can
+find other parts' arguments with `part_args`; `Q` needs no number.
+
 It is a package of its own, not part of `nitori_clock`: `nitori_driver`
 depends on `nitori_clock`, and the table is a `nitori_driver` component.
 The default `std` feature turns on `nitori_driver`'s, so that a driver

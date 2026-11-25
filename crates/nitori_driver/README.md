@@ -32,7 +32,8 @@ and what each kind of node can be asked.
 - `component`: a component's operations, `build` when its node is added,
   `wake` when its waker is woken and `end` when the node ends, each lent
   its own needs; `build` is handed its part's construction arguments, and
-  finds another part's with `part_args`.
+  finds another part's with `part_args`, by the parts' numbers, so that
+  every part of the composition then has one.
 - `capability` and `react`: capabilities put together from needs, or
   contributed by the parts, each part's contribution to a family listed
   in the part or in the composition; reaction points that the other parts react
@@ -58,8 +59,11 @@ and what each kind of node can be asked.
   `Driver::operate` lends at a node by key address from outside.
   Dropping the driver ends every node, the nodes below first; after a
   panic through it, no component's operation runs again.
-- `id`: the type-level numbers of components and node kinds
-  (`#[derive(Numbered)]`), by which needs are checked and shares found.
+- `id`: the type-level numbers (`#[derive(Numbered)]`) of components,
+  node kinds and families of contributed capabilities, by which needs are
+  checked and shares and contributions found. Every part of a composition
+  has one too when the composition has its own list of contributions, or
+  a component finds another part's arguments with `part_args`.
 
 The crate re-exports `frunk_core`, whose lists the structure, the needs and
 the views are made of.

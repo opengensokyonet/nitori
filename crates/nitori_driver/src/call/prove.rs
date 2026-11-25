@@ -25,7 +25,7 @@ use super::{
     pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindList, KindOps, PackList, SlotPoll},
 };
 use crate::{
-    capability::contribution::ListedKnown,
+    capability::contribution::{ListedKnown, OwnListedOnce},
     component::{ArgsOf, Component, EndCause, Part},
     driver::{ChildOpsList, ChildPos, Core, Edit, FkPlace, HandlerAt},
     id::{NumberValue, Numbered, number_of},
@@ -96,10 +96,13 @@ where
 }
 /// The pack of the kinds `L` of `Q`; [`composition!`](crate::composition!)
 /// defines the opaque pack with it. Every item of the composition's list of
-/// contributions names one of its parts.
+/// contributions names one of its parts, and every part's piece for a
+/// family is written once or not at all, whether or not a need takes the
+/// family.
 pub fn prove<Q: Composition, L: Prove<Q, I> + KindsOnce, I>() -> PhantomData<L::Out>
 where
-    Q::Contributions: ListedKnown<PartsOf<Q>>,
+    Q::Contributions: ListedKnown<PartsOf<Q>, Q::Contributions>,
+    PartsOf<Q>: OwnListedOnce<PartsOf<Q>>,
 {
     PhantomData
 }

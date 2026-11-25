@@ -24,10 +24,12 @@ use crate::{
 ///   default.
 ///
 /// The kind is found by its number ([`Numbered`]): a kind of a part's
-/// list is `#[derive(Numbered)]`. A part that lists one kind twice does
-/// not compile. A share at a kind the structure does not have is left out,
-/// not refused, so that one part can be composed in structures of
-/// different kinds: listing a kind of another structure by mistake keeps
+/// list is `#[derive(Numbered)]`. A part that lists a kind of the
+/// structure twice does not compile. A share at a kind the structure does
+/// not have is left out, not refused, and such a kind listed twice is not
+/// checked either: every item at it is left out. So one part can be
+/// composed in structures of different kinds; listing a kind of another
+/// structure by mistake keeps
 /// that share nowhere, which a need taking one of its components then
 /// fails to find, while its calls and reactions are just not there.
 #[allow(clippy::type_complexity)]

@@ -233,6 +233,12 @@ type LossSpliced = HList![
     LossExported,
     PartContribution<Loss, Counts, CountsOfLoss>,
 ];
+/// The same, spliced in two lists deep, beside empty ones.
+type LossDeep = HList![
+    HList![HList![], HList![LossExported]],
+    HList![],
+    PartContribution<Loss, Counts, CountsOfLoss>,
+];
 
 /// What the two families did at link 1 of `$root`, whose full key is
 /// `$at`, under the composition `$q`: the count, each frame's answer, and
@@ -289,6 +295,9 @@ fn contributed() {
     );
     let mut root = tree_two();
     let two = contributions!(&mut root, hlist![LinkId(1)], Listing<LossSpliced>);
+    let mut root = tree_two();
+    let deep = contributions!(&mut root, hlist![LinkId(1)], Listing<LossDeep>);
+    assert_eq!(deep, (Some(10), Some((6, 1, 7)), Some(81)));
     // Before: (0 + 1) * 10 and no record; after: the link counted 7 and
     // one record.
     same_on_both(one, two, (Some(10), Some((6, 1, 7)), Some(81)));

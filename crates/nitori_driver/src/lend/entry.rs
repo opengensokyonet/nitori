@@ -18,9 +18,13 @@ use super::{
     plan::Run,
     table::{KidRoute, KindTab, TabAt},
     this::This,
-    tree::{Ctx, Locate},
+    tree::{Ctx, InKid, IsSelf, Locate},
 };
 use crate::{
+    call::{
+        __pack::{Desc, KindDesc},
+        Composition, ContextOf, PartsOf, RootOf,
+    },
     component::{ArgsOf, Component, EndCause, Part, PartList},
     id::Numbered,
     need::{EmptyPos, Need, Pos, View},
@@ -456,6 +460,78 @@ where
     <EndingReactions<K> as Lends<R, Pt, K, IK, X, P>>::lend_to(root, at, cx, |mut reactions| {
         reactions.fire(())
     })
+}
+
+/// Where the build needs `N` of a component of a new node of the kind
+/// `L` are lent, the way down to it from the root `R` being `Self`, for
+/// the parts `Pt`, with the context `X`: below the root, `N` at the new
+/// node, from the nodes above it, as [`LendsNew`] lends them; at the root,
+/// nothing, `N` having to be none.
+pub(crate) trait BuildSite<R, Pt, L, X, N> {
+    /// What is lent from the nodes above.
+    type Needs;
+    /// The context they are proved in.
+    type Cx: Ctx;
+    /// What has to be none, since nothing is above the root.
+    type AtRoot;
+}
+impl<R, Pt: 'static, L, X, N> BuildSite<R, Pt, L, X, N> for IsSelf
+where
+    R: KindFor<Pt> + NodeKind + Locate<L, IsSelf>,
+    PointCx<R, Pt, L, IsSelf, X>: Ctx,
+{
+    type Needs = HNil;
+    type Cx = PointCx<R, Pt, L, IsSelf, X>;
+    type AtRoot = N;
+}
+impl<R, Pt: 'static, L, X, N, I> BuildSite<R, Pt, L, X, N> for InKid<I>
+where
+    R: KindFor<Pt> + NodeKind + Locate<L, InKid<I>>,
+    NewPointCx<R, Pt, L, InKid<I>, X>: Ctx,
+    <R as Locate<L, InKid<I>>>::Route: RouteParent,
+    R: TabAt<Pt, HNil, ParentRoute<R, L, InKid<I>>>,
+    NewPointFk<R, Pt, L, InKid<I>, X>:
+        Prefix<<R as TabAt<Pt, HNil, ParentRoute<R, L, InKid<I>>>>::AtFk>,
+    R::Children: KidRoute<
+            Pt,
+            HNil,
+            ParentRoute<R, L, InKid<I>>,
+            <R as TabAt<Pt, HNil, ParentRoute<R, L, InKid<I>>>>::AtFk,
+        >,
+{
+    type Needs = N;
+    type Cx = NewPointCx<R, Pt, L, InKid<I>, X>;
+    type AtRoot = HNil;
+}
+/// The way down to the kind `K` of the composition `Q`.
+type IlAt<Q, K> = <Desc<K> as KindDesc<Q>>::Il;
+/// What the build needs `N` at the kind `K` of `Q` are lent as.
+type SiteOf<Q, K, N> = <IlAt<Q, K> as BuildSite<RootOf<Q>, PartsOf<Q>, K, ContextOf<Q>, N>>::Needs;
+/// The context they are proved in.
+type SiteCx<Q, K, N> = <IlAt<Q, K> as BuildSite<RootOf<Q>, PartsOf<Q>, K, ContextOf<Q>, N>>::Cx;
+
+/// Prove the build needs `N` of a component at the kind `K` of the
+/// composition `Q` as where `Q` is composed: lent at a new node from the
+/// nodes above it ([`LendsNew`]), and none at the root, with the checks
+/// written out so that an error names the need. What
+/// [`explain!`](crate::explain!) proves a component's build with.
+#[doc(hidden)]
+#[allow(private_bounds)]
+pub fn assert_build_lends<Q, K, N, P>()
+where
+    Q: Composition,
+    K: NodeKind,
+    Desc<K>: KindDesc<Q, Kind = K>,
+    IlAt<Q, K>: BuildSite<RootOf<Q>, PartsOf<Q>, K, ContextOf<Q>, N>,
+    <IlAt<Q, K> as BuildSite<RootOf<Q>, PartsOf<Q>, K, ContextOf<Q>, N>>::AtRoot: RootBuildNeeds,
+    SiteOf<Q, K, N>: NoCycle<RootOf<Q>, PartsOf<Q>, HNil>,
+    SiteOf<Q, K, N>: Check<SiteCx<Q, K, N>, P>,
+    SiteOf<Q, K, N>: Takes<SiteCx<Q, K, N>, P>,
+    <SiteOf<Q, K, N> as Takes<SiteCx<Q, K, N>, P>>::Touches: Disjoint + DeepEnoughAll,
+    SiteOf<Q, K, N>: Lend<SiteCx<Q, K, N>, P>,
+    P: Pos,
+    ContextOf<Q>: LendContext,
+{
 }
 
 /// Prove what a component `C` at the kind `L` of the tree whose root is
