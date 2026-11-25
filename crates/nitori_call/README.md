@@ -557,6 +557,14 @@ Its view is always at hand: an access never waits for it, and a release point
 completes at once. The receiver must be `Unpin`; pin one that is not with
 `pin!` or `Box::pin` and hold the pinned pointer.
 
+Such a type can also stand for the access it holds. `AsAccess` lends an
+access for one borrow, by value, so that the type can compose it from the
+parts it keeps, such as `Composed::new(&mut self.io, &mut self.left)` for a
+payload that keeps how much of the stream is left for it; its `Family` is
+the same for every borrow. Every access lends itself, so code written for
+`S: AsAccess` takes accesses and such types alike, as the values of
+`nitori_codec` decode from any of them.
+
 ## Calls
 
 `Call<F, Op>` holds an operation and is polled with an optional view, lent as
