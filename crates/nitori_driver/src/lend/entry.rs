@@ -21,7 +21,7 @@ use super::{
     tree::{Ctx, Locate},
 };
 use crate::{
-    component::{ArgsOf, Component, EndCause, PartList},
+    component::{ArgsOf, Component, EndCause, Part, PartList},
     id::Numbered,
     need::{EmptyPos, Need, Pos, View},
     react::{AboveLendPoint, NodeEnding, NodeStarted, Reactions, WithLendPoint},
@@ -36,6 +36,9 @@ use crate::{
 ///
 /// It is not a subtrait of [`Need`], so that a bound of it on a list of
 /// needs leaves the views of the list to be worked out from the needs.
+#[diagnostic::on_unimplemented(
+    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
+)]
 pub(crate) trait Lends<R: KindFor<Pt>, Pt, L, IL, X, P: Pos> {
     /// The lend point's full key.
     type Fk;
@@ -131,6 +134,7 @@ where
     R: KindFor<Pt>,
     Pt: PartList<Pt>,
     K: NodeKind,
+    O: Part<Pt>,
     C: Component<O, Pt, K>,
     PT: Pos,
     P: Pos,
@@ -154,6 +158,7 @@ where
     R: KindFor<Pt>,
     Pt: PartList<Pt>,
     K: NodeKind,
+    O: Part<Pt>,
     C: Component<O, Pt, K>,
     PT: Pos,
     P: Pos,
@@ -171,23 +176,28 @@ where
 /// are the positions of their build needs.
 pub(crate) trait BuildComps<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, O, Ps>:
     Sized
+where
+    O: Part<Pt>,
 {
-    /// The components, in order.
+    /// The components, in order, each handed `own`, the arguments of
+    /// `O`, and `args`, those of every part.
     fn build(
         root: &mut Node<R, Pt>,
         at: &Fk,
         start: &mut K::Start,
+        own: &O::Args,
         args: &ArgsOf<Pt>,
         cx: &mut X,
     ) -> Option<Self>;
 }
-impl<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, O>
+impl<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, O: Part<Pt>>
     BuildComps<R, Pt, K, IK, X, Fk, O, HNil> for HNil
 {
     fn build(
         _: &mut Node<R, Pt>,
         _: &Fk,
         _: &mut K::Start,
+        _: &O::Args,
         _: &ArgsOf<Pt>,
         _: &mut X,
     ) -> Option<HNil> {
@@ -200,6 +210,7 @@ where
     R: KindFor<Pt>,
     Pt: PartList<Pt>,
     K: NodeKind,
+    O: Part<Pt>,
     C: Component<O, Pt, K>,
     PC: Pos,
     C::BuildNeeds: LendsNew<R, Pt, K, IK, X, PC, Fk = Fk>,
@@ -209,28 +220,33 @@ where
         root: &mut Node<R, Pt>,
         at: &Fk,
         start: &mut K::Start,
+        own: &O::Args,
         args: &ArgsOf<Pt>,
         cx: &mut X,
     ) -> Option<Self> {
         let head =
             <C::BuildNeeds as LendsNew<R, Pt, K, IK, X, PC>>::lend_new(root, at, cx, |view| {
-                C::build::<PC>(start, args, view)
+                C::build::<PC>(start, own, args, view)
             })?;
-        let tail = Cs::build(root, at, start, args, cx)?;
+        let tail = Cs::build(root, at, start, own, args, cx)?;
         Some(HCons { head, tail })
     }
 }
 
 /// Building the shares of the parts `Self` for a new node of the kind
 /// `K`, in the order of the parts.
-pub(crate) trait BuildShares<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, Ps> {
+pub(crate) trait BuildShares<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, Ps>:
+    PartList<Pt>
+{
     /// The shares, one list per part.
     type Data;
-    /// Every part's share.
+    /// Every part's share; `own` are the arguments of the parts `Self`,
+    /// `args` those of every part.
     fn build(
         root: &mut Node<R, Pt>,
         at: &Fk,
         start: &mut K::Start,
+        own: &Self::Args,
         args: &ArgsOf<Pt>,
         cx: &mut X,
     ) -> Option<Self::Data>;
@@ -243,6 +259,7 @@ impl<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk>
         _: &mut Node<R, Pt>,
         _: &Fk,
         _: &mut K::Start,
+        _: &HNil,
         _: &ArgsOf<Pt>,
         _: &mut X,
     ) -> Option<HNil> {
@@ -255,7 +272,7 @@ where
     R: KindFor<Pt>,
     Pt: PartList<Pt>,
     K: NodeKind,
-    O: ShareAt<K, Pt>,
+    O: Part<Pt> + ShareAt<K, Pt>,
     O::Data: BuildComps<R, Pt, K, IK, X, Fk, O, PO>,
     Os: BuildShares<R, Pt, K, IK, X, Fk, PT>,
 {
@@ -264,11 +281,12 @@ where
         root: &mut Node<R, Pt>,
         at: &Fk,
         start: &mut K::Start,
+        own: &Self::Args,
         args: &ArgsOf<Pt>,
         cx: &mut X,
     ) -> Option<Self::Data> {
-        let head = O::Data::build(root, at, start, args, cx)?;
-        let tail = Os::build(root, at, start, args, cx)?;
+        let head = O::Data::build(root, at, start, &own.head, args, cx)?;
+        let tail = Os::build(root, at, start, &own.tail, args, cx)?;
         Some(HCons { head, tail })
     }
 }
@@ -301,7 +319,7 @@ where
         >,
 {
     <Pt as BuildShares<R, Pt, K, IK, X, NewPointFk<R, Pt, K, IK, X>, Ps>>::build(
-        root, at, start, args, cx,
+        root, at, start, args, args, cx,
     )
 }
 
@@ -324,58 +342,61 @@ impl RootBuildNeeds for HNil {
 
 /// Building the components of a list `Self` of the part `O` for the root
 /// of the kind `R`.
-pub(crate) trait BuildRootComps<R: NodeKind, Pt: PartList<Pt>, O>: Sized {
-    /// The components, in order.
-    fn build(start: &mut R::Start, args: &ArgsOf<Pt>) -> Self;
+pub(crate) trait BuildRootComps<R: NodeKind, Pt: PartList<Pt>, O: Part<Pt>>: Sized {
+    /// The components, in order, each handed `own`, the arguments of
+    /// `O`, and `args`, those of every part.
+    fn build(start: &mut R::Start, own: &O::Args, args: &ArgsOf<Pt>) -> Self;
 }
-impl<R: NodeKind, Pt: PartList<Pt>, O> BuildRootComps<R, Pt, O> for HNil {
-    fn build(_: &mut R::Start, _: &ArgsOf<Pt>) -> HNil {
+impl<R: NodeKind, Pt: PartList<Pt>, O: Part<Pt>> BuildRootComps<R, Pt, O> for HNil {
+    fn build(_: &mut R::Start, _: &O::Args, _: &ArgsOf<Pt>) -> HNil {
         HNil
     }
 }
-impl<R: NodeKind, Pt: PartList<Pt>, O, C, Cs> BuildRootComps<R, Pt, O> for HCons<C, Cs>
+impl<R: NodeKind, Pt: PartList<Pt>, O: Part<Pt>, C, Cs> BuildRootComps<R, Pt, O> for HCons<C, Cs>
 where
     C: Component<O, Pt, R>,
     C::BuildNeeds: RootBuildNeeds,
     Cs: BuildRootComps<R, Pt, O>,
 {
-    fn build(start: &mut R::Start, args: &ArgsOf<Pt>) -> Self {
+    fn build(start: &mut R::Start, own: &O::Args, args: &ArgsOf<Pt>) -> Self {
         let head = C::build::<EmptyPos>(
             start,
+            own,
             args,
             <C::BuildNeeds as RootBuildNeeds>::none::<EmptyPos>(),
         );
         HCons {
             head,
-            tail: Cs::build(start, args),
+            tail: Cs::build(start, own, args),
         }
     }
 }
 /// Building the shares of the parts `Self` for the root of the kind `R`.
-pub(crate) trait BuildRootShares<R: NodeKind, Pt: PartList<Pt>> {
+pub(crate) trait BuildRootShares<R: NodeKind, Pt: PartList<Pt>>: PartList<Pt> {
     /// The shares, one list per part.
     type Data;
-    /// Every part's share.
-    fn build(start: &mut R::Start, args: &ArgsOf<Pt>) -> Self::Data;
+    /// Every part's share; `own` are the arguments of the parts `Self`,
+    /// `args` those of every part.
+    fn build(start: &mut R::Start, own: &Self::Args, args: &ArgsOf<Pt>) -> Self::Data;
 }
 impl<R: NodeKind, Pt: PartList<Pt>> BuildRootShares<R, Pt> for HNil {
     type Data = HNil;
-    fn build(_: &mut R::Start, _: &ArgsOf<Pt>) -> HNil {
+    fn build(_: &mut R::Start, _: &HNil, _: &ArgsOf<Pt>) -> HNil {
         HNil
     }
 }
 impl<R: NodeKind, Pt: PartList<Pt>, O, Os> BuildRootShares<R, Pt> for HCons<O, Os>
 where
-    O: ShareAt<R, Pt>,
+    O: Part<Pt> + ShareAt<R, Pt>,
     O::Data: BuildRootComps<R, Pt, O>,
     Os: BuildRootShares<R, Pt>,
 {
     type Data = HCons<O::Data, Os::Data>;
-    fn build(start: &mut R::Start, args: &ArgsOf<Pt>) -> Self::Data {
-        let head = O::Data::build(start, args);
+    fn build(start: &mut R::Start, own: &Self::Args, args: &ArgsOf<Pt>) -> Self::Data {
+        let head = O::Data::build(start, &own.head, args);
         HCons {
             head,
-            tail: Os::build(start, args),
+            tail: Os::build(start, &own.tail, args),
         }
     }
 }
@@ -387,7 +408,7 @@ where
     R: KindFor<Pt>,
     Pt: PartList<Pt> + BuildRootShares<R, Pt, Data = <R as KindFor<Pt>>::Data>,
 {
-    <Pt as BuildRootShares<R, Pt>>::build(start, args)
+    <Pt as BuildRootShares<R, Pt>>::build(start, args, args)
 }
 
 // ------------------------------------------------------------------ the driver's points

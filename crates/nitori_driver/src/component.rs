@@ -31,14 +31,15 @@
 //!
 //! Every part has construction arguments, whose type may depend on the
 //! whole list ([`Part<L>`](Part)); the driver puts them in one list
-//! ([`ArgsOf<L>`](ArgsOf)) and gives every `build` all of it. A component
-//! reads what it needs through a trait of its own crate on that list,
-//! answered part by part:
+//! ([`ArgsOf<L>`](ArgsOf)). Every `build` is handed the arguments of its
+//! own part, and all of the list, in which [`part_args`] finds another
+//! part's by its number, or nothing when the list does not have it:
 //!
 //! ```
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, Part, PartList},
-//!     frunk_core::{HList, hlist::{HCons, HNil}, hlist},
+//!     component::{ArgsOf, Component, FindArgs, Part, PartList, part_args},
+//!     frunk_core::{HList, hlist::HNil, hlist},
+//!     id::Numbered,
 //!     need::{EmptyPos, Pos, View},
 //!     structure::NodeKind,
 //! };
@@ -48,6 +49,7 @@
 //!     type Children = HNil;
 //! }
 //! /// Two parts and their arguments.
+//! #[derive(Numbered)]
 //! struct Base;
 //! struct BaseArgs {
 //!     window: u64,
@@ -55,88 +57,59 @@
 //! impl<L> Part<L> for Base {
 //!     type Args = BaseArgs;
 //! }
+//! #[derive(Numbered)]
 //! struct Reset;
-//! struct ResetArgs;
+//! struct ResetArgs {
+//!     after: u64,
+//! }
 //! impl<L> Part<L> for Reset {
 //!     type Args = ResetArgs;
 //! }
-//! /// What a set of streams reads of one part's arguments.
-//! trait StreamArgs {
-//!     fn window(&self) -> Option<u64> {
-//!         None
-//!     }
-//!     fn resets(&self) -> bool {
-//!         false
-//!     }
-//! }
-//! impl StreamArgs for BaseArgs {
-//!     fn window(&self) -> Option<u64> {
-//!         Some(self.window)
-//!     }
-//! }
-//! impl StreamArgs for ResetArgs {
-//!     fn resets(&self) -> bool {
-//!         true
-//!     }
-//! }
-//! /// The same of the whole list.
-//! trait StreamArgsList {
-//!     fn window(&self) -> Option<u64>;
-//!     fn resets(&self) -> bool;
-//! }
-//! impl StreamArgsList for HNil {
-//!     fn window(&self) -> Option<u64> {
-//!         None
-//!     }
-//!     fn resets(&self) -> bool {
-//!         false
-//!     }
-//! }
-//! impl<A: StreamArgs, T: StreamArgsList> StreamArgsList for HCons<A, T> {
-//!     fn window(&self) -> Option<u64> {
-//!         self.head.window().or(self.tail.window())
-//!     }
-//!     fn resets(&self) -> bool {
-//!         self.head.resets() || self.tail.resets()
-//!     }
-//! }
 //!
-//! /// A component generic over the list of parts: it resets its streams
-//! /// only when the list has the part that does.
+//! /// A component of `Base`, generic over the list of parts: it resets
+//! /// its streams only when the list has `Reset`.
 //! struct Streams {
 //!     window: u64,
-//!     resets: bool,
+//!     resets: Option<u64>,
 //! }
-//! impl<O, L, K: NodeKind> Component<O, L, K> for Streams
+//! impl<L, K: NodeKind> Component<Base, L, K> for Streams
 //! where
-//!     L: PartList<L, Args: StreamArgsList>,
+//!     L: PartList<L> + FindArgs<Reset, L>,
 //! {
-//!     fn build<P: Pos>(_: &mut K::Start, args: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
-//!         Streams { window: args.window().unwrap_or(0), resets: args.resets() }
+//!     fn build<P: Pos>(
+//!         _: &mut K::Start,
+//!         own: &BaseArgs,
+//!         args: &ArgsOf<L>,
+//!         _: View<'_, HNil, P>,
+//!     ) -> Self {
+//!         let resets = part_args::<Reset, L>(args).map(|r| r.after);
+//!         Streams { window: own.window, resets }
 //!     }
 //! }
 //!
 //! type With = HList![Base, Reset];
 //! let s = <Streams as Component<Base, With, Root>>::build::<EmptyPos>(
 //!     &mut (),
-//!     &hlist![BaseArgs { window: 8 }, ResetArgs],
+//!     &BaseArgs { window: 8 },
+//!     &hlist![BaseArgs { window: 8 }, ResetArgs { after: 3 }],
 //!     HNil,
 //! );
-//! assert_eq!((s.window, s.resets), (8, true));
+//! assert_eq!((s.window, s.resets), (8, Some(3)));
 //! type Without = HList![Base];
 //! let s = <Streams as Component<Base, Without, Root>>::build::<EmptyPos>(
 //!     &mut (),
+//!     &BaseArgs { window: 8 },
 //!     &hlist![BaseArgs { window: 8 }],
 //!     HNil,
 //! );
-//! assert_eq!((s.window, s.resets), (8, false));
+//! assert_eq!((s.window, s.resets), (8, None));
 //! ```
 //!
 //! A host's bare type is not a component of another crate's part:
 //!
 //! ```compile_fail,E0210
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, PartList},
+//!     component::{ArgsOf, Component, Part, PartList},
 //!     frunk_core::hlist::HNil,
 //!     need::{Pos, View},
 //!     structure::NodeKind,
@@ -145,8 +118,11 @@
 //!     fn new() -> Self;
 //! }
 //! struct Base;
+//! impl<L> Part<L> for Base {
+//!     type Args = ();
+//! }
 //! impl<X: Estimator + 'static, L: PartList<L>, K: NodeKind> Component<Base, L, K> for X {
-//!     fn build<P: Pos>(_: &mut K::Start, _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
+//!     fn build<P: Pos>(_: &mut K::Start, _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 //!         X::new()
 //!     }
 //! }
@@ -156,7 +132,7 @@
 //!
 //! ```
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, Held, PartList},
+//!     component::{ArgsOf, Component, Held, Part, PartList},
 //!     frunk_core::hlist::HNil,
 //!     id::Numbered,
 //!     need::{Pos, View},
@@ -166,13 +142,16 @@
 //!     fn new() -> Self;
 //! }
 //! struct Base;
+//! impl<L> Part<L> for Base {
+//!     type Args = ();
+//! }
 //! impl<X, L, K> Component<Base, L, K> for Held<X>
 //! where
 //!     X: Estimator + Numbered + 'static,
 //!     L: PartList<L>,
 //!     K: NodeKind,
 //! {
-//!     fn build<P: Pos>(_: &mut K::Start, _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
+//!     fn build<P: Pos>(_: &mut K::Start, _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 //!         Held(X::new())
 //!     }
 //! }
@@ -194,7 +173,7 @@
 use frunk_core::hlist::{HCons, HNil};
 
 use crate::{
-    id::Numbered,
+    id::{False, NumberEq, Numbered, True},
     need::{Need, Pos, View},
     structure::NodeKind,
 };
@@ -233,6 +212,67 @@ impl<L, P: Part<L>, Ps: PartList<L>> PartList<L> for HCons<P, Ps> {
 /// The arguments of every part of the list `L`.
 pub type ArgsOf<L> = <L as PartList<L>>::Args;
 
+/// The arguments of the part `O` in `args`, those of every part of the
+/// list `L`, found by the part's number; `None` when `L` does not have
+/// `O`. What a component's [`build`](Component::build) reads another
+/// part's arguments with; its own it is handed.
+pub fn part_args<O, L>(args: &ArgsOf<L>) -> Option<&<O as Part<L>>::Args>
+where
+    O: Part<L>,
+    L: FindArgs<O, L>,
+{
+    <L as FindArgs<O, L>>::find(args)
+}
+
+/// The arguments of the part `O` in those of a list `Self` of parts, in a
+/// composition of the parts `L`, by the parts' numbers: the first part of
+/// the list with the number of `O`, or none. What [`part_args`] finds
+/// with; every part of the list, and `O`, has a number
+/// ([`Numbered`]).
+#[diagnostic::on_unimplemented(
+    message = "the arguments of `{O}` are not looked for in those of the parts `{Self}`",
+    label = "a list of parts with a number each",
+    note = "`part_args` finds a part's arguments by the parts' numbers: every part of the list, and `{O}`, is `#[derive(Numbered)]`; a component generic over the list of parts bounds it by `FindArgs<{O}, L>`"
+)]
+pub trait FindArgs<O: Part<L>, L>: PartList<L> {
+    /// The arguments of `O` in `args`, if the list has it.
+    fn find(args: &Self::Args) -> Option<&O::Args>;
+}
+impl<O: Part<L>, L> FindArgs<O, L> for HNil {
+    fn find(_: &HNil) -> Option<&O::Args> {
+        None
+    }
+}
+impl<O, L, P, Ps> FindArgs<O, L> for HCons<P, Ps>
+where
+    O: Part<L> + Numbered,
+    P: Part<L> + Numbered,
+    Ps: FindArgs<O, L>,
+    P::Number: NumberEq<O::Number>,
+    <P::Number as NumberEq<O::Number>>::Out: PickArgs<O, L, P, Ps>,
+{
+    fn find(args: &Self::Args) -> Option<&O::Args> {
+        <<P::Number as NumberEq<O::Number>>::Out as PickArgs<O, L, P, Ps>>::pick(args)
+    }
+}
+/// The arguments of `O` in those of the parts `HCons<P, Ps>`, by whether
+/// `P` has the number of `O` (`Self`: [`True`] or [`False`]).
+#[doc(hidden)]
+pub trait PickArgs<O: Part<L>, L, P: Part<L>, Ps: PartList<L>> {
+    /// The head's arguments, or what the tail has.
+    fn pick(args: &HCons<P::Args, Ps::Args>) -> Option<&O::Args>;
+}
+impl<O: Part<L>, L, P: Part<L, Args = O::Args>, Ps: PartList<L>> PickArgs<O, L, P, Ps> for True {
+    fn pick(args: &HCons<P::Args, Ps::Args>) -> Option<&O::Args> {
+        Some(&args.head)
+    }
+}
+impl<O: Part<L>, L, P: Part<L>, Ps: FindArgs<O, L>> PickArgs<O, L, P, Ps> for False {
+    fn pick(args: &HCons<P::Args, Ps::Args>) -> Option<&O::Args> {
+        Ps::find(&args.tail)
+    }
+}
+
 /// The view a component's [`wake`](Component::wake) and
 /// [`end`](Component::end) are lent for `'t`: the component `C`,
 /// exclusive, then the view of its needs `N` at the position `P`.
@@ -263,7 +303,7 @@ impl<R> Copy for EndCause<'_, R> {}
 /// default. Each operation is generic over the position `P` of its needs,
 /// as a call is over the structure: the driver gives the position it
 /// inferred where the structure is known.
-pub trait Component<O, L: PartList<L>, K: NodeKind>: Sized + 'static {
+pub trait Component<O: Part<L>, L: PartList<L>, K: NodeKind>: Sized + 'static {
     /// What [`wake`](Component::wake) and [`end`](Component::end) take
     /// around the node besides the component: needs, lent at the node;
     /// none by default.
@@ -273,12 +313,14 @@ pub trait Component<O, L: PartList<L>, K: NodeKind>: Sized + 'static {
     /// have none.
     type BuildNeeds: Need = HNil;
     /// The component of a new node, from what the one adding the node gave
-    /// it to start from, the arguments of every part and the view of its
-    /// build needs. The node's components are built in the order of the
-    /// parts, each handed the same `start`, and may take out what they
-    /// keep of it.
+    /// it to start from, the arguments of its part `own`, those of every
+    /// part `args` (another part's are found with [`part_args`]) and the
+    /// view of its build needs. The node's components are built in the
+    /// order of the parts, each handed the same `start`, and may take out
+    /// what they keep of it.
     fn build<P: Pos>(
         start: &mut K::Start,
+        own: &<O as Part<L>>::Args,
         args: &ArgsOf<L>,
         view: View<'_, Self::BuildNeeds, P>,
     ) -> Self;
@@ -300,3 +342,6 @@ pub trait Component<O, L: PartList<L>, K: NodeKind>: Sized + 'static {
 /// that a part can write its operations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Numbered)]
 pub struct Held<X>(pub X);
+
+#[cfg(test)]
+mod tests;

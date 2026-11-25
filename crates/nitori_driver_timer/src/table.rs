@@ -5,7 +5,7 @@ use core::task::Waker;
 
 use nitori_clock::MonotonicClock;
 use nitori_driver::{
-    component::{ArgsOf, Component, PartList},
+    component::{ArgsOf, Component, Part, PartList},
     frunk_core::hlist::HNil,
     id::Numbered,
     need::{ComponentWaker, Pos, View, WakeBox},
@@ -149,12 +149,13 @@ impl<C: MonotonicClock, P: Ord + Copy> Default for TimerTable<C, P> {
 /// it at.
 impl<Q, L, K, C, P> Component<crate::Part<Q>, L, K> for TimerTable<C, P>
 where
+    crate::Part<Q>: Part<L, Args = ()>,
     L: PartList<L>,
     K: NodeKind,
     C: MonotonicClock + 'static,
     P: Ord + Copy + 'static,
 {
-    fn build<Ps: Pos>(_: &mut K::Start, _: &ArgsOf<L>, _: View<'_, HNil, Ps>) -> Self {
+    fn build<Ps: Pos>(_: &mut K::Start, _: &(), _: &ArgsOf<L>, _: View<'_, HNil, Ps>) -> Self {
         Self::new()
     }
 }

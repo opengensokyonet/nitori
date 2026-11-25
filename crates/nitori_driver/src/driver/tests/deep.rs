@@ -70,7 +70,12 @@ pub struct Mark {
 }
 impl<L: PartList<L>> Component<Deep, L, Bud> for Mark {
     type BuildNeeds = HList![OwnKey<u32>];
-    fn build<P: Pos>(_: &mut (), _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        _: &mut (),
+        _: &(),
+        _: &ArgsOf<L>,
+        view: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         let hlist_pat![key] = view;
         Mark { key }
     }

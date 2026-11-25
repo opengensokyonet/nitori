@@ -254,7 +254,12 @@ pub struct Tip {
 impl<L: PartList<L>> Component<Run, L, Twig> for Tip {
     type Needs = HList![Ref<Ctl>];
     type BuildNeeds = HList![OwnKey<u32>];
-    fn build<P: Pos>(tidy: &mut bool, _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        tidy: &mut bool,
+        _: &(),
+        _: &ArgsOf<L>,
+        view: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         let hlist_pat![key] = view;
         Tip { key, tidy: *tidy }
     }
@@ -297,7 +302,7 @@ pub async fn tidy<W: CallFamily<C = Tidy, K: NodeKind<Start = bool, Request = En
 }
 
 impl<L: PartList<L>> Component<Run, L, Top> for Hub {
-    fn build<P: Pos>(_: &mut (), _: &ArgsOf<L>, _: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, Self::BuildNeeds, P>) -> Self {
         Hub
     }
     fn end<P: Pos>(_: ComponentView<'_, Self, Self::Needs, P>, cause: EndCause<'_, ()>) {
@@ -309,6 +314,7 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Ctl {
     type BuildNeeds = HList![OwnKey<u32>];
     fn build<P: Pos>(
         start: &mut Vec<Step>,
+        _: &(),
         _: &ArgsOf<L>,
         view: View<'_, Self::BuildNeeds, P>,
     ) -> Self {

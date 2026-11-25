@@ -170,7 +170,12 @@ impl HandleRequest<Top, Level> for Adding {
 pub struct Alarm(pub u32);
 impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
     type BuildNeeds = HList![OwnKey<u32>];
-    fn build<P: Pos>(_: &mut (), _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        _: &mut (),
+        _: &(),
+        _: &ArgsOf<L>,
+        view: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         let hlist_pat![key] = view;
         Alarm(key)
     }

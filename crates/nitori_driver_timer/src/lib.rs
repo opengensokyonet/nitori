@@ -62,7 +62,7 @@
 //! #[derive(Numbered)]
 //! struct Idle;
 //! impl<L: PartList<L>> Component<Base, L, Conn> for Idle {
-//!     fn build<P: Pos>(_: &mut (), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
+//!     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 //!         Idle
 //!     }
 //! }

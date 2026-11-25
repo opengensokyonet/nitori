@@ -20,10 +20,15 @@ fn args() -> HList![CoreArgs, LossArgs, WatchArgs] {
 /// loss part does not have.
 #[test]
 fn generic_over_the_parts() {
-    let with =
-        <LinkCore as Component<Core, Parts, LinkPath>>::build::<EmptyPos>(&mut 0, &args(), HNil);
+    let with = <LinkCore as Component<Core, Parts, LinkPath>>::build::<EmptyPos>(
+        &mut 0,
+        &CoreArgs,
+        &args(),
+        HNil,
+    );
     let without = <LinkCore as Component<Core, HList![Core, Watch], LinkPath>>::build::<EmptyPos>(
         &mut 0,
+        &CoreArgs,
         &hlist![CoreArgs, WatchArgs],
         HNil,
     );

@@ -17,6 +17,7 @@ pub mod call;
 pub mod capability;
 pub mod component;
 pub mod driver;
+mod explain;
 pub mod id;
 pub(crate) mod lend;
 pub mod need;

@@ -7,17 +7,15 @@ extern crate std;
 use alloc::{format, string::String, vec::Vec};
 use core::cell::RefCell;
 
-use frunk_core::{
-    HList,
-    hlist::{HCons, HNil},
-    hlist_pat,
-};
+use frunk_core::{HList, hlist_pat};
 
 use super::fixtures::*;
 use crate::{
     call::tests::contributed as wire,
     capability::Contribution,
-    component::{ArgsOf, Component, ComponentView, EndCause, Held, Part, PartList},
+    component::{
+        ArgsOf, Component, ComponentView, EndCause, FindArgs, Held, Part, PartList, part_args,
+    },
     id::Numbered,
     need::{Cap, Members, Mut, OwnKey, Pos, Ref, Requests, Under, View},
     react::{NodeEnding, NodeStarted, Reaction, ReactionPoint},
@@ -64,41 +62,14 @@ impl<L> Part<L> for Watch {
     type Args = WatchArgs;
     type Shares = WatchShares;
 }
-/// What a link core reads of one part's arguments.
-pub trait WindowArgs {
-    fn window(&self) -> Option<u32> {
-        None
-    }
-}
-impl WindowArgs for CoreArgs {}
-impl WindowArgs for WatchArgs {}
-impl WindowArgs for LossArgs {
-    fn window(&self) -> Option<u32> {
-        Some(self.window)
-    }
-}
-/// The same of the whole list.
-pub trait WindowList {
-    fn window(&self) -> Option<u32>;
-}
-impl WindowList for HNil {
-    fn window(&self) -> Option<u32> {
-        None
-    }
-}
-impl<A: WindowArgs, T: WindowList> WindowList for HCons<A, T> {
-    fn window(&self) -> Option<u32> {
-        self.head.window().or(self.tail.window())
-    }
-}
-
 // ------------------------------------------------------------------ components
 
 macro_rules! from_default {
     ($($c:ty),*) => {$(
-        impl<O, L: PartList<L>, K: NodeKind> Component<O, L, K> for $c {
+        impl<O: Part<L>, L: PartList<L>, K: NodeKind> Component<O, L, K> for $c {
             fn build<P: Pos>(
                 _: &mut K::Start,
+                _: &O::Args,
                 _: &ArgsOf<L>,
                 _: View<'_, Self::BuildNeeds, P>,
             ) -> Self {
@@ -118,14 +89,19 @@ from_default!(
 
 /// A link core starts with the window of the loss part, when the list of
 /// parts has it, and counts the key epoch when woken.
-impl<O, L, K: NodeKind> Component<O, L, K> for LinkCore
+impl<O: Part<L>, L, K: NodeKind> Component<O, L, K> for LinkCore
 where
-    L: PartList<L, Args: WindowList>,
+    L: PartList<L> + FindArgs<Loss, L>,
 {
     type Needs = HList![Ref<Keys>, Mut<RecoveryFactory>];
-    fn build<P: Pos>(_: &mut K::Start, args: &ArgsOf<L>, _: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        _: &mut K::Start,
+        _: &O::Args,
+        args: &ArgsOf<L>,
+        _: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         LinkCore {
-            rx: args.window().unwrap_or(0),
+            rx: part_args::<Loss, L>(args).map_or(0, |a| a.window),
         }
     }
     fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
@@ -141,7 +117,12 @@ where
 impl<L: PartList<L>> Component<Core, L, LinkPath> for Planner {
     type Needs = HList![Ref<LinkCore>];
     type BuildNeeds = HList![OwnKey<LinkId>, Ref<Keys>, Mut<RecoveryFactory>];
-    fn build<P: Pos>(start: &mut u64, _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        start: &mut u64,
+        _: &CoreArgs,
+        _: &ArgsOf<L>,
+        view: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         let hlist_pat![key, keys, factory] = view;
         factory.made += 1;
         let next_pn = *start + 100 * u64::from(key.0) + u64::from(keys.epoch);
@@ -157,7 +138,12 @@ impl<L: PartList<L>> Component<Core, L, LinkPath> for Planner {
 /// A recovery's congestion starts with what its link's planner is at.
 impl<L: PartList<L>> Component<Loss, L, Recovery> for Congestion {
     type BuildNeeds = HList![Ref<Planner>, OwnKey<()>];
-    fn build<P: Pos>(_: &mut (), _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        _: &mut (),
+        _: &LossArgs,
+        _: &ArgsOf<L>,
+        view: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         let hlist_pat![planner, ()] = view;
         Congestion {
             in_flight: u32::try_from(planner.next_pn).unwrap_or(u32::MAX),
@@ -181,7 +167,12 @@ impl Estimator for Rtt {
 impl<X: Estimator + Numbered + 'static, L: PartList<L>, K: NodeKind> Component<Watch, L, K>
     for Held<X>
 {
-    fn build<P: Pos>(_: &mut K::Start, _: &ArgsOf<L>, _: View<'_, Self::BuildNeeds, P>) -> Self {
+    fn build<P: Pos>(
+        _: &mut K::Start,
+        _: &WatchArgs,
+        _: &ArgsOf<L>,
+        _: View<'_, Self::BuildNeeds, P>,
+    ) -> Self {
         Held(X::new())
     }
 }

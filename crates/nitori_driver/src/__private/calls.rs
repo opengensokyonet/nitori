@@ -4,7 +4,7 @@
 use core::time::Duration;
 
 use crate::{
-    component::{ArgsOf, Component, PartList},
+    component::{ArgsOf, Component, Part, PartList},
     frunk_core::HList,
     id::Numbered,
     need::{Pos, View},
@@ -32,8 +32,13 @@ pub struct Total(pub u32);
 pub struct Count(pub u32);
 macro_rules! from_default {
     ($($c:ty),*) => {$(
-        impl<O, L: PartList<L>, K: NodeKind> Component<O, L, K> for $c {
-            fn build<P: Pos>(_: &mut K::Start, _: &ArgsOf<L>, _: View<'_, HList![], P>) -> Self {
+        impl<O: Part<L>, L: PartList<L>, K: NodeKind> Component<O, L, K> for $c {
+            fn build<P: Pos>(
+                _: &mut K::Start,
+                _: &O::Args,
+                _: &ArgsOf<L>,
+                _: View<'_, HList![], P>,
+            ) -> Self {
                 Self::default()
             }
         }
