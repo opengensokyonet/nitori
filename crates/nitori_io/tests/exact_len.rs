@@ -257,6 +257,10 @@ fn a_query_waits_for_the_length_and_reports_why_it_cannot_be_known() {
             NonZeroUsize::MIN,
         ));
         assert_eq!(finish(chunked.remaining_len()), (outcome, 1));
+
+        let mut access = ConstructedAccess::new(Received { polls: 0, outcome });
+        let mut merging = access.compose(nitori_io::adapters::MergedMetadata::<()>::default());
+        assert_eq!(finish(merging.remaining_len()), (outcome, 1));
     }
 }
 

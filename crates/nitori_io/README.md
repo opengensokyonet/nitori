@@ -412,6 +412,57 @@ async fn request<F: Read<Metadata = Early>>(
 }
 ```
 
+Code that reads only from sources without metadata can read from one with
+it through `adapters::MergedMetadata`: `io.compose(MergedMetadata::default())`
+reports no metadata (`Metadata = ()`) and merges each segment's into the
+state, which `into_state` returns. Chunk reads, skipping and the exact
+length pass through; skipping reports no metadata, so that of skipped bytes
+does not reach the state. Kept with a receiver in
+a `ComposedReceiver`, the state merges every call on it.
+`adapters::MergingSource` does the same for any `nitori_call::AsAccess`
+source, an access or a type that lends one, composing the state on each
+access it lends.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{
+    Combine,
+    adapters::MergedMetadata,
+    calls::{ReadArrayError, ReadValue},
+    prelude::*,
+};
+
+/// Whether some bytes arrived early.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Early(bool);
+impl Combine for Early {
+    fn combine(self, next: Self) -> Self {
+        Early(self.0 || next.0)
+    }
+}
+
+/// Reads from sources without metadata only.
+#[call(sync)]
+async fn pair<F: Read<Metadata = ()>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<[u8; 2], ReadArrayError<F::Error>> {
+    Ok(io.read_array::<2>().await?.value)
+}
+
+#[call(sync)]
+async fn early_pair<F: Read<Metadata = Early>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<ReadValue<[u8; 2], Early>, ReadArrayError<F::Error>> {
+    let mut merging = io.compose(MergedMetadata::default());
+    let value = pair(&mut merging).await?;
+    Ok(ReadValue {
+        value,
+        metadata: merging.into_state().0,
+    })
+}
+```
+
 ## Lending storage
 
 A sink that implements `WriteLent` lends its own storage, so a source can

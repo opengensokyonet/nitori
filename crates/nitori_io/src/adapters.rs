@@ -1,5 +1,6 @@
 //! Explicit capability adapters: chunk reads with caller-selected allocation
-//! limits, byte budgets for composed accesses, and skipping built from reads.
+//! limits, byte budgets for composed accesses, skipping built from reads, and
+//! reading with the metadata merged into composition state.
 use crate::{
     ChunkResult, ChunkSegment, LentBuffer, LentOutcome, PollReadExt as _, PollWriteExt as _, Read,
     ReadChunk, ReadResult, Skip, Write, WriteLent, WriteLentResult, WriteResult,
@@ -15,7 +16,9 @@ use core::{
 };
 use nitori_call::{Compose, Direct, Lent, Receiver, ReceiverFamily};
 
+mod merged_metadata;
 mod skip;
+pub use merged_metadata::{MergedMetadata, Merging, MergingSource, MergingView};
 pub use skip::{ReadChunkSkip, ReadSkip, Skippable};
 
 pin_project_lite::pin_project! {
