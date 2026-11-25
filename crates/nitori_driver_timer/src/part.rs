@@ -18,11 +18,8 @@ use crate::{FireTimers, TimerCallPriority, TimerTable};
 /// priority type gives the priority the call is woken at
 /// ([`TimerCallPriority`]).
 ///
-/// It has a number ([`Numbered`]), the same whatever `Q` is, so that a
-/// composition with it can have its own list of contributions and its
-/// components can find other parts' arguments
-/// ([`part_args`](nitori_driver::component::part_args)), which look for
-/// every part by its number. A composition has one timer part, its own, and
+/// It has a number ([`Numbered`]), as every part of a composition has,
+/// the same whatever `Q` is. A composition has one timer part, its own, and
 /// `Part<Q>` is written only among the parts of `Q`, so the parts of two
 /// compositions having one number does not matter; `Q` need not have a
 /// number.

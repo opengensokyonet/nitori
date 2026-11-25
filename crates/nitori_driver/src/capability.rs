@@ -22,11 +22,8 @@
 //! for a part that does not know the family. The crate of a family may
 //! export a list of these for the parts it knows, which the composition
 //! puts in its own list as one item, spliced in. The part and the family
-//! are found by their numbers: a family is `#[derive(Numbered)]`, and,
-//! when the composition's list is not empty, so is every part of the
-//! composition, not only those the list names (as every part is when a
-//! component finds another's arguments with
-//! [`part_args`](crate::component::part_args)). A part that writes nothing
+//! are found by their numbers: a family is `#[derive(Numbered)]`, as every
+//! part of a composition is. A part that writes nothing
 //! for the family, in either place, contributes `()`, with no needs. A
 //! contribution written in both places, or twice in one list (the lists
 //! spliced in counted), does not compile where the composition is written,
@@ -492,6 +489,7 @@ pub trait Capability: 'static {
 /// async fn counting<W: CallFamily<C = Counting>>(host: &mut impl LentAccess<Family = W>) {
 ///     host.with(|_| ());
 /// }
+/// #[derive(Numbered)]
 /// struct Calls;
 /// impl<L> Part<L> for Calls {
 ///     type Args = ();

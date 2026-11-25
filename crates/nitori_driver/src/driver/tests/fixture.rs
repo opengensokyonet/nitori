@@ -235,6 +235,7 @@ pub struct Ctl {
 pub struct Hub;
 
 /// The one part.
+#[derive(Numbered)]
 pub struct Run;
 impl<L> Part<L> for Run {
     type Args = ();

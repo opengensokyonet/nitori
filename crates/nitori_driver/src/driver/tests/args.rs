@@ -54,12 +54,14 @@ keeps! {
     LeafSecond: Second, &'static str;
 }
 
-/// Two parts, with arguments of two types, neither of them numbered.
+/// Two parts, with arguments of two types.
+#[derive(Numbered)]
 struct First;
 impl<L> Part<L> for First {
     type Args = u32;
     type Shares = HList![Share<Top, HList![TopFirst]>, Share<Leaf, HList![LeafFirst]>];
 }
+#[derive(Numbered)]
 struct Second;
 impl<L> Part<L> for Second {
     type Args = &'static str;

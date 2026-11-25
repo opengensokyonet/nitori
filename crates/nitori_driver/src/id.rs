@@ -50,7 +50,7 @@ pub use nitori_driver_macros::Numbered;
 #[diagnostic::on_unimplemented(
     message = "`{Self}` has no type-level number: derive `Numbered`",
     label = "`{Self}` is not `#[derive(Numbered)]`",
-    note = "every node kind of a composition, every component, every reaction point and every family of contributed capabilities is told apart by its number, and so is every part of a composition whose own list of contributions is not empty, or one of whose components finds a part's arguments with `part_args`; `#[derive(Numbered)]` gives it one"
+    note = "every node kind of a composition, every component, every reaction point and every family of contributed capabilities is told apart by its number, and so is every part of a composition; `#[derive(Numbered)]` gives it one"
 )]
 pub trait Numbered {
     /// The number: [`BCons`] of [`B0`] and [`B1`], ending in [`BNil`].

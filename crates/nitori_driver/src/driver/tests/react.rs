@@ -19,6 +19,7 @@ use super::{
 use crate::{
     component::Part,
     driver::{Driver, OperateError},
+    id::Numbered,
     need::{OwnKey, Pos, Requests, View},
     react::{NodeEnding, NodeStarted, Reaction, ReactsTo},
     request::NodeRequest,
@@ -26,6 +27,7 @@ use crate::{
 };
 
 /// Notes the nodes added and ending, below the top.
+#[derive(Numbered)]
 pub struct Watch;
 impl<L> Part<L> for Watch {
     type Args = ();
@@ -45,6 +47,7 @@ impl<L> Part<L> for Watch {
     ];
 }
 /// Notes the top added, and ends it.
+#[derive(Numbered)]
 pub struct Quit;
 impl<L> Part<L> for Quit {
     type Args = ();

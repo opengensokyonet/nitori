@@ -86,6 +86,7 @@ impl<L: PartList<L>> Component<Deep, L, Bud> for Mark {
 }
 
 /// The one part.
+#[derive(Numbered)]
 pub struct Deep;
 impl<L> Part<L> for Deep {
     type Args = ();

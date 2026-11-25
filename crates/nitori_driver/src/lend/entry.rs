@@ -41,7 +41,7 @@ use crate::{
 /// It is not a subtrait of [`Need`], so that a bound of it on a list of
 /// needs leaves the views of the list to be worked out from the needs.
 #[diagnostic::on_unimplemented(
-    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
+    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` (`component C of O` for a component of any part) or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
 )]
 pub(crate) trait Lends<R: KindFor<Pt>, Pt, L, IL, X, P: Pos> {
     /// The lend point's full key.
@@ -514,7 +514,9 @@ type SiteCx<Q, K, N> = <IlAt<Q, K> as BuildSite<RootOf<Q>, PartsOf<Q>, K, Contex
 /// composition `Q` as where `Q` is composed: lent at a new node from the
 /// nodes above it ([`LendsNew`]), and none at the root, with the checks
 /// written out so that an error names the need. What
-/// [`explain!`](crate::explain!) proves a component's build with.
+/// [`explain!`](crate::explain!) proves a component's build with. It
+/// repeats the bounds of [`LendsNew`] and of the proof of a composition's
+/// build: a change to those is made here too.
 #[doc(hidden)]
 #[allow(private_bounds)]
 pub fn assert_build_lends<Q, K, N, P>()

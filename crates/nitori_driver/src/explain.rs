@@ -125,6 +125,7 @@ macro_rules! __explain_needs {
 ///         Tally
 ///     }
 /// }
+/// #[derive(Numbered)]
 /// struct Counter;
 /// impl<L> Part<L> for Counter {
 ///     type Args = ();
@@ -207,6 +208,7 @@ macro_rules! __explain_needs {
 ///         }
 ///     }
 /// }
+/// #[derive(Numbered)]
 /// struct Counter;
 /// impl<L> Part<L> for Counter {
 ///     type Args = ();
@@ -388,6 +390,7 @@ macro_rules! __explain_needs {
 /// #         Tally
 /// #     }
 /// # }
+/// # #[derive(Numbered)]
 /// # struct Counter;
 /// # impl<L> Part<L> for Counter {
 /// #     type Args = ();

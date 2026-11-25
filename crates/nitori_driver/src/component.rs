@@ -111,12 +111,14 @@
 //! use nitori_driver::{
 //!     component::{ArgsOf, Component, Part, PartList},
 //!     frunk_core::hlist::HNil,
+//!     id::Numbered,
 //!     need::{Pos, View},
 //!     structure::NodeKind,
 //! };
 //! trait Estimator {
 //!     fn new() -> Self;
 //! }
+//! #[derive(Numbered)]
 //! struct Base;
 //! impl<L> Part<L> for Base {
 //!     type Args = ();
@@ -141,6 +143,7 @@
 //! trait Estimator {
 //!     fn new() -> Self;
 //! }
+//! #[derive(Numbered)]
 //! struct Base;
 //! impl<L> Part<L> for Base {
 //!     type Args = ();
@@ -181,12 +184,28 @@ use crate::{
 /// The construction arguments of the part `Self` in a composition of the
 /// parts `L`; their type may depend on the whole list.
 ///
-/// A part needs no number of its own unless it is looked for by one: when
-/// the composition's own list of contributions
-/// ([`Composition::Contributions`](crate::call::Composition::Contributions))
-/// is not empty, or a component finds a part's arguments with
-/// [`part_args`], every part of the composition is
-/// `#[derive(Numbered)]` ([`Numbered`]), not only the one looked for.
+/// Every part of a composition is `#[derive(Numbered)]` ([`Numbered`]),
+/// checked where the composition is written: its contributions and its
+/// arguments ([`part_args`]) are found by its number. A part without one
+/// does not compile, whatever it lists:
+///
+/// ```compile_fail,E0277
+/// #![feature(impl_trait_in_assoc_type)]
+/// use nitori_driver::{
+///     __private::calls::{Count, Item, Root, StillClock, Total},
+///     component::Part,
+///     composition,
+///     frunk_core::HList,
+///     structure::Share,
+/// };
+/// struct Counter;
+/// impl<L> Part<L> for Counter {
+///     type Args = ();
+///     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+/// }
+/// struct Q;
+/// composition!(impl for Q: Root, HList![Counter], StillClock, u8);
+/// ```
 pub trait Part<L> {
     /// The arguments.
     type Args;
@@ -234,6 +253,13 @@ where
 {
     <L as FindArgs<O, L>>::find(args)
 }
+
+/// Every part of the list `Self` has a number ([`Numbered`]): what the
+/// proof of a composition asks of its parts.
+#[doc(hidden)]
+pub trait PartsNumbered {}
+impl PartsNumbered for HNil {}
+impl<P: Numbered, Ps: PartsNumbered> PartsNumbered for HCons<P, Ps> {}
 
 /// The arguments of the part `O` in those of a list `Self` of parts, in a
 /// composition of the parts `L`, by the parts' numbers: the first part of

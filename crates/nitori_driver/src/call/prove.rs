@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     capability::contribution::{ListedKnown, OwnListedOnce},
-    component::{ArgsOf, Component, EndCause, Part},
+    component::{ArgsOf, Component, EndCause, Part, PartsNumbered},
     driver::{ChildOpsList, ChildPos, Core, Edit, FkPlace, HandlerAt},
     id::{NumberValue, Numbered, number_of},
     lend::list::{S, Z},
@@ -96,13 +96,13 @@ where
 }
 /// The pack of the kinds `L` of `Q`; [`composition!`](crate::composition!)
 /// defines the opaque pack with it. Every item of the composition's list of
-/// contributions names one of its parts, and every part's piece for a
+/// contributions names one of its parts, every part has a number, and every part's piece for a
 /// family is written once or not at all, whether or not a need takes the
 /// family.
 pub fn prove<Q: Composition, L: Prove<Q, I> + KindsOnce, I>() -> PhantomData<L::Out>
 where
     Q::Contributions: ListedKnown<PartsOf<Q>, Q::Contributions>,
-    PartsOf<Q>: OwnListedOnce<PartsOf<Q>>,
+    PartsOf<Q>: OwnListedOnce<PartsOf<Q>> + PartsNumbered,
 {
     PhantomData
 }
@@ -120,7 +120,7 @@ pub fn with_tables<Q: Composition, L: KindList<Q>, P: PackList<Q, L>>(
 #[diagnostic::on_unimplemented(
     message = "the node kind `{Self}` cannot be composed under `{Q}`",
     note = "every call of every share at the kind is lent its needs at its nodes, every component its own needs and its build needs, and the driver fires `NodeStarted` and `NodeEnding` there; one of them is not met",
-    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
+    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` (`component C of O` for a component of any part) or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
 )]
 pub trait ProveKind<Q, I> {
     /// What was proved.
@@ -199,7 +199,7 @@ where
     message = "the call `{Self}` cannot be lent at the nodes of the kind `{K}` under `{Q}`",
     label = "a call of a share at this kind",
     note = "a need of the call is not on this structure, two of its needs take the same component, the context has no piece it reads, or the kind's `Op` is not the operation of its own `#[call]` function",
-    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
+    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` (`component C of O` for a component of any part) or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
 )]
 pub trait ProveCall<Q, K, P> {}
 impl<Q, K, C, P> ProveCall<Q, K, P> for C
@@ -217,7 +217,7 @@ where
 #[diagnostic::on_unimplemented(
     message = "the calls `{Self}` cannot be lent at the nodes of the kind `{K}` under `{Q}`",
     note = "every call of a share at the kind is lent its needs at its nodes; one of them is not met",
-    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
+    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` (`component C of O` for a component of any part) or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
 )]
 pub trait ProveCalls<Q, K, I> {
     /// Their positions.
@@ -241,7 +241,7 @@ where
 #[diagnostic::on_unimplemented(
     message = "the component `{Self}` of the part `{O}` cannot be lent at the nodes of the kind `{K}` under `{Q}`",
     note = "a component's `wake` and `end` are lent the component, exclusive, then its `Needs`, at its node: one of them is not on this structure, or two take the same component",
-    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
+    note = "to see why, prove the one lending on its own with `nitori_driver::explain!`: `explain!(Q, Kind, call C)`, `explain!(Q, Kind, component C)` (`component C of O` for a component of any part) or `explain!(Q, Kind, needs![...])`, whose error says which need fails and why"
 )]
 pub trait ProveComponent<Q, K, O, P> {}
 impl<Q, K, O, C, P> ProveComponent<Q, K, O, P> for C

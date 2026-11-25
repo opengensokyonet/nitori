@@ -34,6 +34,7 @@ use crate::{
 ///     component::Part,
 ///     composition,
 ///     frunk_core::{HList, hlist, hlist_pat},
+///     id::Numbered,
 ///     need::{Members, Mut, Ref, Under},
 ///     structure::{NodeKind, Share},
 /// };
@@ -54,6 +55,7 @@ use crate::{
 ///     });
 /// }
 ///
+/// #[derive(Numbered)]
 /// struct Counter;
 /// impl<L> Part<L> for Counter {
 ///     type Args = ();

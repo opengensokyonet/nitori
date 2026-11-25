@@ -114,7 +114,7 @@ impl<F, Q, O: ContributionTo<F, Q>, T: PartPieces<F, Q>> PartPieces<F, Q> for HC
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
     message = "the piece of the part `{Self}` for the family `{F}` is not found in `{Q}`",
-    note = "a part's piece is found by the numbers of the part and the family: the family is `#[derive(Numbered)]`, and, when the composition's own list of contributions is not empty, so is every part of the composition"
+    note = "a part's piece is found by the numbers of the part and the family: the family is `#[derive(Numbered)]`, and so is every part of the composition"
 )]
 pub trait ContributionTo<F, Q> {
     /// The contribution.
@@ -283,7 +283,7 @@ impl<O, F, C: Contribute<F>> Settle<O, F, Listed<C>> for Unlisted {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a list of contributions",
     note = "a composition's `Contributions` lists `PartContribution<O, F, C>`, or whole lists of them, spliced in",
-    note = "the parts and the families are found by their numbers: when the list is not empty, every part of the composition, and every family it lists, is `#[derive(Numbered)]`"
+    note = "the parts and the families are found by their numbers: every part of the composition, and every family it lists, is `#[derive(Numbered)]`"
 )]
 pub trait ListedKnown<Parts, All> {}
 impl<Parts, All> ListedKnown<Parts, All> for HNil {}

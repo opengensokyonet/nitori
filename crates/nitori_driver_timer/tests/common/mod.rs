@@ -206,6 +206,7 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
 }
 
 /// The part with the alarms.
+#[derive(Numbered)]
 pub struct Run;
 impl<L> nitori_driver::component::Part<L> for Run {
     type Args = ();

@@ -93,6 +93,7 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 ///         edit.end_self(());
 ///     }
 /// }
+/// #[derive(Numbered)]
 /// struct One;
 /// impl<L> Part<L> for One {
 ///     type Args = ();
@@ -134,6 +135,7 @@ impl<R: NodeKind, K: NodeKind<Request: fmt::Debug>> fmt::Debug for NodeRequest<R
 /// #         edit.end_self(());
 /// #     }
 /// # }
+/// # #[derive(Numbered)]
 /// # struct One;
 /// # impl<L> Part<L> for One {
 /// #     type Args = ();

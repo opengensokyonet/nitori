@@ -66,6 +66,7 @@
 //!         Idle
 //!     }
 //! }
+//! #[derive(Numbered)]
 //! struct Base;
 //! impl<L> Part<L> for Base {
 //!     type Args = ();
