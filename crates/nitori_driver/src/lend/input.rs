@@ -46,7 +46,7 @@ impl<X> InputNeed for Cap<X> where X: CapInput {}
 impl<R> InputNeed for Requests<R> where R: PutInInput {}
 impl<P> InputNeed for Wakes<P> where P: WokenInInput {}
 impl<P, W> InputNeed for Reactions<P, W> where P: FiredInInput {}
-impl<F, L> InputNeed for Contributed<F, L> where F: ContributedInInput {}
+impl<F, Q> InputNeed for Contributed<F, Q> where F: ContributedInInput {}
 
 /// The needs of the capability `Self`, in the input of a locator, only
 /// read.

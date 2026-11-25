@@ -47,6 +47,16 @@ pub trait Composition: 'static + Sized {
     /// What a waking is ranked by, the highest handled first; its levels
     /// are the user's.
     type Priority: Ord + Copy + 'static;
+    /// The composition's own list of contributions to the families of
+    /// contributed capabilities: a
+    /// [`PartContribution`](crate::capability::PartContribution) for a part
+    /// that does not know the family, or a whole list of them spliced in;
+    /// none by default. A part whose contribution to a family is here and
+    /// in its own [`Contributions`](crate::component::Part::Contributions)
+    /// as well, or twice here, does not compile, nor does an item naming a
+    /// part the composition does not have. See
+    /// [`capability`](crate::capability).
+    type Contributions: 'static = HNil;
     /// What the driver keeps of the nodes of every kind: the tables of
     /// [`Pack`](Composition::Pack), opaque too. Named apart from the pack
     /// so that whether the driver is `Send` can follow from them: a
@@ -163,7 +173,9 @@ pub(crate) fn set_now<Q: Composition>(
 }
 
 /// Write a composition: `composition!(impl for Q: Root, Parts, Clock,
-/// Priority)`.
+/// Priority)`, or `composition!(impl for Q: Root, Parts, Clock, Priority,
+/// Contributions)` with the composition's own list of contributions
+/// ([`Composition::Contributions`]), none when it is left out.
 ///
 /// The calls come from the parts' shares (the `Calls` of a
 /// [`Share`](crate::structure::Share));
@@ -389,11 +401,17 @@ pub(crate) fn set_now<Q: Composition>(
 #[macro_export]
 macro_rules! composition {
     (impl for $q:ty: $root:ty, $parts:ty, $clock:ty, $priority:ty $(,)?) => {
+        $crate::composition!(
+            impl for $q: $root, $parts, $clock, $priority, $crate::frunk_core::hlist::HNil
+        );
+    };
+    (impl for $q:ty: $root:ty, $parts:ty, $clock:ty, $priority:ty, $contributions:ty $(,)?) => {
         impl $crate::call::Composition for $q {
             type Root = $root;
             type Parts = $parts;
             type Clock = $clock;
             type Priority = $priority;
+            type Contributions = $contributions;
             type Tables = impl ::core::marker::Sized + 'static;
             type Pack = impl $crate::call::__pack::PackList<
                     Self,

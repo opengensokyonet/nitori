@@ -117,10 +117,13 @@ impl<K: NodeKind<Request = CloseConn, EndReason = ()>, Pr> crate::request::Handl
 }
 
 /// The part with the connection's, the links' and the entries' state.
+#[derive(Numbered)]
 pub struct Core;
 /// The part with what is sent and the recovery.
+#[derive(Numbered)]
 pub struct Loss;
 /// The part that keeps an estimator on the link paths.
+#[derive(Numbered)]
 pub struct Watch;
 pub type Parts = HList![Core, Loss, Watch];
 

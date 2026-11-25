@@ -25,6 +25,7 @@ use super::{
     pack::{CallList, CompList, Desc, FkOf, IlOf, KindDesc, KindList, KindOps, PackList, SlotPoll},
 };
 use crate::{
+    capability::contribution::ListedKnown,
     component::{ArgsOf, Component, EndCause},
     driver::{ChildOpsList, ChildPos, Core, Edit, FkPlace, HandlerAt},
     id::{NumberValue, Numbered, number_of},
@@ -94,8 +95,12 @@ where
     type Out = HCons<K::Pos, T::Out>;
 }
 /// The pack of the kinds `L` of `Q`; [`composition!`](crate::composition!)
-/// defines the opaque pack with it.
-pub fn prove<Q: Composition, L: Prove<Q, I> + KindsOnce, I>() -> PhantomData<L::Out> {
+/// defines the opaque pack with it. Every item of the composition's list of
+/// contributions names one of its parts.
+pub fn prove<Q: Composition, L: Prove<Q, I> + KindsOnce, I>() -> PhantomData<L::Out>
+where
+    Q::Contributions: ListedKnown<PartsOf<Q>>,
+{
     PhantomData
 }
 /// The pack `P` with its tables; [`composition!`](crate::composition!)

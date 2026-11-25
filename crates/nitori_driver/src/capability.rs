@@ -10,20 +10,187 @@
 //! [`At`](crate::need::At). Every [`ReactionPoint`](crate::react::ReactionPoint)
 //! is a capability too, whose object fires the reactions.
 //!
-//! A contributed capability (taken with [`Contributed<F, L>`](Contributed)) is
-//! made of every part's piece for the family `F`, the parts being the list
-//! `L`: the parts of the composition, written out where they are known or
-//! as [`PartsOf<Q>`](crate::call::PartsOf) in code generic over it. Each part writes
-//! [`Contribute<F>`] for every family a call of the composition uses,
-//! `Needs = HNil` and `Piece<'t> = ()` when it gives nothing. The pieces
-//! are lined up in the order of the parts, as an `HList` ([`PiecesOf`]);
-//! the family writes its rule on that list once. Two rules are given here:
-//! dispatching a sum to the piece of its alternative ([`DispatchSum`],
-//! each piece writing [`DispatchRun`]), and running every piece in turn
-//! ([`EachPiece`], each piece writing [`EachRun`]). A piece of `()`
-//! dispatches the empty sum and runs as nothing, written once.
+//! A contributed capability (taken with [`Contributed<F, Q>`](Contributed)) is
+//! made of every part's piece for the family `F`, the parts being those
+//! of the composition `Q`. A part's contribution to a family is a type
+//! implementing [`Contribute<F>`]: its needs, and the piece put together
+//! from their view. It is written in one of two places: in the part's own
+//! list, [`Part::Contributions`](crate::component::Part::Contributions),
+//! as a [`Contribution<F, C>`](Contribution); or in the composition's,
+//! [`Composition::Contributions`](crate::call::Composition::Contributions),
+//! as a [`PartContribution<O, F, C>`](PartContribution) of the part `O`,
+//! for a part that does not know the family. The crate of a family may
+//! export a list of these for the parts it knows, which the composition
+//! puts in its own list as one item, spliced in. The part and the family
+//! are found by their numbers: a family is `#[derive(Numbered)]`, and so
+//! is a part that the composition's list names. A part that writes nothing
+//! for the family, in either place, contributes `()`, with no needs. A
+//! contribution written in both places, or twice in one list (the lists
+//! spliced in counted), does not compile, and neither does a composition's
+//! list that names a part the composition does not have.
 //!
-//! The examples use the structure of [`need`](crate::need). Taking a
+//! The pieces are lined up in the order of the parts, as an `HList`
+//! ([`PiecesOf`]); the family writes its rule on that list once. Two rules
+//! are given here: dispatching a sum to the piece of its alternative
+//! ([`DispatchSum`], each piece writing [`DispatchRun`]), and running
+//! every piece in turn ([`EachPiece`], each piece writing [`EachRun`]). A
+//! piece of `()` dispatches the empty sum and runs as nothing, written
+//! once.
+//!
+//! A family, a part that lists its contribution, a part whose contribution
+//! the composition's list gives, spliced in from what the family's crate
+//! exports, and a part with none:
+//!
+//! ```
+//! #![feature(impl_trait_in_assoc_type)]
+//! use nitori_driver::{
+//!     __private::calls::{Count, Item, Root, StillClock, Total},
+//!     capability::{Contribute, Contribution, EachPiece, EachRun, PartContribution, PiecesOf},
+//!     component::Part,
+//!     composition,
+//!     frunk_core::{HList, hlist_pat},
+//!     id::Numbered,
+//!     need::{Pos, Ref, View},
+//!     structure::Share,
+//! };
+//!
+//! /// The family: what every part says of the total, counted.
+//! #[derive(Numbered)]
+//! struct Tally;
+//! struct TotalPiece<'t>(&'t Total);
+//! impl EachRun<Tally, u32> for TotalPiece<'_> {
+//!     fn each_run(&mut self, n: &mut u32) {
+//!         *n += self.0.0 + 1;
+//!     }
+//! }
+//! /// A contribution to the family: the root's total, read.
+//! struct TotalTally;
+//! impl Contribute<Tally> for TotalTally {
+//!     type Needs = HList![Ref<Total>];
+//!     type Piece<'t> = TotalPiece<'t>;
+//!     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> TotalPiece<'t> {
+//!         let hlist_pat![total] = view;
+//!         TotalPiece(total)
+//!     }
+//! }
+//!
+//! /// A part that knows the family, and lists its contribution.
+//! #[derive(Numbered)]
+//! struct Counter;
+//! impl<L> Part<L> for Counter {
+//!     type Args = ();
+//!     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+//!     type Contributions = HList![Contribution<Tally, TotalTally>];
+//! }
+//! /// Two parts that do not know it.
+//! #[derive(Numbered)]
+//! struct Audit;
+//! impl<L> Part<L> for Audit {
+//!     type Args = ();
+//! }
+//! #[derive(Numbered)]
+//! struct Quiet;
+//! impl<L> Part<L> for Quiet {
+//!     type Args = ();
+//! }
+//! /// What the family's crate exports for the parts it knows.
+//! type TallyOfAudit = HList![PartContribution<Audit, Tally, TotalTally>];
+//!
+//! struct Q;
+//! composition!(impl for Q: Root, HList![Counter, Audit, Quiet], StillClock, u8, HList![TallyOfAudit]);
+//!
+//! // The pieces, in the order of the parts; the quiet part's is `()`.
+//! fn lined_up<'t>(pieces: PiecesOf<'t, Q, Tally>) -> HList![TotalPiece<'t>, TotalPiece<'t>, ()] {
+//!     pieces
+//! }
+//! fn count(mut pieces: PiecesOf<'_, Q, Tally>) -> u32 {
+//!     let mut n = 0;
+//!     pieces.each_piece(&mut n);
+//!     n
+//! }
+//! ```
+//!
+//! The counter's contribution written in the composition's list as well:
+//!
+//! ```compile_fail,E0277
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_driver::{
+//! #     __private::calls::{Count, Item, Root, StillClock, Total},
+//! #     capability::{Contribute, Contribution, PartContribution, PiecesOf},
+//! #     component::Part,
+//! #     composition,
+//! #     frunk_core::{HList, hlist_pat},
+//! #     id::Numbered,
+//! #     need::{Pos, Ref, View},
+//! #     structure::Share,
+//! # };
+//! # #[derive(Numbered)]
+//! # struct Tally;
+//! # struct TotalTally;
+//! # impl Contribute<Tally> for TotalTally {
+//! #     type Needs = HList![Ref<Total>];
+//! #     type Piece<'t> = &'t Total;
+//! #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Total {
+//! #         let hlist_pat![total] = view;
+//! #         total
+//! #     }
+//! # }
+//! # #[derive(Numbered)]
+//! # struct Counter;
+//! # impl<L> Part<L> for Counter {
+//! #     type Args = ();
+//! #     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+//! #     type Contributions = HList![Contribution<Tally, TotalTally>];
+//! # }
+//! struct Q;
+//! composition!(
+//!     impl for Q: Root, HList![Counter], StillClock, u8,
+//!     HList![PartContribution<Counter, Tally, TotalTally>],
+//! );
+//! fn count(_: PiecesOf<'_, Q, Tally>) {}
+//! ```
+//!
+//! A composition's list that names a part the composition does not have:
+//!
+//! ```compile_fail,E0277
+//! # #![feature(impl_trait_in_assoc_type)]
+//! # use nitori_driver::{
+//! #     __private::calls::{Count, Item, Root, StillClock, Total},
+//! #     capability::{Contribute, PartContribution},
+//! #     component::Part,
+//! #     composition,
+//! #     frunk_core::{HList, hlist_pat},
+//! #     id::Numbered,
+//! #     need::{Pos, Ref, View},
+//! #     structure::Share,
+//! # };
+//! # #[derive(Numbered)]
+//! # struct Tally;
+//! # struct TotalTally;
+//! # impl Contribute<Tally> for TotalTally {
+//! #     type Needs = HList![Ref<Total>];
+//! #     type Piece<'t> = &'t Total;
+//! #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Total {
+//! #         let hlist_pat![total] = view;
+//! #         total
+//! #     }
+//! # }
+//! # #[derive(Numbered)]
+//! # struct Counter;
+//! # impl<L> Part<L> for Counter {
+//! #     type Args = ();
+//! #     type Shares = HList![Share<Root, HList![Total]>, Share<Item, HList![Count]>];
+//! # }
+//! #[derive(Numbered)]
+//! struct Audit;
+//! struct Q;
+//! composition!(
+//!     impl for Q: Root, HList![Counter], StillClock, u8,
+//!     HList![PartContribution<Audit, Tally, TotalTally>],
+//! );
+//! ```
+//!
+//! The examples that follow use the structure of [`need`](crate::need). Taking a
 //! link's planning, with the connection's core beside it:
 //!
 //! ```
@@ -49,14 +216,16 @@
 //! lends!(Conn, HList![Under<ConnCore, At<Planner, Cap<Planning>>>]);
 //! ```
 //!
-//! A contributed capability, the parts' labels read in turn; the one part
-//! of the structure contributes its label:
+//! A contributed capability lent, the parts' labels read in turn; the one
+//! part of the structure contributes its label, which the composition
+//! `Q` lists:
 //!
 //! ```
-//! # use nitori_driver::{__private::doc::*, frunk_core::{HList, hlist_pat}, need::*};
-//! use nitori_driver::capability::{Contribute, Contributed, EachPiece, EachRun, PiecesOf};
+//! # use nitori_driver::{__private::doc::*, frunk_core::{HList, hlist_pat}, id::Numbered, need::*};
+//! use nitori_driver::capability::{Contribute, Contributed, EachPiece, EachRun, PartContribution, PiecesOf};
 //!
 //! /// The family: every part's label, counted.
+//! #[derive(Numbered)]
 //! struct Labels;
 //! struct LabelPiece<'t>(&'t Label);
 //! impl EachRun<Labels, u32> for LabelPiece<'_> {
@@ -64,7 +233,9 @@
 //!         *count += 1;
 //!     }
 //! }
-//! impl Contribute<Labels> for V1 {
+//! /// What `V1` contributes: its label.
+//! struct V1Labels;
+//! impl Contribute<Labels> for V1Labels {
 //!     type Needs = HList![Ref<Label>];
 //!     type Piece<'t> = LabelPiece<'t>;
 //!     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> LabelPiece<'t> {
@@ -72,10 +243,11 @@
 //!         LabelPiece(label)
 //!     }
 //! }
-//! lends!(Conn, HList![Contributed<Labels, Parts>, Ref<ConnCore>]);
+//! # type Q = Composed<HList![PartContribution<V1, Labels, V1Labels>]>;
+//! lends!(Conn, HList![Contributed<Labels, Q>, Ref<ConnCore>]);
 //!
 //! // The view is the list of the pieces, whatever the position.
-//! fn count(mut pieces: PiecesOf<'_, Parts, Labels>) -> u32 {
+//! fn count(mut pieces: PiecesOf<'_, Q, Labels>) -> u32 {
 //!     let mut n = 0;
 //!     pieces.each_piece(&mut n);
 //!     n
@@ -86,10 +258,12 @@
 //! exclusive, overlap:
 //!
 //! ```compile_fail,E0277
-//! # use nitori_driver::{__private::doc::*, frunk_core::{HList, hlist_pat}, need::*};
-//! # use nitori_driver::capability::{Contribute, Contributed};
+//! # use nitori_driver::{__private::doc::*, frunk_core::{HList, hlist_pat}, id::Numbered, need::*};
+//! # use nitori_driver::capability::{Contribute, Contributed, PartContribution};
+//! # #[derive(Numbered)]
 //! # struct Labels;
-//! # impl Contribute<Labels> for V1 {
+//! # struct V1Labels;
+//! # impl Contribute<Labels> for V1Labels {
 //! #     type Needs = HList![Ref<Label>];
 //! #     type Piece<'t> = &'t Label;
 //! #     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> &'t Label {
@@ -97,7 +271,8 @@
 //! #         label
 //! #     }
 //! # }
-//! lends!(Conn, HList![Contributed<Labels, Parts>, Mut<Label>]);
+//! # type Q = Composed<HList![PartContribution<V1, Labels, V1Labels>]>;
+//! lends!(Conn, HList![Contributed<Labels, Q>, Mut<Label>]);
 //! ```
 use core::marker::PhantomData;
 
@@ -107,6 +282,9 @@ use frunk_core::{
 };
 
 use crate::need::{Need, Pos, View};
+
+pub(crate) mod contribution;
+pub use contribution::{Contribution, PartContribution, PieceList, PiecesOf};
 
 // ---------------------------------------------------------------- composed capabilities
 
@@ -132,31 +310,33 @@ pub trait Capability: 'static {
 
 // ---------------------------------------------------------------- contributed capabilities
 
-/// Every part's piece for the family `F`, the parts being `L`, in their
-/// order: an `HList` of them, [`PiecesOf`]`<'t, L, F>`.
+/// Every part's piece for the family `F`, the parts being those of the
+/// composition `Q`, in their order: an `HList` of them,
+/// [`PiecesOf`]`<'t, Q, F>`.
 ///
-/// `L` is the list of the parts of the composition: written out where it
-/// is known, [`PartsOf<Q>`](crate::call::PartsOf) in a call generic over
-/// the structure, which uses the pieces through what a bound of the
-/// composition says of them. The view does not depend on where it is
-/// lent. The pieces' needs are taken around the lend point and proved with
-/// the other needs; that `L` is the composition's parts is not checked.
-pub struct Contributed<F, L>(PhantomData<fn() -> (F, L)>);
-impl<F: 'static, L: PieceList<F>> Need for Contributed<F, L> {
-    type View<'t, P: Pos> = L::Pieces<'t>;
+/// `Q` is the composition the need is lent under: written out where it is
+/// known, the call's own `Q` in a call generic over it, which uses the
+/// pieces through what a bound of the composition ([`PieceList`]) says of
+/// them. The view does not depend on where it is lent. The pieces' needs
+/// are taken around the lend point and proved with the other needs; lent
+/// in a structure whose parts are not those of `Q`, it does not compile.
+pub struct Contributed<F, Q>(PhantomData<fn() -> (F, Q)>);
+impl<F: 'static, Q: PieceList<F>> Need for Contributed<F, Q> {
+    type View<'t, P: Pos> = Q::Pieces<'t>;
 }
 
-/// What the part `Self` contributes to the family `F`: needs, and the
+/// What the type `Self` contributes to the family `F`: needs, and the
 /// piece put together from their view.
 ///
-/// Every part of a composition writes it for every family a call of the
-/// composition uses; a part that gives nothing writes `Needs = HNil` and
-/// `Piece<'t> = ()`. The needs are taken around the lend point, as a
-/// composed capability's are, and proved with the other needs; the piece
-/// does not depend on their position.
+/// A part's contribution is listed in the part's own list
+/// ([`Contribution`]) or in the composition's ([`PartContribution`]); a
+/// part with none contributes `()`, whose needs are none and whose piece is
+/// `()`. The needs are taken around the lend point, as a composed
+/// capability's are, and proved with the other needs; the piece does not
+/// depend on their position.
 #[diagnostic::on_unimplemented(
-    message = "the part `{Self}` does not say what it contributes to the family `{F}`",
-    note = "every part writes `Contribute<{F}>` when a need of the composition takes `Contributed<{F}, _>`; `Needs = HNil` and `Piece<'t> = ()` for nothing"
+    message = "`{Self}` is listed as a contribution to the family `{F}` and does not implement `Contribute<{F}>`",
+    note = "a contribution, listed in a part's `Contributions` as `Contribution<{F}, C>` or in the composition's as `PartContribution<O, {F}, C>`, implements `Contribute<{F}>`: its needs, and the piece put together from them"
 )]
 pub trait Contribute<F> {
     /// The needs.
@@ -166,36 +346,12 @@ pub trait Contribute<F> {
     /// Put the piece together.
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> Self::Piece<'t>;
 }
-
-/// The pieces of a list of parts for the family `F`, in the order of the
-/// parts.
-pub trait PieceList<F>: 'static {
-    /// Every part's needs, one list per part.
-    type Needs: Need;
-    /// Every part's piece.
-    type Pieces<'t>;
-    /// Put every piece together from the view of every part's needs.
-    fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> Self::Pieces<'t>;
-}
-impl<F> PieceList<F> for HNil {
+/// The contribution of a part that has none: no needs, and the piece `()`.
+impl<F> Contribute<F> for () {
     type Needs = HNil;
-    type Pieces<'t> = HNil;
-    fn assemble<'t, P: Pos>(_: View<'t, Self::Needs, P>) -> Self::Pieces<'t> {
-        HNil
-    }
+    type Piece<'t> = ();
+    fn assemble<'t, P: Pos>(_: View<'t, Self::Needs, P>) -> Self::Piece<'t> {}
 }
-impl<F, Pt: Contribute<F> + 'static, T: PieceList<F>> PieceList<F> for HCons<Pt, T> {
-    type Needs = HCons<Pt::Needs, T::Needs>;
-    type Pieces<'t> = HCons<Pt::Piece<'t>, T::Pieces<'t>>;
-    fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> Self::Pieces<'t> {
-        HCons {
-            head: Pt::assemble::<P::Head>(view.head),
-            tail: T::assemble::<P::Tail>(view.tail),
-        }
-    }
-}
-/// The pieces of the parts `P` for the family `F`, lent for `'t`.
-pub type PiecesOf<'t, P, F> = <P as PieceList<F>>::Pieces<'t>;
 
 // ---------------------------------------------------------------- the two rules
 

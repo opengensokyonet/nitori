@@ -3,19 +3,21 @@
 //! over its position; and contributed ones, by the two rules.
 use alloc::vec::Vec;
 
+use core::marker::PhantomData;
+
 use frunk_core::{
     HList,
     coproduct::{CNil, Coproduct},
-    hlist,
-    hlist::HNil,
-    hlist_pat,
+    hlist, hlist_pat,
 };
 
 use super::fixtures::{lend, *};
 use crate::{
     capability::{
         Capability, Contribute, Contributed, DispatchRun, DispatchSum, EachPiece, EachRun,
+        PartContribution, contribution::PieceLists,
     },
+    id::Numbered,
     lend::{Visit, lend_visit},
     need::{At, Cap, Members, Mut, Pos, Ref, Under, View},
     needs,
@@ -137,89 +139,112 @@ fn composed() {
 
 /// The family that counts: the core reads its link's count, the loss part
 /// the sent records, the watch gives nothing.
-struct Counts;
-struct LinkPiece<'t>(&'t LinkCore);
+#[derive(Numbered)]
+pub struct Counts;
+pub struct LinkPiece<'t>(&'t LinkCore);
 impl EachRun<Counts, u32> for LinkPiece<'_> {
     fn each_run(&mut self, n: &mut u32) {
         *n += self.0.rx + 1;
     }
 }
-struct RecordsPiece<'t>(&'t SentRecords);
+pub struct RecordsPiece<'t>(&'t SentRecords);
 impl EachRun<Counts, u32> for RecordsPiece<'_> {
     fn each_run(&mut self, n: &mut u32) {
         *n = *n * 10 + u32::try_from(self.0.sent.len()).unwrap_or(u32::MAX);
     }
 }
-impl Contribute<Counts> for Core {
+/// The core's contribution to the counts, in its own list.
+pub struct CountsOfCore;
+impl Contribute<Counts> for CountsOfCore {
     type Needs = HList![Ref<LinkCore>];
     type Piece<'t> = LinkPiece<'t>;
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> LinkPiece<'t> {
         LinkPiece(view.head)
     }
 }
-impl Contribute<Counts> for Loss {
+/// The loss part's contribution to the counts, in the composition's list.
+pub struct CountsOfLoss;
+impl Contribute<Counts> for CountsOfLoss {
     type Needs = HList![Ref<SentRecords>];
     type Piece<'t> = RecordsPiece<'t>;
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> RecordsPiece<'t> {
         RecordsPiece(view.head)
     }
 }
-impl Contribute<Counts> for Watch {
-    type Needs = HNil;
-    type Piece<'t> = ();
-    fn assemble<'t, P: Pos>(_: View<'t, Self::Needs, P>) -> Self::Piece<'t> {}
-}
 
 /// The family that takes frames: one alternative per part, the watch's
 /// empty.
-struct Frames;
+#[derive(Numbered)]
+pub struct Frames;
 struct CoreFrame(u32);
 struct LossFrame(u64);
 type FrameSum = Coproduct<CoreFrame, Coproduct<LossFrame, Coproduct<CNil, CNil>>>;
-struct CoreFrames<'t>(&'t mut LinkCore);
+pub struct CoreFrames<'t>(&'t mut LinkCore);
 impl DispatchRun<Frames, CoreFrame, u32, u64> for CoreFrames<'_> {
     fn dispatch_run(&mut self, frame: CoreFrame, by: u32) -> u64 {
         self.0.rx += frame.0 * by;
         u64::from(self.0.rx)
     }
 }
-struct LossFrames<'t>(&'t mut SentRecords);
+pub struct LossFrames<'t>(&'t mut SentRecords);
 impl DispatchRun<Frames, LossFrame, u32, u64> for LossFrames<'_> {
     fn dispatch_run(&mut self, frame: LossFrame, by: u32) -> u64 {
         self.0.sent.push(frame.0 * u64::from(by));
         self.0.sent.len() as u64
     }
 }
-impl Contribute<Frames> for Core {
+/// The core's contribution to the frames, in its own list.
+pub struct FramesOfCore;
+impl Contribute<Frames> for FramesOfCore {
     type Needs = HList![Mut<LinkCore>];
     type Piece<'t> = CoreFrames<'t>;
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> CoreFrames<'t> {
         CoreFrames(view.head)
     }
 }
-impl Contribute<Frames> for Loss {
+/// The loss part's contribution to the frames, in the composition's list.
+pub struct FramesOfLoss;
+impl Contribute<Frames> for FramesOfLoss {
     type Needs = HList![Mut<SentRecords>];
     type Piece<'t> = LossFrames<'t>;
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> LossFrames<'t> {
         LossFrames(view.head)
     }
 }
-impl Contribute<Frames> for Watch {
-    type Needs = HNil;
-    type Piece<'t> = ();
-    fn assemble<'t, P: Pos>(_: View<'t, Self::Needs, P>) -> Self::Piece<'t> {}
+
+/// A composition of the parts of both structures whose own list of
+/// contributions is `C`: a stand-in, lent with `lend!` as the structures
+/// are.
+struct Listing<C>(PhantomData<fn() -> C>);
+impl<C: 'static> PieceLists for Listing<C> {
+    type Parts = Parts;
+    type Contributions = C;
 }
+/// The loss part's contributions, written in the composition's list.
+type LossListed = HList![
+    PartContribution<Loss, Counts, CountsOfLoss>,
+    PartContribution<Loss, Frames, FramesOfLoss>,
+];
+/// The same, as the crate of the families would export them, spliced in
+/// with an empty list.
+type LossExported = HList![PartContribution<Loss, Frames, FramesOfLoss>];
+type LossSpliced = HList![
+    HList![],
+    LossExported,
+    PartContribution<Loss, Counts, CountsOfLoss>,
+];
 
 /// What the two families did at link 1 of `$root`, whose full key is
-/// `$at`: the count, each frame's answer, and the count again.
+/// `$at`, under the composition `$q`: the count, each frame's answer, and
+/// the count again.
 macro_rules! contributions {
-    ($root:expr, $at:expr) => {{
+    ($root:expr, $at:expr, $q:ty) => {{
         macro_rules! count {
             () => {
                 lend!(
                     $root,
                     LinkPath,
-                    HList![Contributed<Counts, Parts>],
+                    HList![Contributed<Counts, $q>],
                     $at,
                     |hlist_pat![mut pieces]| {
                         let mut n = 0;
@@ -233,7 +258,7 @@ macro_rules! contributions {
         let frames = lend!(
             $root,
             LinkPath,
-            HList![Contributed<Frames, Parts>],
+            HList![Contributed<Frames, $q>],
             $at,
             |hlist_pat![mut pieces]| {
                 let mut take = |frame: FrameSum, by| {
@@ -254,9 +279,16 @@ macro_rules! contributions {
 #[test]
 fn contributed() {
     let mut root = tree_one_as_two();
-    let one = contributions!(&mut root, hlist![PathKey(10), LinkId(1)]);
+    // The core's pieces from its own list, the loss part's from the
+    // composition's (written out on the one structure, spliced in on the
+    // other), the watch's `()`.
+    let one = contributions!(
+        &mut root,
+        hlist![PathKey(10), LinkId(1)],
+        Listing<LossListed>
+    );
     let mut root = tree_two();
-    let two = contributions!(&mut root, hlist![LinkId(1)]);
+    let two = contributions!(&mut root, hlist![LinkId(1)], Listing<LossSpliced>);
     // Before: (0 + 1) * 10 and no record; after: the link counted 7 and
     // one record.
     same_on_both(one, two, (Some(10), Some((6, 1, 7)), Some(81)));

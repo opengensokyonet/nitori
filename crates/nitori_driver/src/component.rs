@@ -24,7 +24,10 @@
 //! A part lists the kinds of nodes it extends, one
 //! [`Share`](crate::structure::Share) each, in [`Part::Shares`]: the
 //! components there, the calls and the reactions. In a kind it does not
-//! list, it keeps nothing.
+//! list, it keeps nothing. Its contributions to the families of contributed
+//! capabilities are listed in [`Part::Contributions`], one
+//! [`Contribution`](crate::capability::Contribution) each
+//! ([`capability`](crate::capability)).
 //!
 //! Every part has construction arguments, whose type may depend on the
 //! whole list ([`Part<L>`](Part)); the driver puts them in one list
@@ -207,6 +210,13 @@ pub trait Part<L> {
     /// calls and no reactions. A share at a kind the structure it is
     /// composed in does not have is left out, not refused.
     type Shares = HNil;
+    /// The part's contributions to the families of contributed
+    /// capabilities, one [`Contribution`](crate::capability::Contribution)
+    /// per family; none by default. To a family it does not list, and the
+    /// composition's [`Contributions`](crate::call::Composition::Contributions)
+    /// does not list for it either, it contributes `()`. See
+    /// [`capability`](crate::capability).
+    type Contributions = HNil;
 }
 /// The arguments of a list of parts `Self` in a composition of the parts
 /// `L`: one per part, in order.

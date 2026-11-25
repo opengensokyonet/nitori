@@ -16,7 +16,7 @@ use crate::{
 };
 
 mod calls;
-mod contributed;
+pub(crate) mod contributed;
 mod entries;
 mod generic;
 mod ready;

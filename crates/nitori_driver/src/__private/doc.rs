@@ -2,14 +2,16 @@
 //! ConnCore, Label; [LogicalPath by PathKey { SentRecords; [LinkPath by
 //! LinkId { LinkCore, Planner, Label; Recovery? { Congestion } }] }] }`,
 //! all of it in the one part `V1`; the requests `Ping` and `Close`; the
-//! capability [`Planning`] and the reaction points [`Sent`], [`Echo`],
+//! capability [`Planning`], the stand-in composition [`Composed`], and the reaction points [`Sent`], [`Echo`],
 //! [`Tick`], [`Tock`] and [`Loop`], with the locator [`PickByLoop`];
 //! and [`lends!`], [`lends_in!`] and [`component_lends!`], which prove
 //! needs on it.
+use core::marker::PhantomData;
+
 use crate::{
-    capability::Capability,
+    capability::{Capability, contribution::PieceLists},
     component::Part,
-    frunk_core::{HList, hlist_pat},
+    frunk_core::{HList, hlist::HNil, hlist_pat},
     id::Numbered,
     need::{At, Cap, Locator, Mut, OneOrNone, Pos, Ref, Under, View},
     react::{Reaction, ReactionPoint, ReactsTo},
@@ -67,6 +69,7 @@ impl NodeKind for Recovery {
 }
 
 /// The one part.
+#[derive(Numbered)]
 pub struct V1;
 impl<L> Part<L> for V1 {
     type Args = ();
@@ -89,6 +92,15 @@ impl<L> Part<L> for V1 {
 }
 /// The parts.
 pub type Parts = HList![V1];
+
+/// What the examples' contributed capabilities are taken under: a
+/// composition of [`Parts`] whose own list of contributions is `C`. A
+/// stand-in, as [`Conn`] is not composed (its points chain into cycles).
+pub struct Composed<C = HNil>(PhantomData<fn() -> C>);
+impl<C: 'static> PieceLists for Composed<C> {
+    type Parts = Parts;
+    type Contributions = C;
+}
 
 /// Planning a packet: a link's planner, exclusive, and its core.
 pub struct Planning;

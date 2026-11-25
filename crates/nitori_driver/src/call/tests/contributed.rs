@@ -17,6 +17,7 @@ use crate::{
     call::{CallFamily, CallKind, Composition, LoanNeeds, PartsOf, poll_call, start_calls},
     capability::{Contribute, Contributed, DispatchRun, DispatchSum, PieceList},
     frunk_core::hlist,
+    id::Numbered,
     lend::tests::{
         fixtures::{
             Core, LinkCore, LinkId, LinkPath, Loss, PathKey, SentRecords, Watch, lend,
@@ -29,7 +30,8 @@ use crate::{
 };
 
 /// The family: frames, each dispatched to its part's piece.
-pub struct Frames;
+#[derive(Numbered)]
+pub struct WireFrames;
 /// The core's frame: an acknowledgement.
 pub struct Ack(pub u32);
 /// The loss part's frame: a loss.
@@ -93,7 +95,7 @@ pub type FramesOf<Q> = <PartsOf<Q> as FrameSet>::Sum;
 
 /// The core's piece: the link's core, which counts what is acknowledged.
 pub struct AckPiece<'t>(&'t mut LinkCore);
-impl DispatchRun<Frames, Ack, (), u32> for AckPiece<'_> {
+impl DispatchRun<WireFrames, Ack, (), u32> for AckPiece<'_> {
     fn dispatch_run(&mut self, ack: Ack, _: ()) -> u32 {
         self.0.rx += ack.0;
         self.0.rx
@@ -101,13 +103,15 @@ impl DispatchRun<Frames, Ack, (), u32> for AckPiece<'_> {
 }
 /// The loss part's piece: the sent records, which count what is lost.
 pub struct LostPiece<'t>(&'t mut SentRecords);
-impl DispatchRun<Frames, Lost, (), u32> for LostPiece<'_> {
+impl DispatchRun<WireFrames, Lost, (), u32> for LostPiece<'_> {
     fn dispatch_run(&mut self, lost: Lost, _: ()) -> u32 {
         self.0.acked += lost.0;
         self.0.acked
     }
 }
-impl Contribute<Frames> for Core {
+/// The core's contribution, in its own list.
+pub struct CoreFrames;
+impl Contribute<WireFrames> for CoreFrames {
     type Needs = HList![Mut<LinkCore>];
     type Piece<'t> = AckPiece<'t>;
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> AckPiece<'t> {
@@ -115,7 +119,9 @@ impl Contribute<Frames> for Core {
         AckPiece(core)
     }
 }
-impl Contribute<Frames> for Loss {
+/// The loss part's contribution, in its own list.
+pub struct LossFrames;
+impl Contribute<WireFrames> for LossFrames {
     type Needs = HList![Mut<SentRecords>];
     type Piece<'t> = LostPiece<'t>;
     fn assemble<'t, P: Pos>(view: View<'t, Self::Needs, P>) -> LostPiece<'t> {
@@ -123,24 +129,16 @@ impl Contribute<Frames> for Loss {
         LostPiece(sent)
     }
 }
-impl Contribute<Frames> for Watch {
-    type Needs = HList![];
-    type Piece<'t> = ();
-    fn assemble<'t, P: Pos>(_: View<'t, Self::Needs, P>) -> Self::Piece<'t> {}
-}
 
 /// What a call that dispatches frames asks of the composition.
-pub trait DispatchesFrames: Composition<
-    Parts: FrameSet<Sum: Decode>
-               + for<'w> PieceList<Frames, Pieces<'w>: DispatchSum<Frames, FramesOf<Self>, (), u32>>,
->
+pub trait DispatchesFrames:
+    Composition<Parts: FrameSet<Sum: Decode>>
+    + for<'w> PieceList<WireFrames, Pieces<'w>: DispatchSum<WireFrames, FramesOf<Self>, (), u32>>
 {
 }
 impl<Q> DispatchesFrames for Q where
-    Q: Composition<
-        Parts: FrameSet<Sum: Decode>
-                   + for<'w> PieceList<Frames, Pieces<'w>: DispatchSum<Frames, FramesOf<Q>, (), u32>>,
-    >
+    Q: Composition<Parts: FrameSet<Sum: Decode>>
+        + for<'w> PieceList<WireFrames, Pieces<'w>: DispatchSum<WireFrames, FramesOf<Q>, (), u32>>
 {
 }
 
@@ -148,7 +146,7 @@ impl<Q> DispatchesFrames for Q where
 /// and what the piece answered noted; a type byte no part has is noted as
 /// unknown.
 impl<Q: DispatchesFrames, K: NodeKind> CallKind<Q, K> for Receiving {
-    type Needs = HList![Contributed<Frames, PartsOf<Q>>];
+    type Needs = HList![Contributed<WireFrames, Q>];
     type Op = Self;
     fn start(_: &mut K::Start) -> Self {
         Receiving::new()

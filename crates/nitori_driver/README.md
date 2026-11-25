@@ -33,14 +33,16 @@ and what each kind of node can be asked.
   `wake` when its waker is woken and `end` when the node ends, each lent
   its own needs.
 - `capability` and `react`: capabilities put together from needs, or
-  contributed by every part; reaction points that the other parts react
+  contributed by the parts, each part's contribution to a family listed
+  in the part or in the composition; reaction points that the other parts react
   to where an action happens, among them the driver's `NodeStarted` and
   `NodeEnding`.
 - `call`: kinds of calls (`CallKind`, written with `nitori_call`'s
   `#[call]`), lent their needs on every poll; a call sets the priority its
   standard waker wakes it at, and `settle`s to wait for the requests it
   put in. A composition (`composition!`) names a root kind, the parts, a
-  clock and a priority type, and proves every call, every component's
+  clock, a priority type and, when it has one, its own list of
+  contributions, and proves every call, every component's
   operations and every reaction once.
 - `request`: a request names its node by key address; the node's kind
   names its handler (`HandleRequest`), which gets an edit handle

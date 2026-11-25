@@ -15,6 +15,8 @@ use frunk_core::{
 
 use super::fixtures::*;
 use crate::{
+    call::tests::contributed as wire,
+    capability::Contribution,
     component::{ArgsOf, Component, ComponentView, EndCause, Held, Part, PartList},
     id::Numbered,
     need::{Cap, Members, Mut, OwnKey, Pos, Ref, Requests, Under, View},
@@ -47,10 +49,16 @@ pub struct WatchArgs;
 impl<L> Part<L> for Core {
     type Args = CoreArgs;
     type Shares = CoreShares;
+    type Contributions = HList![
+        Contribution<super::capability::Counts, super::capability::CountsOfCore>,
+        Contribution<super::capability::Frames, super::capability::FramesOfCore>,
+        Contribution<wire::WireFrames, wire::CoreFrames>,
+    ];
 }
 impl<L> Part<L> for Loss {
     type Args = LossArgs;
     type Shares = LossShares;
+    type Contributions = HList![Contribution<wire::WireFrames, wire::LossFrames>];
 }
 impl<L> Part<L> for Watch {
     type Args = WatchArgs;

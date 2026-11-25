@@ -9,7 +9,7 @@ use super::{
     tree::Ctx,
 };
 use crate::{
-    capability::{Capability, Contributed, PieceList},
+    capability::{Capability, Contributed, PieceList, contribution::PieceLists},
     need::{Cap, Pos},
 };
 
@@ -51,31 +51,44 @@ impl<Ps: Pos> Pos for ContribPos<Ps> {
     type Inner = Ps;
 }
 
-impl<C: Ctx, F: 'static, L: PieceList<F>, Ps: Pos> Lend<C, ContribPos<Ps>> for Contributed<F, L>
+impl<C: Ctx, F: 'static, Q: PieceList<F>, Ps: Pos> Lend<C, ContribPos<Ps>> for Contributed<F, Q>
 where
-    L::Needs: Lend<C, Ps>,
+    Q::Needs: Lend<C, Ps>,
 {
-    type Cols = <L::Needs as Lend<C, Ps>>::Cols;
-    fn build<'a>(hs: <Self::Cols as Plan>::Hs<'a>, at: &C::Fk) -> L::Pieces<'a>
+    type Cols = <Q::Needs as Lend<C, Ps>>::Cols;
+    fn build<'a>(hs: <Self::Cols as Plan>::Hs<'a>, at: &C::Fk) -> Q::Pieces<'a>
     where
         Self: 'a,
     {
-        L::assemble::<Ps>(<L::Needs as Lend<C, Ps>>::build(hs, at))
+        Q::assemble::<Ps>(<Q::Needs as Lend<C, Ps>>::build(hs, at))
     }
 }
-impl<C, F, L: PieceList<F>, Ps> Check<C, ContribPos<Ps>> for Contributed<F, L> where
-    L::Needs: Check<C, Ps>
-{
-}
-impl<C, F, L: PieceList<F>, Ps> Takes<C, ContribPos<Ps>> for Contributed<F, L>
+impl<C, F, Q, Ps> Check<C, ContribPos<Ps>> for Contributed<F, Q>
 where
-    L::Needs: Takes<C, Ps>,
+    C: Ctx,
+    Q: PieceList<F> + PieceLists,
+    Q::Needs: Check<C, Ps>,
+    C::Parts: LentUnder<Q, <Q as PieceLists>::Parts>,
 {
-    type Touches = <L::Needs as Takes<C, Ps>>::Touches;
 }
-impl<F, L: PieceList<F>> TakesExclusive for Contributed<F, L>
+impl<C, F, Q: PieceList<F>, Ps> Takes<C, ContribPos<Ps>> for Contributed<F, Q>
 where
-    L::Needs: TakesExclusive,
+    Q::Needs: Takes<C, Ps>,
 {
-    type Out = <L::Needs as TakesExclusive>::Out;
+    type Touches = <Q::Needs as Takes<C, Ps>>::Touches;
 }
+impl<F, Q: PieceList<F>> TakesExclusive for Contributed<F, Q>
+where
+    Q::Needs: TakesExclusive,
+{
+    type Out = <Q::Needs as TakesExclusive>::Out;
+}
+
+/// The parts `Self` of the structure a [`Contributed`] is lent in are
+/// those of its composition `Q`, `P`.
+#[diagnostic::on_unimplemented(
+    message = "`Contributed<_, {Q}>` is lent in a structure whose parts are not those of `{Q}`",
+    note = "the pieces are those of the parts of the composition the need names: in a call, take `Contributed<F, Q>` of the composition `Q` the call is lent under"
+)]
+pub trait LentUnder<Q, P> {}
+impl<Q, P> LentUnder<Q, P> for P {}

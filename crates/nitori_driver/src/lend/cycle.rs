@@ -87,19 +87,19 @@ impl<Rt, Pt, S, X> NoCycle<Rt, Pt, S> for crate::need::Cap<X> where X: CapNoCycl
 )]
 pub trait CapNoCycle<Rt, Pt, Seen> {}
 impl<Rt, Pt, S, X: Capability> CapNoCycle<Rt, Pt, S> for X where X::Needs: NoCycle<Rt, Pt, S> {}
-impl<Rt, Pt, S, F, L> NoCycle<Rt, Pt, S> for Contributed<F, L> where L: PiecesNoCycle<F, Rt, Pt, S> {}
-/// The pieces of the parts `Self` for the family `F` fire no point that
-/// the chain `Seen` went through. Its own bound, so that a part that does
-/// not contribute is reported as such rather than as a cycle.
+impl<Rt, Pt, S, F, Q> NoCycle<Rt, Pt, S> for Contributed<F, Q> where Q: PiecesNoCycle<F, Rt, Pt, S> {}
+/// The pieces of the composition `Self` for the family `F` fire no point
+/// that the chain `Seen` went through. Its own bound, so that pieces that
+/// cannot be put together are reported as such rather than as a cycle.
 #[diagnostic::on_unimplemented(
-    message = "a part of `{Self}` does not say what it contributes to the family `{F}`",
-    note = "every part writes `Contribute<{F}>` when a need of the composition takes `Contributed<{F}, _>`; `Needs = HNil` and `Piece<'t> = ()` for nothing"
+    message = "the pieces of `{Self}` for the family `{F}` cannot be put together",
+    note = "`Contributed<{F}, Q>` takes the composition `Q`; every part's contribution to `{F}` is written once, in the part's `Contributions` or in the composition's, or not at all, and implements `Contribute<{F}>`"
 )]
 pub trait PiecesNoCycle<F, Rt, Pt, Seen> {}
-impl<Rt, Pt, S, F, L> PiecesNoCycle<F, Rt, Pt, S> for L
+impl<Rt, Pt, S, F, Q> PiecesNoCycle<F, Rt, Pt, S> for Q
 where
-    L: PieceList<F>,
-    L::Needs: NoCycle<Rt, Pt, S>,
+    Q: PieceList<F>,
+    Q::Needs: NoCycle<Rt, Pt, S>,
 {
 }
 impl<Rt, Pt, S, P, W> NoCycle<Rt, Pt, S> for Reactions<P, W>
