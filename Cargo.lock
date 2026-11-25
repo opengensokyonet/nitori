@@ -222,6 +222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitori_codec"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "nitori_call",
+ "nitori_io",
+ "snafu",
+]
+
+[[package]]
 name = "nitori_crypto"
 version = "0.0.0"
 dependencies = [

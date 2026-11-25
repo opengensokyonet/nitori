@@ -3,6 +3,7 @@ members = [
     "benches/call-bench",
     "crates/nitori_call",
     "crates/nitori_call_macros",
+    "crates/nitori_codec",
     "crates/nitori_clock",
     "crates/nitori_clock_tokio",
     "crates/nitori_crypto",
