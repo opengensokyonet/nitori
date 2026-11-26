@@ -256,6 +256,26 @@ impl MapOptions<Early> for Counted {
 }
 
 #[test]
+fn an_options_mapping_is_called_only_for_a_fill_that_returns_options() {
+    let counted = Counted {
+        calls: 0,
+        priority: Priority(2),
+    };
+    let mut sink = ComposedReceiver::new(Recorder::default(), MappedOptions(counted));
+    assert!(matches!(
+        lend(&mut sink, b"ab", Some(Early(true))),
+        LentOutcome::Kept(_)
+    ));
+    assert!(matches!(
+        lend(&mut sink, b"c", None::<Early>),
+        LentOutcome::GaveUp(())
+    ));
+    let (recorder, MappedOptions(counted)) = sink.into_parts();
+    assert_eq!(counted.calls, 1);
+    assert_eq!(recorder.segments, [segment(b"ab", Priority(2))]);
+}
+
+#[test]
 fn an_options_mapping_is_called_on_every_write_a_waiting_one_included() {
     let recorder = Recorder {
         pending: 1,
@@ -295,6 +315,52 @@ fn fixed_options_write_every_segment_with_them_whatever_it_is_written_with() {
             segment(b"ab", Priority(3)),
             segment(b"c", Priority(3)),
             segment(b"d", Priority(3)),
+        ]
+    );
+}
+
+struct NoClone(u8);
+
+#[derive(Default)]
+struct NonCloningSink {
+    segments: Vec<(Bytes, u8)>,
+}
+family_receiver!(impl [] for NonCloningSink);
+impl Write<NoClone> for NonCloningSink {
+    type Error = !;
+    type Report = ();
+    fn poll_write<'v, B: Buf + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+        input: &mut B,
+        options: &NoClone,
+    ) -> Poll<Result<Option<WriteSegment<()>>, !>>
+    where
+        Self: 'v,
+    {
+        let Some(count) = NonZeroUsize::new(input.remaining().min(2)) else {
+            return Poll::Ready(Ok(None));
+        };
+        let this = host.get_pin_mut().get_mut();
+        this.segments
+            .push((input.copy_to_bytes(count.get()), options.0));
+        Poll::Ready(Ok(Some(WriteSegment { count, report: () })))
+    }
+}
+
+#[test]
+fn fixed_options_do_not_need_to_clone_options_for_ordinary_writes() {
+    let mut sink = ComposedReceiver::new(
+        NonCloningSink::default(),
+        MappedOptions(FixedOptions(NoClone(7))),
+    );
+    sink.sync_write_all_unpin(&b"abc"[..], ()).unwrap();
+    let (sink, _) = sink.into_parts();
+    assert_eq!(
+        sink.segments,
+        [
+            (Bytes::from_static(b"ab"), 7),
+            (Bytes::from_static(b"c"), 7)
         ]
     );
 }

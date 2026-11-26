@@ -1,6 +1,6 @@
 //! Values written with options: a base value through fixed options,
-//! a composite value whose fields carry their own, and a value decoded with
-//! metadata written with options mapped from it.
+//! a composite value whose fields carry their own, and decoded values and
+//! buffered payloads written with options mapped from their metadata.
 #![feature(impl_trait_in_assoc_type)]
 use bytes::{Buf, BufMut};
 use core::{
@@ -8,8 +8,8 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AsAccess, ComposedReceiver, ReceiverAccess, call};
-use nitori_codec::prelude::*;
+use nitori_call::{AsAccess, ComposedReceiver, ConstructedAccess, ReceiverAccess, call};
+use nitori_codec::{payload::Buffered, prelude::*};
 use nitori_io::{
     Combine, Read, ReadSegment, Value, Write, WriteSegment,
     adapters::{FixedOptions, MapOptions, MappedOptions},
@@ -195,6 +195,32 @@ fn a_decoded_composite_is_written_with_options_mapped_from_its_metadata() {
     sink.sync_encode_unpin(pair).unwrap();
     let (sink, _) = sink.into_parts();
     assert_eq!(sink.segments, [segment(b"a", 0), segment(b"b", 9)]);
+}
+
+#[test]
+fn a_buffered_payload_writes_each_segment_with_options_mapped_from_its_metadata() {
+    let mut sink = ComposedReceiver::new(
+        Prioritized::default(),
+        MappedOptions(ByArrival {
+            early: Priority(0),
+            late: Priority(9),
+        }),
+    );
+    let total = sink
+        .sync_encode_unpin(Buffered {
+            source: ConstructedAccess::new(Received {
+                data: b"abc",
+                early: 1,
+            }),
+            buffer: [0u8; 4],
+        })
+        .unwrap();
+    assert_eq!((total.count, total.metadata), (3, ZeroRtt(true)));
+    let (sink, _) = sink.into_parts();
+    assert_eq!(
+        sink.segments,
+        [segment(b"a", 0), segment(b"b", 9), segment(b"c", 9)]
+    );
 }
 
 #[call(sync)]
