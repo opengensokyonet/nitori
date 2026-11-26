@@ -8,7 +8,8 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use nitori_call::{
-    AsAccess, Compose, ComposedReceiver, ConstructedAccess, Receiver, ReceiverAccess, call,
+    AsAccess, BorrowedAccess, Compose, ComposedReceiver, ConstructedAccess, Receiver,
+    ReceiverAccess, call,
 };
 use nitori_io::{
     ChunkSegment, Combine, ExactLen, Infinite, Read, ReadChunk, ReadSegment, Skip,
@@ -221,8 +222,8 @@ struct Holder<A> {
 impl<A: ReceiverAccess> AsAccess for Holder<A> {
     type Family = A::Family;
     type Access = A;
-    fn access(&mut self) -> &mut A {
-        &mut self.io
+    fn access(&mut self) -> BorrowedAccess<'_, A> {
+        BorrowedAccess::new(&mut self.io)
     }
 }
 

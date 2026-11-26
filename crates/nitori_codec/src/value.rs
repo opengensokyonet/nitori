@@ -1,7 +1,7 @@
 //! Values with the merged metadata of their bytes when read, or the write
 //! options of their bytes when written.
 use crate::{DecodeFrom, EncodeInto, EncodedLen};
-use nitori_call::{AsAccess, Composed};
+use nitori_call::{AsAccess, BorrowedAccess, Composed};
 use nitori_io::{
     Combine, Read, Value, Write,
     adapters::{FixedOptions, MappedOptions, MergedMetadata, MergingSource},
@@ -54,7 +54,7 @@ impl<S, V, O, R, E> EncodeInto<S> for Value<V, O>
 where
     S: AsAccess<Family: Write<O>>,
     V: for<'x> EncodeInto<
-            Composed<&'x mut S::Access, MappedOptions<FixedOptions<O>>>,
+            Composed<BorrowedAccess<'x, S::Access>, MappedOptions<FixedOptions<O>>>,
             Output = R,
             Error = E,
         >,

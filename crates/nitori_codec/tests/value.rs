@@ -8,7 +8,9 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AsAccess, Composed, ConstructedAccess, Lent, ReceiverAccess, call};
+use nitori_call::{
+    AsAccess, BorrowedAccess, Composed, ConstructedAccess, Lent, ReceiverAccess, call,
+};
 use nitori_codec::{payload::Chunks, prelude::*};
 use nitori_io::{
     Combine, ExactLen, Read, ReadChunk, ReadSegment, Value, Write,
@@ -95,8 +97,8 @@ struct Payload<S> {
 impl<S: AsAccess<Family: Read>> AsAccess for &mut Payload<S> {
     type Family = Limited<Lent<S::Family>, ReadLimit<u64>>;
     type Access = Composed<S, ReadLimit<u64>>;
-    fn access(&mut self) -> &mut Self::Access {
-        &mut self.io
+    fn access(&mut self) -> BorrowedAccess<'_, Self::Access> {
+        BorrowedAccess::new(&mut self.io)
     }
 }
 

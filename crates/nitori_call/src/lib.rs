@@ -188,7 +188,7 @@ pub use loan::{Lent, ViewLoan, ViewOperation};
 mod access;
 pub use access::{Access, ConstructedAccess, ReceiverAccess, ReceiverSlot, ReleaseView};
 mod as_access;
-pub use as_access::AsAccess;
+pub use as_access::{AsAccess, BorrowedAccess};
 mod lent;
 pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;

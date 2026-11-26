@@ -9,7 +9,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AsAccess, Composed, ConstructedAccess, ReceiverAccess};
+use nitori_call::{AsAccess, BorrowedAccess, Composed, ConstructedAccess, ReceiverAccess};
 use nitori_codec::prelude::*;
 use nitori_io::{
     Combine, Read, ReadSegment, Value, Write, WriteSegment,
@@ -92,8 +92,8 @@ struct Payload<S> {
 impl<S: AsAccess<Family: Read>> AsAccess for &mut Payload<S> {
     type Family = Limited<nitori_call::Lent<S::Family>, ReadLimit<u64>>;
     type Access = Composed<S, ReadLimit<u64>>;
-    fn access(&mut self) -> &mut Self::Access {
-        &mut self.io
+    fn access(&mut self) -> BorrowedAccess<'_, Self::Access> {
+        BorrowedAccess::new(&mut self.io)
     }
 }
 

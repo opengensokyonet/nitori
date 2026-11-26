@@ -560,14 +560,15 @@ Its view is always at hand: an access never waits for it, and a release point
 completes at once. The receiver must be `Unpin`; pin one that is not with
 `pin!` or `Box::pin` and hold the pinned pointer.
 
-Such a type can also stand for the access it holds. `AsAccess` lends the
-access the type keeps, as `&mut`; a type that adapts its stream keeps the
-adapted access, such as a payload that keeps `Composed<S, ReadLimit<u64>>`,
-its stream with how much of it is left. The access is a type of the value,
-not of each borrow, so a future that holds a lent access of a borrowed
-source is `Send` whenever the source is. Every access lends itself, so code
-written for `S: AsAccess` takes accesses and such types alike, as the values
-of `nitori_codec` decode from any of them.
+Such a type can also stand for the access it holds. `AsAccess::access` returns
+a `BorrowedAccess`, which borrows the stored access exclusively and exposes
+its receiver operations. A payload can keep `Composed<S, ReadLimit<u64>>`
+and lend reads through its limit while keeping control of the stream and
+the limit itself. The type of the stored access is fixed across borrows,
+so the compiler can use that type to check a future holding the loan for
+`Send`.
+Every access lends itself, so code written for `S: AsAccess` takes accesses
+and such types alike, as the values of `nitori_codec` decode from any of them.
 
 ## Calls
 

@@ -263,8 +263,8 @@ pub(crate) use sealed::Sealed;
 ///
 /// Borrow it mutably for each use: at most one operation uses an access at a
 /// time, as with any `&mut` resource. This crate's slots,
-/// [`ConstructedAccess`], compositions and `&mut` borrows of them are the
-/// only accesses.
+/// [`ConstructedAccess`], compositions, [`BorrowedAccess`](crate::BorrowedAccess),
+/// and `&mut` borrows of accesses implement this trait.
 #[allow(private_bounds)]
 pub trait ReceiverAccess: sealed::Sealed {
     type Family: ReceiverFamily;

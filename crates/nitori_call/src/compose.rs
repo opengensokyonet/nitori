@@ -119,7 +119,7 @@ impl<A: AsAccess, S: Compose<Lent<A::Family>> + Unpin> ReceiverAccess for Compos
         })
     }
     fn release_point(&mut self) -> ReleasePoint<'_> {
-        self.parent.access().release_point()
+        self.parent.access().into_release_point()
     }
 }
 impl<A: AsAccess<Access: LentAccess>, S: Compose<Lent<A::Family>> + Unpin> LentAccess

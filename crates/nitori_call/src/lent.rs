@@ -188,8 +188,9 @@ use receivers::{LentReceivers, LentViews};
 /// `yield`; the code between them is atomic with respect to it.
 ///
 /// The slots of a [`LentCall`], [`ConstructedAccess`](crate::ConstructedAccess),
-/// compositions of them and `&mut` borrows of them are the only such
-/// accesses. Every operation written for a
+/// compositions of them, and borrows of them through
+/// [`BorrowedAccess`](crate::BorrowedAccess) or `&mut` are such accesses.
+/// Every operation written for a
 /// [`ReceiverAccess`] works on them too.
 pub trait LentAccess: ReceiverAccess {
     /// Run `body` once with this poll's view.

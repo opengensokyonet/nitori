@@ -9,7 +9,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use nitori_call::{AsAccess, Compose, Composed, Lent, ReceiverFamily};
+use nitori_call::{AsAccess, BorrowedAccess, Compose, Composed, Lent, ReceiverFamily};
 
 /// The merged metadata of the reads made through a composed access:
 /// `io.compose(MergedMetadata::default())` reads from `io` and merges the
@@ -154,7 +154,7 @@ impl<F: crate::ExactLen, M> crate::ExactLen for Merging<F, M> {
 /// can be decoded from one with it.
 #[derive(Debug)]
 pub struct MergingSource<'x, S: AsAccess, M> {
-    access: Composed<&'x mut S::Access, &'x mut MergedMetadata<M>>,
+    access: Composed<BorrowedAccess<'x, S::Access>, &'x mut MergedMetadata<M>>,
 }
 impl<'x, S: AsAccess, M> MergingSource<'x, S, M> {
     /// Read from `source`, merging the metadata into `merged`.
@@ -166,8 +166,8 @@ impl<'x, S: AsAccess, M> MergingSource<'x, S, M> {
 }
 impl<'x, S: AsAccess, M: Unpin> AsAccess for MergingSource<'x, S, M> {
     type Family = Merging<Lent<S::Family>, M>;
-    type Access = Composed<&'x mut S::Access, &'x mut MergedMetadata<M>>;
-    fn access(&mut self) -> &mut Self::Access {
-        &mut self.access
+    type Access = Composed<BorrowedAccess<'x, S::Access>, &'x mut MergedMetadata<M>>;
+    fn access(&mut self) -> BorrowedAccess<'_, Self::Access> {
+        BorrowedAccess::new(&mut self.access)
     }
 }
