@@ -6,7 +6,7 @@ use frunk_core::hlist::{HCons, HList, HNil};
 
 use crate::{
     call::__pack::Or,
-    component::Part,
+    component::{Part, construction::ShareData},
     id::{False, NumberEq, Numbered, True},
 };
 
@@ -14,7 +14,9 @@ use crate::{
 /// [`Part::Shares`], one per kind it extends. On a kind it does not list,
 /// the part keeps nothing: no components, no calls and no reactions.
 ///
-/// - `Data`: the components, a list (`HNil` for none).
+/// - `Data`: a component list (`HNil` for none) or
+///   [`Constructors`](crate::component::Constructors). The components of
+///   each constructor enter the share in order.
 /// - `Calls`: the kinds of the calls the part keeps at each node of this
 ///   kind, an `HList`; none by default. A new node's calls start after its
 ///   components are built, in the order of the parts, then in this order
@@ -43,6 +45,8 @@ pub struct Share<K, Data, Calls = HNil, Reacts = HNil>(
 pub trait ShareAt<K, L> {
     /// The components.
     type Data: HList + 'static;
+    /// The constructors in the share's construction order.
+    type Constructors: HList + 'static;
     /// The kinds of the calls.
     type Calls: HList + 'static;
     /// The reactions.
@@ -51,18 +55,22 @@ pub trait ShareAt<K, L> {
 impl<O: Part<L>, K, L> ShareAt<K, L> for O
 where
     O::Shares: FindShare<O, K>,
+    FindData<O, L, K>: ShareData<O, L, K>,
 {
-    type Data = <O::Shares as FindShare<O, K>>::Data;
+    type Data = <FindData<O, L, K> as ShareData<O, L, K>>::Data;
+    type Constructors = <FindData<O, L, K> as ShareData<O, L, K>>::Constructors;
     type Calls = <O::Shares as FindShare<O, K>>::Calls;
     type Reacts = <O::Shares as FindShare<O, K>>::Reacts;
 }
+
+type FindData<O, L, K> = <<O as Part<L>>::Shares as FindShare<O, K>>::Data;
 
 /// The item at the kind `K` of a list `Self` of the part `O`'s shares,
 /// by the kinds' numbers; nothing when no item is at `K`.
 #[doc(hidden)]
 pub trait FindShare<O, K> {
-    /// The components.
-    type Data: HList + 'static;
+    /// The declared component or constructor list.
+    type Data: 'static;
     /// The kinds of the calls.
     type Calls: HList + 'static;
     /// The reactions.
@@ -89,8 +97,8 @@ where
 /// items `T` after it is), or the item at `K` among `T`.
 #[doc(hidden)]
 pub trait PickShare<O, K, S, T> {
-    /// The components.
-    type Data: HList + 'static;
+    /// The declared component or constructor list.
+    type Data: 'static;
     /// The kinds of the calls.
     type Calls: HList + 'static;
     /// The reactions.
@@ -98,7 +106,7 @@ pub trait PickShare<O, K, S, T> {
 }
 impl<O, K, J, D, C, R, T> PickShare<O, K, Share<J, D, C, R>, T> for True
 where
-    D: HList + 'static,
+    D: 'static,
     C: HList + 'static,
     R: 'static,
     T: ShareListed<K>,

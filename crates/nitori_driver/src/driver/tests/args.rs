@@ -3,7 +3,7 @@
 use frunk_core::{HList, hlist, hlist_pat};
 
 use crate::{
-    component::{ArgsOf, Component, Part, PartList},
+    component::{ArgsOf, Build, Component, Part, PartList},
     composition,
     driver::{Driver, Edit, HandlerFor},
     id::Numbered,
@@ -40,11 +40,13 @@ macro_rules! keeps {
     ($($name:ident: $part:ty, $args:ty;)*) => {$(
         #[derive(Numbered)]
         struct $name($args);
-        impl<L: PartList<L>, K: NodeKind> Component<$part, L, K> for $name {
+        impl<L: PartList<L>, K: NodeKind> Build<$part, L, K> for $name {
             fn build<P: Pos>(_: &mut K::Start, own: &$args, _: &ArgsOf<L>, _: View<'_, HList![], P>) -> Self {
                 $name(*own)
             }
         }
+
+        impl<L: PartList<L>, K: NodeKind> Component<$part, L, K> for $name {}
     )*};
 }
 keeps! {

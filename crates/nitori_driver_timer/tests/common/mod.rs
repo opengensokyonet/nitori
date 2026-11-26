@@ -13,7 +13,7 @@ use std::{
 };
 
 use nitori_driver::{
-    component::{ArgsOf, Component, EndCause, PartList},
+    component::{ArgsOf, Build, Component, EndCause, PartList},
     driver::{Edit, HandlerFor},
     frunk_core::{HList, hlist_pat},
     id::Numbered,
@@ -168,7 +168,7 @@ impl HandleRequest<Top, Level> for Adding {
 /// A leaf's alarm: it notes its wakes.
 #[derive(Numbered)]
 pub struct Alarm(pub u32);
-impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
+impl<L: PartList<L>> Build<Run, L, Leaf> for Alarm {
     type BuildNeeds = HList![OwnKey<u32>];
     fn build<P: Pos>(
         _: &mut (),
@@ -179,6 +179,9 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
         let hlist_pat![key] = view;
         Alarm(key)
     }
+}
+
+impl<L: PartList<L>> Component<Run, L, Leaf> for Alarm {
     type Needs = HList![
         Mut<nitori_driver_timer::TimerTable<FakeClock, Level>>,
         WakerOf<Alarm>

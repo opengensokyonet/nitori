@@ -14,7 +14,8 @@ use crate::{
     call::tests::contributed as wire,
     capability::Contribution,
     component::{
-        ArgsOf, Component, ComponentView, EndCause, FindArgs, Held, Part, PartList, part_args,
+        ArgsOf, Build, Component, ComponentView, EndCause, FindArgs, Held, Part, PartList,
+        part_args,
     },
     id::Numbered,
     need::{Cap, Members, Mut, OwnKey, Pos, Ref, Requests, Under, View},
@@ -66,7 +67,7 @@ impl<L> Part<L> for Watch {
 
 macro_rules! from_default {
     ($($c:ty),*) => {$(
-        impl<O: Part<L>, L: PartList<L>, K: NodeKind> Component<O, L, K> for $c {
+        impl<O: Part<L>, L: PartList<L>, K: NodeKind> Build<O, L, K> for $c {
             fn build<P: Pos>(
                 _: &mut K::Start,
                 _: &O::Args,
@@ -76,6 +77,8 @@ macro_rules! from_default {
                 Self::default()
             }
         }
+
+        impl<O: Part<L>, L: PartList<L>, K: NodeKind> Component<O, L, K> for $c {}
     )*};
 }
 from_default!(
@@ -89,11 +92,10 @@ from_default!(
 
 /// A link core starts with the window of the loss part, when the list of
 /// parts has it, and counts the key epoch when woken.
-impl<O: Part<L>, L, K: NodeKind> Component<O, L, K> for LinkCore
+impl<O: Part<L>, L, K: NodeKind> Build<O, L, K> for LinkCore
 where
     L: PartList<L> + FindArgs<Loss, L>,
 {
-    type Needs = HList![Ref<Keys>, Mut<RecoveryFactory>];
     fn build<P: Pos>(
         _: &mut K::Start,
         _: &O::Args,
@@ -104,6 +106,13 @@ where
             rx: part_args::<Loss, L>(args).map_or(0, |a| a.window),
         }
     }
+}
+
+impl<O: Part<L>, L, K: NodeKind> Component<O, L, K> for LinkCore
+where
+    L: PartList<L> + FindArgs<Loss, L>,
+{
+    type Needs = HList![Ref<Keys>, Mut<RecoveryFactory>];
     fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
         let hlist_pat![me, keys, factory] = view;
         me.rx += keys.epoch;
@@ -114,8 +123,7 @@ where
 /// A planner counts from the start of its link, its key and the key epoch,
 /// and takes one of the start for the next component; it notes how it
 /// ends.
-impl<L: PartList<L>> Component<Core, L, LinkPath> for Planner {
-    type Needs = HList![Ref<LinkCore>];
+impl<L: PartList<L>> Build<Core, L, LinkPath> for Planner {
     type BuildNeeds = HList![OwnKey<LinkId>, Ref<Keys>, Mut<RecoveryFactory>];
     fn build<P: Pos>(
         start: &mut u64,
@@ -129,6 +137,10 @@ impl<L: PartList<L>> Component<Core, L, LinkPath> for Planner {
         *start += 1;
         Planner { next_pn }
     }
+}
+
+impl<L: PartList<L>> Component<Core, L, LinkPath> for Planner {
+    type Needs = HList![Ref<LinkCore>];
     fn end<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>, cause: EndCause<'_, u8>) {
         let hlist_pat![me, core] = view;
         log(format!("end {cause:?} pn={} rx={}", me.next_pn, core.rx));
@@ -136,7 +148,7 @@ impl<L: PartList<L>> Component<Core, L, LinkPath> for Planner {
 }
 
 /// A recovery's congestion starts with what its link's planner is at.
-impl<L: PartList<L>> Component<Loss, L, Recovery> for Congestion {
+impl<L: PartList<L>> Build<Loss, L, Recovery> for Congestion {
     type BuildNeeds = HList![Ref<Planner>, OwnKey<()>];
     fn build<P: Pos>(
         _: &mut (),
@@ -151,6 +163,8 @@ impl<L: PartList<L>> Component<Loss, L, Recovery> for Congestion {
     }
 }
 
+impl<L: PartList<L>> Component<Loss, L, Recovery> for Congestion {}
+
 /// An estimator the host chooses: a bare type parameter, so it is held.
 pub trait Estimator {
     fn new() -> Self;
@@ -164,7 +178,7 @@ impl Estimator for Rtt {
         Rtt { samples: 1 }
     }
 }
-impl<X: Estimator + Numbered + 'static, L: PartList<L>, K: NodeKind> Component<Watch, L, K>
+impl<X: Estimator + Numbered + 'static, L: PartList<L>, K: NodeKind> Build<Watch, L, K>
     for Held<X>
 {
     fn build<P: Pos>(
@@ -175,6 +189,11 @@ impl<X: Estimator + Numbered + 'static, L: PartList<L>, K: NodeKind> Component<W
     ) -> Self {
         Held(X::new())
     }
+}
+
+impl<X: Estimator + Numbered + 'static, L: PartList<L>, K: NodeKind> Component<Watch, L, K>
+    for Held<X>
+{
 }
 
 // ------------------------------------------------------------------ reaction points

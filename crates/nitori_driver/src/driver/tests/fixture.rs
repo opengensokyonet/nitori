@@ -12,7 +12,7 @@ use nitori_call::{LentAccess, call};
 
 use crate::{
     call::{CallFamily, CallKind, Composition, LoanHost, LoanNeeds, RootOf},
-    component::{ArgsOf, Component, ComponentView, EndCause, Part, PartList},
+    component::{ArgsOf, Build, Component, ComponentView, EndCause, Part, PartList},
     composition,
     driver::{Edit, HandlerFor},
     id::Numbered,
@@ -252,8 +252,7 @@ pub struct Tip {
     pub key: u32,
     pub tidy: bool,
 }
-impl<L: PartList<L>> Component<Run, L, Twig> for Tip {
-    type Needs = HList![Ref<Ctl>];
+impl<L: PartList<L>> Build<Run, L, Twig> for Tip {
     type BuildNeeds = HList![OwnKey<u32>];
     fn build<P: Pos>(
         tidy: &mut bool,
@@ -264,6 +263,10 @@ impl<L: PartList<L>> Component<Run, L, Twig> for Tip {
         let hlist_pat![key] = view;
         Tip { key, tidy: *tidy }
     }
+}
+
+impl<L: PartList<L>> Component<Run, L, Twig> for Tip {
+    type Needs = HList![Ref<Ctl>];
     fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
         let hlist_pat![me, leaf] = view;
         note(format!("tip {} under {}", me.key, leaf.key));
@@ -302,16 +305,18 @@ pub async fn tidy<W: CallFamily<C = Tidy, K: NodeKind<Start = bool, Request = En
     });
 }
 
-impl<L: PartList<L>> Component<Run, L, Top> for Hub {
+impl<L: PartList<L>> Build<Run, L, Top> for Hub {
     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, Self::BuildNeeds, P>) -> Self {
         Hub
     }
+}
+
+impl<L: PartList<L>> Component<Run, L, Top> for Hub {
     fn end<P: Pos>(_: ComponentView<'_, Self, Self::Needs, P>, cause: EndCause<'_, ()>) {
         note(format!("end top {cause:?}"));
     }
 }
-impl<L: PartList<L>> Component<Run, L, Leaf> for Ctl {
-    type Needs = HList![WakerOf<Ctl>, Wakes<Level>];
+impl<L: PartList<L>> Build<Run, L, Leaf> for Ctl {
     type BuildNeeds = HList![OwnKey<u32>];
     fn build<P: Pos>(
         start: &mut Vec<Step>,
@@ -335,6 +340,10 @@ impl<L: PartList<L>> Component<Run, L, Leaf> for Ctl {
             boom,
         }
     }
+}
+
+impl<L: PartList<L>> Component<Run, L, Leaf> for Ctl {
+    type Needs = HList![WakerOf<Ctl>, Wakes<Level>];
     fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
         let hlist_pat![me, own, wakes] = view;
         note(format!("ctl {}", me.key));

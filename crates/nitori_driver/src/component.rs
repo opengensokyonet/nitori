@@ -10,12 +10,12 @@
 //! of a foreign trait (E0210); such a component is kept in [`Held<X>`].
 //!
 //! The operations are associated functions, synchronous, which the driver
-//! calls: [`build`](Component::build) when the node is added,
+//! calls: [`build`](Build::build) when the node is added,
 //! [`wake`](Component::wake) when the component's waker is woken,
 //! [`end`](Component::end) when the node ends. Each is lent a view, as a
 //! call is: `wake` and `end` the component itself, exclusive, then its
 //! [`Needs`](Component::Needs) at its node ([`ComponentView`]); `build`
-//! its [`BuildNeeds`](Component::BuildNeeds), taken at the new node from
+//! its [`BuildNeeds`](Build::BuildNeeds), taken at the new node from
 //! the nodes above it, which are there already: its own key is
 //! [`OwnKey`](crate::need::OwnKey), the components of the parent and above
 //! are [`Mut`](crate::need::Mut) and [`Ref`](crate::need::Ref). The needs
@@ -37,7 +37,7 @@
 //!
 //! ```
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, FindArgs, Part, PartList, part_args},
+//!     component::{ArgsOf, Build, FindArgs, Part, PartList, part_args},
 //!     frunk_core::{HList, hlist::HNil, hlist},
 //!     id::Numbered,
 //!     need::{EmptyPos, Pos, View},
@@ -72,7 +72,7 @@
 //!     window: u64,
 //!     resets: Option<u64>,
 //! }
-//! impl<L, K: NodeKind> Component<Base, L, K> for Streams
+//! impl<L, K: NodeKind> Build<Base, L, K> for Streams
 //! where
 //!     L: PartList<L> + FindArgs<Reset, L>,
 //! {
@@ -88,7 +88,7 @@
 //! }
 //!
 //! type With = HList![Base, Reset];
-//! let s = <Streams as Component<Base, With, Root>>::build::<EmptyPos>(
+//! let s = <Streams as Build<Base, With, Root>>::build::<EmptyPos>(
 //!     &mut (),
 //!     &BaseArgs { window: 8 },
 //!     &hlist![BaseArgs { window: 8 }, ResetArgs { after: 3 }],
@@ -96,7 +96,7 @@
 //! );
 //! assert_eq!((s.window, s.resets), (8, Some(3)));
 //! type Without = HList![Base];
-//! let s = <Streams as Component<Base, Without, Root>>::build::<EmptyPos>(
+//! let s = <Streams as Build<Base, Without, Root>>::build::<EmptyPos>(
 //!     &mut (),
 //!     &BaseArgs { window: 8 },
 //!     &hlist![BaseArgs { window: 8 }],
@@ -109,7 +109,7 @@
 //!
 //! ```compile_fail,E0210
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, Part, PartList},
+//!     component::{ArgsOf, Build, Part, PartList},
 //!     frunk_core::hlist::HNil,
 //!     id::Numbered,
 //!     need::{Pos, View},
@@ -123,7 +123,7 @@
 //! impl<L> Part<L> for Base {
 //!     type Args = ();
 //! }
-//! impl<X: Estimator + 'static, L: PartList<L>, K: NodeKind> Component<Base, L, K> for X {
+//! impl<X: Estimator + 'static, L: PartList<L>, K: NodeKind> Build<Base, L, K> for X {
 //!     fn build<P: Pos>(_: &mut K::Start, _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 //!         X::new()
 //!     }
@@ -134,7 +134,7 @@
 //!
 //! ```
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, Held, Part, PartList},
+//!     component::{ArgsOf, Build, Held, Part, PartList},
 //!     frunk_core::hlist::HNil,
 //!     id::Numbered,
 //!     need::{Pos, View},
@@ -148,7 +148,7 @@
 //! impl<L> Part<L> for Base {
 //!     type Args = ();
 //! }
-//! impl<X, L, K> Component<Base, L, K> for Held<X>
+//! impl<X, L, K> Build<Base, L, K> for Held<X>
 //! where
 //!     X: Estimator + Numbered + 'static,
 //!     L: PartList<L>,
@@ -173,6 +173,8 @@
 //! # use nitori_driver::{__private::doc::*, frunk_core::HList, need::*};
 //! component_lends!(LinkPath, LinkCore, HList![Ref<Planner>, Ref<ConnCore>]);
 //! ```
+use core::marker::PhantomData;
+
 use frunk_core::hlist::{HCons, HNil};
 
 use crate::{
@@ -180,6 +182,8 @@ use crate::{
     need::{Need, Pos, View},
     structure::NodeKind,
 };
+
+pub(crate) mod construction;
 
 /// The construction arguments of the part `Self` in a composition of the
 /// parts `L`; their type may depend on the whole list.
@@ -242,7 +246,7 @@ pub type ArgsOf<L> = <L as PartList<L>>::Args;
 
 /// The arguments of the part `O` in `args`, those of every part of the
 /// list `L`, found by the part's number; `None` when `L` does not have
-/// `O`. What a component's [`build`](Component::build) reads another
+/// `O`. What a constructor's [`build`](Build::build) reads another
 /// part's arguments with; its own it is handed. Every part of `L`, and
 /// `O`, is `#[derive(Numbered)]` ([`Numbered`]), whichever part is
 /// looked for and wherever it is in the list.
@@ -333,7 +337,7 @@ impl<R> Clone for EndCause<'_, R> {
 }
 impl<R> Copy for EndCause<'_, R> {}
 
-/// The operations of a component in the share of the part `O`, in a
+/// The runtime operations of a component in the share of the part `O`, in a
 /// composition of the parts `L`, in a node of the kind `K`.
 ///
 /// [`wake`](Component::wake) and [`end`](Component::end) do nothing by
@@ -345,22 +349,6 @@ pub trait Component<O: Part<L>, L: PartList<L>, K: NodeKind>: Sized + 'static {
     /// around the node besides the component: needs, lent at the node;
     /// none by default.
     type Needs: Need = HNil;
-    /// What [`build`](Component::build) takes: needs, lent at the new node
-    /// from the nodes above it; none by default. The root's components
-    /// have none.
-    type BuildNeeds: Need = HNil;
-    /// The component of a new node, from what the one adding the node gave
-    /// it to start from, the arguments of its part `own`, those of every
-    /// part `args` (another part's are found with [`part_args`]) and the
-    /// view of its build needs. The node's components are built in the
-    /// order of the parts, each handed the same `start`, and may take out
-    /// what they keep of it.
-    fn build<P: Pos>(
-        start: &mut K::Start,
-        own: &<O as Part<L>>::Args,
-        args: &ArgsOf<L>,
-        view: View<'_, Self::BuildNeeds, P>,
-    ) -> Self;
     /// The component's waker was woken.
     fn wake<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>) {
         let _ = view;
@@ -374,6 +362,41 @@ pub trait Component<O: Part<L>, L: PartList<L>, K: NodeKind>: Sized + 'static {
         let _ = (view, cause);
     }
 }
+
+/// Construct one component or a list of components in the share of part
+/// `O` at the new node of kind `K`.
+///
+/// A component listed directly in a [`Share`](crate::structure::Share)
+/// or as [`One`] builds itself. A [`Group`] builds an `HList` whose
+/// members enter the share as independent components.
+pub trait Build<O: Part<L>, L: PartList<L>, K: NodeKind>: Sized + 'static {
+    /// The needs lent at the new node from the nodes above it. A root
+    /// constructor has no build needs.
+    type BuildNeeds: Need = HNil;
+    /// The component for a single build, or the component list for a group.
+    type Output: 'static = Self;
+
+    /// Use what the caller gave the new node to start from, the arguments
+    /// of its own part and of all parts, and the view of its build needs.
+    /// The constructors run in the order of the parts, then their order
+    /// in each share, with the same mutable `start`.
+    fn build<P: Pos>(
+        start: &mut K::Start,
+        own: &O::Args,
+        args: &ArgsOf<L>,
+        view: View<'_, Self::BuildNeeds, P>,
+    ) -> Self::Output;
+}
+
+/// A list of [`One`] and [`Group`] entries in a
+/// [`Share`](crate::structure::Share), in construction order.
+pub struct Constructors<List>(PhantomData<fn() -> List>);
+
+/// Construct the component `C` using its [`Build`] implementation.
+pub struct One<C>(PhantomData<fn() -> C>);
+
+/// Construct a frunk list of components with one call to `G`'s [`Build`].
+pub struct Group<G>(PhantomData<fn() -> G>);
 
 /// A component whose type is a type parameter the host chooses, kept so
 /// that a part can write its operations.

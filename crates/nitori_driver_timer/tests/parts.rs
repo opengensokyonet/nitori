@@ -8,7 +8,7 @@ use std::{future::Future, pin::Pin, task::Context};
 
 use nitori_driver::{
     capability::{Contribute, PartContribution, PiecesOf},
-    component::{ArgsOf, Component, FindArgs, Part, PartList, part_args},
+    component::{ArgsOf, Build, Component, FindArgs, Part, PartList, part_args},
     composition,
     driver::Driver,
     frunk_core::{HList, hlist, hlist::HNil},
@@ -39,7 +39,7 @@ pub struct Reads {
     own: u64,
     other: Option<u32>,
 }
-impl<L: PartList<L> + FindArgs<Other, L>> Component<Base, L, Leaf> for Reads {
+impl<L: PartList<L> + FindArgs<Other, L>> Build<Base, L, Leaf> for Reads {
     fn build<P: Pos>(_: &mut (), own: &u64, args: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
         Reads {
             own: *own,
@@ -47,6 +47,8 @@ impl<L: PartList<L> + FindArgs<Other, L>> Component<Base, L, Leaf> for Reads {
         }
     }
 }
+
+impl<L: PartList<L> + FindArgs<Other, L>> Component<Base, L, Leaf> for Reads {}
 
 /// A family, and what the composition's list gives for `Other`.
 #[derive(Numbered)]

@@ -19,6 +19,7 @@ mod deep;
 mod edit;
 mod ending;
 mod fixture;
+mod grouped_build;
 mod numbers;
 mod operate;
 mod panics;

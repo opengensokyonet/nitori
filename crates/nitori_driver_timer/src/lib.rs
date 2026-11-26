@@ -27,7 +27,7 @@
 //! use core::{pin::Pin, task::{Context, Waker}, time::Duration};
 //!
 //! use nitori_driver::{
-//!     component::{ArgsOf, Component, Part, PartList},
+//!     component::{ArgsOf, Build, Component, Part, PartList},
 //!     composition,
 //!     driver::Driver,
 //!     frunk_core::{HList, hlist, hlist::HNil, hlist_pat},
@@ -61,11 +61,13 @@
 //! /// A component that waits for an instant.
 //! #[derive(Numbered)]
 //! struct Idle;
-//! impl<L: PartList<L>> Component<Base, L, Conn> for Idle {
+//! impl<L: PartList<L>> Build<Base, L, Conn> for Idle {
 //!     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 //!         Idle
 //!     }
 //! }
+//!
+//! impl<L: PartList<L>> Component<Base, L, Conn> for Idle {}
 //! #[derive(Numbered)]
 //! struct Base;
 //! impl<L> Part<L> for Base {

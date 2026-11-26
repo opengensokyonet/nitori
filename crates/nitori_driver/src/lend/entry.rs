@@ -4,7 +4,7 @@
 //! Every entry is generic over the positions of what it lends, inferred
 //! where the structure is known, or given by a caller that proved them
 //! elsewhere.
-use core::marker::PhantomData;
+use core::{marker::PhantomData, ops::Add};
 
 use frunk_core::hlist::{HCons, HNil};
 
@@ -25,7 +25,7 @@ use crate::{
         __pack::{Desc, KindDesc},
         Composition, ContextOf, PartsOf, RootOf,
     },
-    component::{ArgsOf, Component, EndCause, Part, PartList},
+    component::{ArgsOf, Component, EndCause, Part, PartList, construction::Construct},
     id::Numbered,
     need::{EmptyPos, Need, Pos, View},
     react::{AboveLendPoint, NodeEnding, NodeStarted, Reactions, WithLendPoint},
@@ -175,14 +175,16 @@ where
 
 // ------------------------------------------------------------------ building
 
-/// Building the components of a list `Self` of the part `O`, for a new
-/// node of the kind `K` with the full key `Fk`, one lending each; `Ps`
-/// are the positions of their build needs.
+/// Run the constructors of the part `O` at a new node of the kind `K`
+/// with the full key `Fk`. Each constructor borrows its needs at the
+/// position in `Ps` and appends its components to the share.
 pub(crate) trait BuildComps<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, O, Ps>:
     Sized
 where
     O: Part<Pt>,
 {
+    /// The flat list of the components produced by the constructors.
+    type Data;
     /// The components, in order, each handed `own`, the arguments of
     /// `O`, and `args`, those of every part.
     fn build(
@@ -192,11 +194,12 @@ where
         own: &O::Args,
         args: &ArgsOf<Pt>,
         cx: &mut X,
-    ) -> Option<Self>;
+    ) -> Option<Self::Data>;
 }
 impl<R: KindFor<Pt>, Pt: PartList<Pt>, K: NodeKind, IK, X, Fk, O: Part<Pt>>
     BuildComps<R, Pt, K, IK, X, Fk, O, HNil> for HNil
 {
+    type Data = HNil;
     fn build(
         _: &mut Node<R, Pt>,
         _: &Fk,
@@ -215,11 +218,14 @@ where
     Pt: PartList<Pt>,
     K: NodeKind,
     O: Part<Pt>,
-    C: Component<O, Pt, K>,
+    C: Construct<O, Pt, K>,
     PC: Pos,
     C::BuildNeeds: LendsNew<R, Pt, K, IK, X, PC, Fk = Fk>,
     Cs: BuildComps<R, Pt, K, IK, X, Fk, O, PT>,
+    C::Output: Add<Cs::Data>,
 {
+    type Data = <C::Output as Add<Cs::Data>>::Output;
+
     fn build(
         root: &mut Node<R, Pt>,
         at: &Fk,
@@ -227,13 +233,13 @@ where
         own: &O::Args,
         args: &ArgsOf<Pt>,
         cx: &mut X,
-    ) -> Option<Self> {
+    ) -> Option<Self::Data> {
         let head =
             <C::BuildNeeds as LendsNew<R, Pt, K, IK, X, PC>>::lend_new(root, at, cx, |view| {
-                C::build::<PC>(start, own, args, view)
+                C::construct::<PC>(start, own, args, view)
             })?;
         let tail = Cs::build(root, at, start, own, args, cx)?;
-        Some(HCons { head, tail })
+        Some(head + tail)
     }
 }
 
@@ -277,7 +283,7 @@ where
     Pt: PartList<Pt>,
     K: NodeKind,
     O: Part<Pt> + ShareAt<K, Pt>,
-    O::Data: BuildComps<R, Pt, K, IK, X, Fk, O, PO>,
+    O::Constructors: BuildComps<R, Pt, K, IK, X, Fk, O, PO, Data = O::Data>,
     Os: BuildShares<R, Pt, K, IK, X, Fk, PT>,
 {
     type Data = HCons<O::Data, Os::Data>;
@@ -289,7 +295,7 @@ where
         args: &ArgsOf<Pt>,
         cx: &mut X,
     ) -> Option<Self::Data> {
-        let head = O::Data::build(root, at, start, &own.head, args, cx)?;
+        let head = O::Constructors::build(root, at, start, &own.head, args, cx)?;
         let tail = Os::build(root, at, start, &own.tail, args, cx)?;
         Some(HCons { head, tail })
     }
@@ -327,12 +333,12 @@ where
     )
 }
 
-/// The build needs of a component of the root: none, since nothing is
+/// The needs of a root constructor: none, since nothing is
 /// above the root.
 #[diagnostic::on_unimplemented(
-    message = "a component of the root has the build needs `{Self}`, and nothing is above the root to take them from",
+    message = "a constructor of the root has the build needs `{Self}`, and nothing is above the root to take them from",
     label = "not empty",
-    note = "the components of the root build from the start and the arguments only: their `BuildNeeds` is `HNil`"
+    note = "the constructors of the root take only the start and the arguments: their `BuildNeeds` is `HNil`"
 )]
 pub(crate) trait RootBuildNeeds: Need {
     /// The view of no needs.
@@ -344,35 +350,37 @@ impl RootBuildNeeds for HNil {
     }
 }
 
-/// Building the components of a list `Self` of the part `O` for the root
-/// of the kind `R`.
+/// Run the constructors of the part `O` for the root of kind `R`.
 pub(crate) trait BuildRootComps<R: NodeKind, Pt: PartList<Pt>, O: Part<Pt>>: Sized {
+    /// The flat list of the components produced by the constructors.
+    type Data;
     /// The components, in order, each handed `own`, the arguments of
     /// `O`, and `args`, those of every part.
-    fn build(start: &mut R::Start, own: &O::Args, args: &ArgsOf<Pt>) -> Self;
+    fn build(start: &mut R::Start, own: &O::Args, args: &ArgsOf<Pt>) -> Self::Data;
 }
 impl<R: NodeKind, Pt: PartList<Pt>, O: Part<Pt>> BuildRootComps<R, Pt, O> for HNil {
+    type Data = HNil;
     fn build(_: &mut R::Start, _: &O::Args, _: &ArgsOf<Pt>) -> HNil {
         HNil
     }
 }
 impl<R: NodeKind, Pt: PartList<Pt>, O: Part<Pt>, C, Cs> BuildRootComps<R, Pt, O> for HCons<C, Cs>
 where
-    C: Component<O, Pt, R>,
+    C: Construct<O, Pt, R>,
     C::BuildNeeds: RootBuildNeeds,
     Cs: BuildRootComps<R, Pt, O>,
+    C::Output: Add<Cs::Data>,
 {
-    fn build(start: &mut R::Start, own: &O::Args, args: &ArgsOf<Pt>) -> Self {
-        let head = C::build::<EmptyPos>(
+    type Data = <C::Output as Add<Cs::Data>>::Output;
+
+    fn build(start: &mut R::Start, own: &O::Args, args: &ArgsOf<Pt>) -> Self::Data {
+        let head = C::construct::<EmptyPos>(
             start,
             own,
             args,
             <C::BuildNeeds as RootBuildNeeds>::none::<EmptyPos>(),
         );
-        HCons {
-            head,
-            tail: Cs::build(start, own, args),
-        }
+        head + Cs::build(start, own, args)
     }
 }
 /// Building the shares of the parts `Self` for the root of the kind `R`.
@@ -392,12 +400,12 @@ impl<R: NodeKind, Pt: PartList<Pt>> BuildRootShares<R, Pt> for HNil {
 impl<R: NodeKind, Pt: PartList<Pt>, O, Os> BuildRootShares<R, Pt> for HCons<O, Os>
 where
     O: Part<Pt> + ShareAt<R, Pt>,
-    O::Data: BuildRootComps<R, Pt, O>,
+    O::Constructors: BuildRootComps<R, Pt, O, Data = O::Data>,
     Os: BuildRootShares<R, Pt>,
 {
     type Data = HCons<O::Data, Os::Data>;
     fn build(start: &mut R::Start, own: &Self::Args, args: &ArgsOf<Pt>) -> Self::Data {
-        let head = O::Data::build(start, &own.head, args);
+        let head = O::Constructors::build(start, &own.head, args);
         HCons {
             head,
             tail: Os::build(start, &own.tail, args),
@@ -514,7 +522,7 @@ type SiteCx<Q, K, N> = <IlAt<Q, K> as BuildSite<RootOf<Q>, PartsOf<Q>, K, Contex
 /// composition `Q` as where `Q` is composed: lent at a new node from the
 /// nodes above it ([`LendsNew`]), and none at the root, with the checks
 /// written out so that an error names the need. What
-/// [`explain!`](crate::explain!) proves a component's build with. It
+/// [`explain!`](crate::explain!) proves a constructor's needs with. It
 /// repeats the bounds of [`LendsNew`] and of the proof of a composition's
 /// build: a change to those is made here too.
 #[doc(hidden)]

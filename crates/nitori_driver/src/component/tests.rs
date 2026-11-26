@@ -2,7 +2,7 @@
 //! part's number.
 use frunk_core::{HList, hlist, hlist::HNil};
 
-use super::{ArgsOf, Component, FindArgs, Part, PartList, part_args};
+use super::{ArgsOf, Build, Component, FindArgs, Part, PartList, part_args};
 use crate::{
     id::Numbered,
     need::{EmptyPos, Pos, View},
@@ -36,7 +36,7 @@ struct Reads {
     own: u32,
     extra: Option<&'static str>,
 }
-impl<L, K: NodeKind> Component<Base, L, K> for Reads
+impl<L, K: NodeKind> Build<Base, L, K> for Reads
 where
     L: PartList<L> + FindArgs<Extra, L>,
 {
@@ -48,11 +48,13 @@ where
     }
 }
 
+impl<L, K: NodeKind> Component<Base, L, K> for Reads where L: PartList<L> + FindArgs<Extra, L> {}
+
 #[test]
 fn own_arguments() {
     type L = HList![Other, Base, Extra];
     let args = hlist![(), 7, "x"];
-    let r = <Reads as Component<Base, L, Root>>::build::<EmptyPos>(&mut (), &7, &args, HNil);
+    let r = <Reads as Build<Base, L, Root>>::build::<EmptyPos>(&mut (), &7, &args, HNil);
     assert_eq!((r.own, r.extra), (7, Some("x")));
 }
 

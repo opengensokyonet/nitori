@@ -6,7 +6,7 @@ use frunk_core::{HList, hlist, hlist::HNil, hlist_pat};
 
 use super::{fixtures::*, parts::*};
 use crate::{
-    component::{Component, EndCause},
+    component::{Build, EndCause},
     lend::entry::{build_node, build_root, end, wake},
     need::{EmptyPos, Ref},
     structure::{End, Node, insert},
@@ -20,13 +20,13 @@ fn args() -> HList![CoreArgs, LossArgs, WatchArgs] {
 /// loss part does not have.
 #[test]
 fn generic_over_the_parts() {
-    let with = <LinkCore as Component<Core, Parts, LinkPath>>::build::<EmptyPos>(
+    let with = <LinkCore as Build<Core, Parts, LinkPath>>::build::<EmptyPos>(
         &mut 0,
         &CoreArgs,
         &args(),
         HNil,
     );
-    let without = <LinkCore as Component<Core, HList![Core, Watch], LinkPath>>::build::<EmptyPos>(
+    let without = <LinkCore as Build<Core, HList![Core, Watch], LinkPath>>::build::<EmptyPos>(
         &mut 0,
         &CoreArgs,
         &hlist![CoreArgs, WatchArgs],

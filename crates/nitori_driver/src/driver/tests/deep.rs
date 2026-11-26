@@ -15,7 +15,7 @@ use super::{
     fixture::{clock, note, notes},
 };
 use crate::{
-    component::{ArgsOf, Component, ComponentView, EndCause, Part, PartList},
+    component::{ArgsOf, Build, Component, ComponentView, EndCause, Part, PartList},
     composition,
     driver::{Driver, Edit, HandlerFor},
     id::Numbered,
@@ -68,7 +68,7 @@ impl<Pr> HandleRequest<Root, Pr> for Shifter {
 pub struct Mark {
     key: u32,
 }
-impl<L: PartList<L>> Component<Deep, L, Bud> for Mark {
+impl<L: PartList<L>> Build<Deep, L, Bud> for Mark {
     type BuildNeeds = HList![OwnKey<u32>];
     fn build<P: Pos>(
         _: &mut (),
@@ -79,6 +79,9 @@ impl<L: PartList<L>> Component<Deep, L, Bud> for Mark {
         let hlist_pat![key] = view;
         Mark { key }
     }
+}
+
+impl<L: PartList<L>> Component<Deep, L, Bud> for Mark {
     fn end<P: Pos>(view: ComponentView<'_, Self, Self::Needs, P>, cause: EndCause<'_, ()>) {
         let hlist_pat![me] = view;
         note(format!("end bud {} {cause:?}", me.key));

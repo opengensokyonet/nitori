@@ -29,10 +29,13 @@ and what each kind of node can be asked.
   known: a component no node or more than one node has, and two needs that
   overlap, do not compile, and the error says why. A view's type follows
   from the needs, so code generic over the structure names no position.
-- `component`: a component's operations, `build` when its node is added,
-  `wake` when its waker is woken and `end` when the node ends, each lent
-  its own needs; `build` is handed its part's construction arguments, and
-  finds another part's with `part_args`, by the parts' numbers.
+- `component`: a `Build` runs when the node is added. An ordinary
+  component list builds each component in order. A share can also list
+  `Constructors<HList![One<A>, Group<B>]>` to run single and grouped
+  builds. A group returns a list whose members enter the share as
+  independent components. Each `Component` declares its `wake` and
+  `end` needs. A constructor gets its part's arguments and can find
+  another part's with `part_args`.
 - `capability` and `react`: capabilities put together from needs, or
   contributed by the parts, each part's contribution to a family listed
   in the part or in the composition; reaction points that the other parts react
@@ -46,7 +49,7 @@ and what each kind of node can be asked.
   contributions, and proves every call, every component's
   operations and every reaction once; when one of them does not compile,
   `explain!` proves it on its own, and its error says which need fails
-  and why.
+  and why. Use the `build` form for a constructor's needs.
 - `request`: a request names its node by key address; the node's kind
   names its handler (`HandleRequest`), which gets an edit handle
   (`Edit`) that adds, ends, replaces and moves nodes in the node's own

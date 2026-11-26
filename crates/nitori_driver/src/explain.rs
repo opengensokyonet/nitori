@@ -1,9 +1,7 @@
 //! Proving one lending on its own: [`explain!`](crate::explain!).
 
-/// The build needs `$n` of a component at the kind `$k` under the
-/// composition `$q`, proved on their own as where `$q` is composed; what
-/// [`explain!`](crate::explain!) expands to for a component, beside its
-/// own needs.
+/// The build needs `$n` of a constructor at the kind `$k` under the
+/// composition `$q`, proved on their own as where `$q` is composed.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __explain_build {
@@ -34,13 +32,15 @@ macro_rules! __explain_needs {
 }
 /// Prove one lending on its own, at the kind `K` under the composition
 /// `Q`, where an error says why: the needs of a call, those of a
-/// component's operations and of its build, or a list of needs written
+/// component's runtime operations, those of a constructor, or a list of needs written
 /// out.
 ///
 /// ```text
 /// explain!(Q, K, call C);            // the call kind C: <C as CallKind<Q, K>>::Needs
-/// explain!(Q, K, component C);       // the component C: itself, exclusive, then its Needs; and its BuildNeeds
+/// explain!(Q, K, component C);       // the component C: itself, exclusive, then its Needs
 /// explain!(Q, K, component C of O);  // the same, C a component of the part O
+/// explain!(Q, K, build B);           // the constructor B: its BuildNeeds
+/// explain!(Q, K, build B of O);      // the same, B the constructor for the part O
 /// explain!(Q, K, needs![...]);       // a list of needs
 /// ```
 ///
@@ -67,16 +67,15 @@ macro_rules! __explain_needs {
 ///   kind's `Op` runs on its lending.
 /// - `component C` proves what the component's `wake` and `end` are
 ///   lent: `C` itself, exclusive, then its
-///   [`Needs`](crate::component::Component::Needs), at `K`; and, as a
-///   lending of its own, what its `build` is lent: its
-///   [`BuildNeeds`](crate::component::Component::BuildNeeds), from the
-///   nodes above a new node of `K`, or none when `K` is the root kind, as
-///   where `Q` is composed. The part whose share `C` is in is inferred when `C` is
-///   a component of one part only at `K`; a component of any part (`impl<O,
-///   L, K> Component<O, L, K>`) leaves it open ("type annotations
-///   needed"), and is written `component C of O`. In that form `C` is a
-///   path, with or without generic arguments (`Held<Rtt>`), since a type
-///   in a macro cannot be followed by `of`.
+///   [`Needs`](crate::component::Component::Needs) at `K`.
+/// - `build B` proves a constructor's
+///   [`BuildNeeds`](crate::component::Build::BuildNeeds), from the nodes
+///   above a new node of `K`, or none when `K` is the root kind.
+/// - The part is inferred when the component or constructor is specific to
+///   one part. For an implementation generic over the part, write
+///   `component C of O` or `build B of O`. In these forms `C` and `B` are
+///   paths, with or without generic arguments (`Held<Rtt>`), since a
+///   type in a macro cannot be followed by `of`.
 /// - `needs![...]`, or any type, is proved as the list of needs it is.
 ///   A kind's handler ([`HandleRequest`](crate::request::HandleRequest))
 ///   has no form of its own: its needs are written out, as
@@ -92,7 +91,7 @@ macro_rules! __explain_needs {
 /// use nitori_driver::{
 ///     __private::calls::{Count, Item, Root, StillClock, Total},
 ///     call::{CallFamily, CallKind, Composition, LoanNeeds},
-///     component::{ArgsOf, Component, Part, PartList},
+///     component::{ArgsOf, Build, Component, Part, PartList},
 ///     composition, explain,
 ///     frunk_core::{HList, hlist::HNil, hlist_pat},
 ///     id::Numbered,
@@ -119,11 +118,14 @@ macro_rules! __explain_needs {
 /// /// An item's tally, a component of the part `Counter` only.
 /// #[derive(Numbered)]
 /// struct Tally;
-/// impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
-///     type Needs = HList![Ref<Total>];
+/// impl<L: PartList<L>> Build<Counter, L, Item> for Tally {
 ///     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 ///         Tally
 ///     }
+/// }
+///
+/// impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
+///     type Needs = HList![Ref<Total>];
 /// }
 /// #[derive(Numbered)]
 /// struct Counter;
@@ -154,7 +156,7 @@ macro_rules! __explain_needs {
 /// # use nitori_driver::{
 /// #     __private::calls::{Count, Item, Root, StillClock, Total},
 /// #     call::{CallFamily, CallKind, Composition, LoanNeeds},
-/// #     component::{ArgsOf, Component, Held, Part, PartList},
+/// #     component::{ArgsOf, Build, Component, Held, Part, PartList},
 /// #     composition, explain,
 /// #     frunk_core::{HList, hlist::HNil, hlist_pat},
 /// #     id::Numbered,
@@ -181,32 +183,39 @@ macro_rules! __explain_needs {
 /// # /// An item's tally, a component of the part `Counter` only.
 /// # #[derive(Numbered)]
 /// # struct Tally;
-/// # impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
-/// #     type Needs = HList![Ref<Total>];
+/// # impl<L: PartList<L>> Build<Counter, L, Item> for Tally {
 /// #     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 /// #         Tally
 /// #     }
 /// # }
+///
+/// # impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
+/// #     type Needs = HList![Ref<Total>];
+/// # }
 /// /// A host's estimator.
 /// #[derive(Numbered, Default)]
 /// struct Rtt;
-/// impl<X: Numbered + Default + 'static, L: PartList<L>> Component<Counter, L, Item> for Held<X> {
+/// impl<X: Numbered + Default + 'static, L: PartList<L>> Build<Counter, L, Item> for Held<X> {
 ///     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 ///         Held(X::default())
 ///     }
 /// }
+///
+/// impl<X: Numbered + Default + 'static, L: PartList<L>> Component<Counter, L, Item> for Held<X> {}
 /// mod inner {
 ///     use super::*;
 ///     /// What an item started from: the total when it was added.
 ///     #[derive(Numbered)]
 ///     pub struct Seen(pub u32);
-///     impl<L: PartList<L>> Component<Counter, L, Item> for Seen {
+///     impl<L: PartList<L>> Build<Counter, L, Item> for Seen {
 ///         type BuildNeeds = HList![Ref<Total>];
 ///         fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, view: View<'_, Self::BuildNeeds, P>) -> Self {
 ///             let hlist_pat![total] = view;
 ///             Seen(total.0)
 ///         }
 ///     }
+///
+///     impl<L: PartList<L>> Component<Counter, L, Item> for Seen {}
 /// }
 /// #[derive(Numbered)]
 /// struct Counter;
@@ -223,6 +232,8 @@ macro_rules! __explain_needs {
 /// explain!(Q, Item, component Held<Rtt> of Counter);
 /// explain!(Q, Item, component inner::Seen);
 /// explain!(Q, Item, component crate::inner::Seen of Counter);
+/// explain!(Q, Item, build inner::Seen);
+/// explain!(Q, Item, build Held<Rtt> of Counter);
 /// explain!(Q, Root, component Total of Counter);
 /// # fn main() {}
 /// ```
@@ -238,7 +249,7 @@ macro_rules! __explain_needs {
 /// use nitori_driver::{
 ///     __private::calls::{Count, Item, Root, StillClock, Total},
 ///     call::{CallFamily, CallKind, Composition, LoanNeeds},
-///     component::{ArgsOf, Component, Part, PartList},
+///     component::{ArgsOf, Build, Component, Part, PartList},
 ///     composition, explain,
 ///     frunk_core::{HList, hlist::HNil, hlist_pat},
 ///     id::Numbered,
@@ -265,11 +276,14 @@ macro_rules! __explain_needs {
 /// /// An item's tally, a component of the part `Counter` only.
 /// #[derive(Numbered)]
 /// struct Tally;
-/// impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
-///     type Needs = HList![Ref<Total>];
+/// impl<L: PartList<L>> Build<Counter, L, Item> for Tally {
 ///     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 ///         Tally
 ///     }
+/// }
+///
+/// impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
+///     type Needs = HList![Ref<Total>];
 /// }
 /// /// Kept by no node of the structure.
 /// #[derive(Numbered)]
@@ -296,7 +310,7 @@ macro_rules! __explain_needs {
 /// # use nitori_driver::{
 /// #     __private::calls::{Count, Item, Root, StillClock, Total},
 /// #     call::{CallFamily, CallKind, Composition, LoanNeeds},
-/// #     component::{ArgsOf, Component, Part, PartList},
+/// #     component::{ArgsOf, Build, Component, Part, PartList},
 /// #     composition, explain,
 /// #     frunk_core::{HList, hlist::HNil, hlist_pat},
 /// #     id::Numbered,
@@ -323,11 +337,14 @@ macro_rules! __explain_needs {
 /// # /// An item's tally, a component of the part `Counter` only.
 /// # #[derive(Numbered)]
 /// # struct Tally;
-/// # impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
-/// #     type Needs = HList![Ref<Total>];
+/// # impl<L: PartList<L>> Build<Counter, L, Item> for Tally {
 /// #     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 /// #         Tally
 /// #     }
+/// # }
+///
+/// # impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
+/// #     type Needs = HList![Ref<Total>];
 /// # }
 /// # /// Kept by no node of the structure.
 /// # #[derive(Numbered)]
@@ -357,7 +374,7 @@ macro_rules! __explain_needs {
 /// # use nitori_driver::{
 /// #     __private::calls::{Count, Item, Root, StillClock, Total},
 /// #     call::{CallFamily, CallKind, Composition, LoanNeeds},
-/// #     component::{ArgsOf, Component, Part, PartList},
+/// #     component::{ArgsOf, Build, Component, Part, PartList},
 /// #     composition, explain,
 /// #     frunk_core::{HList, hlist::HNil, hlist_pat},
 /// #     id::Numbered,
@@ -384,11 +401,14 @@ macro_rules! __explain_needs {
 /// # /// An item's tally, a component of the part `Counter` only.
 /// # #[derive(Numbered)]
 /// # struct Tally;
-/// # impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
-/// #     type Needs = HList![Ref<Total>];
+/// # impl<L: PartList<L>> Build<Counter, L, Item> for Tally {
 /// #     fn build<P: Pos>(_: &mut (), _: &(), _: &ArgsOf<L>, _: View<'_, HNil, P>) -> Self {
 /// #         Tally
 /// #     }
+/// # }
+///
+/// # impl<L: PartList<L>> Component<Counter, L, Item> for Tally {
+/// #     type Needs = HList![Ref<Total>];
 /// # }
 /// # #[derive(Numbered)]
 /// # struct Counter;
@@ -420,11 +440,6 @@ macro_rules! explain {
                 <$c $(:: $cs)* $(<$($g),*>)? as $crate::component::Component<$o, $crate::call::PartsOf<$q>, $k>>::Needs,
             >
         );
-        $crate::__explain_build!(
-            $q,
-            $k,
-            <$c $(:: $cs)* $(<$($g),*>)? as $crate::component::Component<$o, $crate::call::PartsOf<$q>, $k>>::BuildNeeds
-        );
     };
     ($q:ty, $k:ty, component $c:ty $(,)?) => {
         $crate::__explain_needs!(
@@ -435,10 +450,19 @@ macro_rules! explain {
                 <$c as $crate::component::Component<_, $crate::call::PartsOf<$q>, $k>>::Needs,
             >
         );
+    };
+    ($q:ty, $k:ty, build $b:ident $(:: $bs:ident)* $(<$($g:ty),* $(,)?>)? of $o:ty $(,)?) => {
         $crate::__explain_build!(
             $q,
             $k,
-            <$c as $crate::component::Component<_, $crate::call::PartsOf<$q>, $k>>::BuildNeeds
+            <$b $(:: $bs)* $(<$($g),*>)? as $crate::component::Build<$o, $crate::call::PartsOf<$q>, $k>>::BuildNeeds
+        );
+    };
+    ($q:ty, $k:ty, build $b:ty $(,)?) => {
+        $crate::__explain_build!(
+            $q,
+            $k,
+            <$b as $crate::component::Build<_, $crate::call::PartsOf<$q>, $k>>::BuildNeeds
         );
     };
     ($q:ty, $k:ty, $n:ty $(,)?) => {

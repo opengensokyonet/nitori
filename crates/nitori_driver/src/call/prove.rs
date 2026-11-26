@@ -277,7 +277,8 @@ where
 /// down to it, with the positions `IB` of the build needs (inferred).
 #[diagnostic::on_unimplemented(
     message = "the nodes of the kind `{K}` cannot be built under `{Q}`",
-    note = "every component of a new node is lent its `BuildNeeds` from the nodes above it, and the root's components have none"
+    note = "every constructor of a new node is lent its `BuildNeeds` from the nodes above it, and the root's constructors have none",
+    note = "use `nitori_driver::explain!(Q, Kind, build B)` to prove the needs of the constructor B by themselves"
 )]
 pub trait BuildAt<Q: Composition, K: KindFor<PartsOf<Q>>, IB> {
     /// What a new node is built at.
