@@ -148,7 +148,15 @@ pub trait Skip: Read {
         M: Min<Self::Count, Output = Self::Count> + Clone;
 }
 
-/// Accept a prefix of a caller-selected buffer and advance its cursor.
+/// Accept a prefix of a caller-selected buffer and advance its cursor,
+/// writing it with the options `O`.
+///
+/// `options` says how the caller wants this segment's bytes written, such
+/// as the priority of a send or the path it takes; `()` for a sink that takes
+/// none. A sink can implement this capability for several options types,
+/// each with its own [`Error`](Write::Error) and [`Report`](Write::Report),
+/// for example `Write<()>` beside `Write<O>` when `O` has a default. An
+/// adapter that forwards a sink forwards each of its options types.
 ///
 /// `Some` reports one segment: the accepted count, which equals the decrease
 /// in `remaining()`, and the [`Report`](Write::Report) the write produced.
@@ -158,10 +166,9 @@ pub trait Skip: Read {
 /// [`calls::write_all`] reports as zero progress. Waiting is `Pending`. `Pending` and `Err` leave
 /// the cursor and accepted byte count unchanged. Acceptance does not imply
 /// flushing or remote delivery. Empty requests reach the host. The buffer
-/// borrow lasts only for this poll. What the caller wants done with the bytes
-/// (send parameters, a destination) is not part of this capability.
+/// and options borrows last only for this poll.
 #[nitori_call::capability(sync)]
-pub trait Write: nitori_call::ReceiverFamily {
+pub trait Write<O>: nitori_call::ReceiverFamily {
     type Error;
     /// What one accepted segment produced, beyond its count; `()` for a
     /// sink that reports nothing. An adapter that forwards a sink names the
@@ -171,25 +178,28 @@ pub trait Write: nitori_call::ReceiverFamily {
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
-    ) -> Poll<WriteResult<Self>>
+        options: &O,
+    ) -> Poll<WriteResult<Self, O>>
     where
         Self: 'visit;
 }
 
 /// Lend a writable region of the sink's own storage for the caller to fill,
 /// and keep what was put there, as one segment of the stream that [`Write`]
-/// writes.
+/// writes with the options `O`.
 ///
 /// In one poll the sink grants between one and `wanted` bytes, lends a
 /// [`LentBuffer`] that holds at most the granted count, and calls `fill`
-/// with it. `fill` puts a prefix into the buffer and returns its value, or
-/// gives up with its own `A`. The sink then counts what it keeps from its own
-/// storage, whatever `fill` reports, and returns the rest of the grant:
-/// [`LentOutcome::Kept`] reports the count, at least one, the
-/// [`Report`](Write::Report) and the value. When no byte was put, or the
-/// loan was broken, the sink keeps nothing and hands the value back in
-/// [`LentOutcome::NotKept`]. When `fill` gives up,
-/// [`LentOutcome::GaveUp`], nothing is written, whatever it put into the
+/// with it. `fill` puts a prefix into the buffer and returns [`Filled`]: its
+/// value and the write options of the bytes it put. It can also give up
+/// with its own `A`. The options are given when the bytes are kept, so the
+/// grant does not depend on them. The sink then counts what it keeps from its
+/// own storage, whatever `fill` reports, writes it with the options, and
+/// returns the rest of the grant: [`LentOutcome::Kept`] reports the count, at
+/// least one, the [`Report`](Write::Report) and the value. When no byte was
+/// put, or the loan was broken, the sink keeps nothing, drops the options
+/// and hands the value back in [`LentOutcome::NotKept`]. When `fill` gives
+/// up, [`LentOutcome::GaveUp`], nothing is written, whatever it put into the
 /// buffer.
 ///
 /// `Ok(None)` means the sink accepts no byte, as [`Write`] answers `None`
@@ -204,11 +214,11 @@ pub trait Write: nitori_call::ReceiverFamily {
 /// `fill` lives for one poll; an operation calls `poll_write_lent` inside
 /// the sink access's `poll_access`.
 ///
-/// Every sink that lends also implements [`Write`]; neither is derived from
-/// the other. A source that can produce bytes into a buffer, such as a
-/// [`Read`] source or a generator, pairs with this capability, as a
-/// [`ReadChunk`] source pairs with [`Write`].
-pub trait WriteLent: Write {
+/// Every sink that lends also implements [`Write`] with the same options
+/// type; neither is derived from the other. A source that can produce bytes
+/// into a buffer, such as a [`Read`] source or a generator, pairs with this
+/// capability, as a [`ReadChunk`] source pairs with [`Write`].
+pub trait WriteLent<O>: Write<O> {
     /// The storage the sink lends, seen as a [`BufMut`], such as
     /// `&'l mut BytesMut` for the spare capacity at its end.
     type Buffer<'l>: BufMut;
@@ -217,10 +227,10 @@ pub trait WriteLent: Write {
         cx: &mut Context<'_>,
         wanted: NonZeroUsize,
         fill: Fill,
-    ) -> Poll<WriteLentResult<Self, T, A>>
+    ) -> Poll<WriteLentResult<Self, O, T, A>>
     where
         Self: 'visit,
-        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>;
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<T, O>, A>;
 }
 
 mod combine;
@@ -228,9 +238,11 @@ pub use combine::Combine;
 mod ext;
 pub use ext::*;
 mod lent_buffer;
-pub use lent_buffer::{LentBuffer, LentOutcome};
+pub use lent_buffer::{Filled, LentBuffer, LentOutcome};
 mod segment;
 mod spare_capacity;
 pub use segment::{ChunkSegment, LentSegment, ReadSegment, WriteSegment};
 pub use spare_capacity::VecSpareCapacity;
 pub use split::{SplitTo, SplitToError};
+mod value;
+pub use value::Value;

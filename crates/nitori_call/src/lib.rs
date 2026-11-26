@@ -225,11 +225,11 @@ pub use lock::{Guarded, Lock, LockAcquisition, Locked};
 /// of the macro enable `impl_trait_in_assoc_type`.
 ///
 /// The access may also name its family with a type parameter of the function,
-/// as `A: ReceiverAccess<Family = F>` with `F: Write`, which is how the
+/// as `A: ReceiverAccess<Family = F>` with `F: Write<()>`, which is how the
 /// operations of `nitori_io` are written; the operation is still defined for
 /// every family with those bounds. The output and the item type
 /// can then write `F::Error`; arguments and where clauses name an associated
-/// type with its trait, as `<F as Write>::Error`. A struct that takes the
+/// type with its trait, as `<F as Write<()>>::Error`. A struct that takes the
 /// family as a parameter names it `F`.
 ///
 /// ```

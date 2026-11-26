@@ -13,9 +13,9 @@
 // their accesses.
 #![allow(clippy::type_complexity)]
 use crate::{
-    ChunkSegment, Combine, LentOutcome, LentSegment, Read as ReadHost, ReadChunk as ChunkHost,
-    ReadChunkExt as _, ReadExt as _, ReadSegment, Write as WriteHost, WriteExt as _, WriteLent,
-    WriteSegment,
+    ChunkSegment, Combine, Filled, LentOutcome, LentSegment, Read as ReadHost,
+    ReadChunk as ChunkHost, ReadChunkExt as _, ReadExt as _, ReadSegment, Write as WriteHost,
+    WriteExt as _, WriteLent, WriteSegment,
     error::{self, InsufficientCapacityError, WriteZeroError},
 };
 use bytes::Buf;
@@ -50,17 +50,19 @@ fn add(completed: u64, count: NonZeroUsize) -> u64 {
         .expect("copied byte count overflow")
 }
 
-/// Write all of `input` to `sink`, adding what it accepts to the totals.
+/// Write all of `input` to `sink` with the write options `options`,
+/// adding what it accepts to the totals.
 ///
 /// Returns the sink's failure or zero progress with the count copied by then.
-async fn write_through<W: WriteHost<Report: Combine>>(
+async fn write_through<M, W: WriteHost<M, Report: Combine>>(
     sink: &mut impl ReceiverAccess<Family = W>,
     mut input: impl Buf,
+    options: &M,
     completed: &mut u64,
     report: &mut W::Report,
 ) -> Result<(), WriteStepError<W::Error>> {
     while input.has_remaining() {
-        match sink.write(&mut input).await {
+        match sink.write(&mut input, options).await {
             Ok(Some(WriteSegment {
                 count,
                 report: next,
@@ -89,7 +91,8 @@ enum WriteStepError<E> {
 }
 
 /// Copy until the source ends, taking chunks of at most `chunk_maximum`
-/// bytes and writing each completely before taking the next.
+/// bytes and writing each completely, with its metadata as the write
+/// options, before taking the next.
 ///
 /// Dropping the operation while it writes a chunk loses the part of the
 /// chunk the sink has not accepted: it is taken from the source already.
@@ -102,12 +105,12 @@ pub async fn copy_chunks<R, W>(
 where
     R: ChunkHost,
     <R as ReadHost>::Metadata: Combine,
-    W: WriteHost,
-    <W as WriteHost>::Report: Combine,
+    W: WriteHost<R::Metadata>,
+    <W as WriteHost<R::Metadata>>::Report: Combine,
 {
     let mut completed = 0;
     let mut metadata = <R as ReadHost>::Metadata::default();
-    let mut report = <W as WriteHost>::Report::default();
+    let mut report = <W as WriteHost<R::Metadata>>::Report::default();
     loop {
         let segment = match source.read_chunk(chunk_maximum).await {
             Ok(Some(segment)) => segment,
@@ -120,9 +123,8 @@ where
             chunk,
             metadata: next,
         } = segment;
-        metadata = metadata.combine(next);
-        match write_through(sink, chunk, &mut completed, &mut report).await {
-            Ok(()) => {}
+        match write_through(sink, chunk, &next, &mut completed, &mut report).await {
+            Ok(()) => metadata = metadata.combine(next),
             Err(WriteStepError::Sink(source)) => {
                 return Err(copy_chunks_error::WriteSnafu { completed }.into_error(source));
             }
@@ -185,7 +187,8 @@ enum LentStep<M, Rp, Re, We> {
 
 /// Copy until the source ends by reading straight into the sink's lent
 /// storage, at most `chunk_maximum` bytes at a time, without a buffer in
-/// between.
+/// between. The fill gives the sink the metadata of the segment it read as
+/// its write options; a copy of it is merged into the total.
 ///
 /// Each poll asks the sink to lend, then reads into the lent buffer in the
 /// same poll. A source that has to wait gives the loan up, so the sink keeps
@@ -204,13 +207,13 @@ pub async fn copy_into_lent<R, W>(
 ) -> Result<CopyTotal<R::Metadata, W::Report>, CopyIntoLentError<R::Error, W::Error>>
 where
     R: ReadHost,
-    <R as ReadHost>::Metadata: Combine,
-    W: WriteLent,
-    <W as WriteHost>::Report: Combine,
+    <R as ReadHost>::Metadata: Combine + Clone,
+    W: WriteLent<R::Metadata>,
+    <W as WriteHost<R::Metadata>>::Report: Combine,
 {
     let mut completed = 0;
     let mut metadata = <R as ReadHost>::Metadata::default();
-    let mut report = <W as WriteHost>::Report::default();
+    let mut report = <W as WriteHost<R::Metadata>>::Report::default();
     loop {
         let step = poll_fn(|cx| {
             sink.poll_access(cx, |sink_view, cx| {
@@ -232,7 +235,10 @@ where
                             Poll::Ready(Err(error)) => Err(Stop::Failed(error)),
                             // The lent buffer has room, so no segment is EOF.
                             Poll::Ready(Ok(None)) => Err(Stop::End),
-                            Poll::Ready(Ok(Some(ReadSegment { metadata, .. }))) => Ok(metadata),
+                            Poll::Ready(Ok(Some(ReadSegment { metadata, .. }))) => Ok(Filled {
+                                value: metadata.clone(),
+                                options: metadata,
+                            }),
                         }
                     },
                 );
@@ -328,10 +334,11 @@ impl<R, W> CopyIntoLentError<R, W> {
     }
 }
 
-/// Copy until the source ends through `buffer`: read into it, then write
-/// what was read completely before reading again. The caller chooses the
-/// buffer's size and where it lives; it holds the bytes read while the sink
-/// waits.
+/// Copy until the source ends through `buffer`: read a segment into it, then
+/// write it completely, with its metadata as the write options, before
+/// reading again, so segments of different metadata are never written
+/// together. The caller chooses the buffer's size and where it lives; it
+/// holds the bytes read while the sink waits.
 ///
 /// Dropping the operation while it writes loses the bytes read into the
 /// buffer that the sink has not accepted.
@@ -344,8 +351,8 @@ pub async fn copy_buffered<R, W>(
 where
     R: ReadHost,
     <R as ReadHost>::Metadata: Combine,
-    W: WriteHost,
-    <W as WriteHost>::Report: Combine,
+    W: WriteHost<R::Metadata>,
+    <W as WriteHost<R::Metadata>>::Report: Combine,
 {
     if buffer.is_empty() {
         return Err(error::InsufficientCapacitySnafu {
@@ -357,25 +364,22 @@ where
     }
     let mut completed = 0;
     let mut metadata = <R as ReadHost>::Metadata::default();
-    let mut report = <W as WriteHost>::Report::default();
+    let mut report = <W as WriteHost<R::Metadata>>::Report::default();
     loop {
         let mut destination = &mut buffer[..];
-        let count = match source.read(&mut destination).await {
+        let (count, next) = match source.read(&mut destination).await {
             Ok(Some(ReadSegment {
                 count,
                 metadata: next,
-            })) => {
-                metadata = metadata.combine(next);
-                count
-            }
+            })) => (count, next),
             Ok(None) => break,
             Err(source) => {
                 return Err(copy_buffered_error::ReadSnafu { completed }.into_error(source));
             }
         };
         let read = &buffer[..count.get()];
-        match write_through(sink, read, &mut completed, &mut report).await {
-            Ok(()) => {}
+        match write_through(sink, read, &next, &mut completed, &mut report).await {
+            Ok(()) => metadata = metadata.combine(next),
             Err(WriteStepError::Sink(source)) => {
                 return Err(copy_buffered_error::WriteSnafu { completed }.into_error(source));
             }

@@ -10,7 +10,7 @@ pub mod host;
 mod impls;
 pub mod payload;
 pub mod prelude;
-mod read_value;
+mod value;
 
 /// Decode a value from a source of type `S`.
 ///

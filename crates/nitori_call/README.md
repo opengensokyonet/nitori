@@ -249,9 +249,9 @@ or `&mut impl ReceiverAccess<Family = F>`, where the type parameter `F` is
 bounded by the capabilities the operation needs; the operation is defined for
 every family with those bounds. The output and the items can then write an
 associated type of a capability as `F::Error`; arguments and where clauses
-name it with its trait, as `<F as Write>::Error`. The access can also bound
-its family directly, as `ReceiverAccess<Family: Write>`, and write
-`<A::Family as Write>::Error`. Arguments, outputs and items may mention the
+name it with its trait, as `<F as Write<()>>::Error`. The access can also
+bound its family directly, as `ReceiverAccess<Family: Write<()>>`, and
+write `<A::Family as Write<()>>::Error`. Arguments, outputs and items may mention the
 access only through its family. Crates that define operations enable
 `impl_trait_in_assoc_type`.
 
@@ -604,7 +604,7 @@ use std::pin::pin;
 
 /// Copies up to `length` bytes, one at a time.
 #[call(sync)]
-async fn copy_bytes<F: Read<Metadata = ()>, G: Write<Report = ()>>(
+async fn copy_bytes<F: Read<Metadata = ()>, G: Write<(), Report = ()>>(
     source: &mut impl ReceiverAccess<Family = F>,
     sink: &mut impl ReceiverAccess<Family = G>,
     length: usize,
@@ -613,7 +613,7 @@ async fn copy_bytes<F: Read<Metadata = ()>, G: Write<Report = ()>>(
     while copied < length {
         let Ok(read) = source.read_array::<1>().await else { break };
         let [byte] = read.value;
-        if sink.write_all(&[byte][..]).await.is_err() {
+        if sink.write_all(&[byte][..], ()).await.is_err() {
             break;
         }
         copied += 1;
@@ -903,7 +903,7 @@ use std::sync::Mutex;
 
 fn main() {
     let output = Mutex::new(Vec::new());
-    (&output).sync_write_all_unpin(&b"PING"[..]).unwrap();
+    (&output).sync_write_all_unpin(&b"PING"[..], ()).unwrap();
     assert_eq!(*output.lock().unwrap(), b"PING");
 }
 ```

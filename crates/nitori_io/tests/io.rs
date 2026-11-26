@@ -4,7 +4,7 @@ use futures_core::Stream;
 use nitori_call::{CallExecutor, ReceiverAccess, call};
 use nitori_io::PollReadExt as _;
 use nitori_io::{
-    Read as ReadHost, ReadChunk as ChunkHost, Write as WriteHost,
+    Read as ReadHost, ReadChunk as ChunkHost, Value, Write as WriteHost,
     calls::*,
     error::{DestinationFullError, IncompleteError, WriteZeroError},
     helpers::*,
@@ -177,13 +177,14 @@ impl Sink {
         }
     }
 }
-impl WriteHost for Sink {
+impl WriteHost<()> for Sink {
     type Error = io::Error;
     type Report = ();
     fn poll_write<'visit, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
@@ -359,7 +360,7 @@ fn write_ownership_borrowing_and_partial_errors() {
     let mut input = Bytes::from_static(b"abcd");
     let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
-        write::Write::new(&mut input),
+        write::Write::new(&mut input, &()),
     ));
     assert_eq!(result.unwrap().map(|segment| segment.count.get()), Some(2));
     assert_eq!(input, b"cd"[..]);
@@ -367,7 +368,7 @@ fn write_ownership_borrowing_and_partial_errors() {
     sink.fail_at = Some(4);
     let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
-        WriteAll::new(&mut input),
+        WriteAll::new(&mut input, ()),
     ));
     let error = result.unwrap_err();
     assert_eq!(error.completed(), 2);
@@ -379,7 +380,7 @@ fn write_ownership_borrowing_and_partial_errors() {
     let mut input = Bytes::from_static(b"x");
     let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
-        WriteAll::new(&mut input),
+        WriteAll::new(&mut input, ()),
     ));
     assert!(matches!(
         result.unwrap_err(),
@@ -397,7 +398,7 @@ fn segmented_and_unsized_buffers() {
     let input: &mut dyn Buf = &mut input;
     let result = run(CallExecutor::execute(
         Pin::new(&mut sink),
-        WriteAll::new(input),
+        WriteAll::new(input, ()),
     ));
     result.unwrap();
     assert_eq!(sink.bytes, b"abcde");
@@ -530,7 +531,7 @@ fn cancellation_keeps_completed_prefix() {
     {
         let mut bound = pin!(CallExecutor::execute(
             Pin::new(&mut sink),
-            WriteAll::new(&mut input)
+            WriteAll::new(&mut input, ())
         ));
         assert!(
             bound
@@ -567,13 +568,13 @@ fn zero_composites_are_noops_but_basic_requests_reach_host() {
     sink.fail_at = Some(0);
     run(CallExecutor::execute(
         Pin::new(&mut sink),
-        WriteAll::new(&b""[..]),
+        WriteAll::new(&b""[..], ()),
     ))
     .unwrap();
     assert!(
         run(CallExecutor::execute(
             Pin::new(&mut sink),
-            write::Write::new(&mut &b""[..])
+            write::Write::new(&mut &b""[..], &())
         ))
         .is_err()
     );
@@ -804,11 +805,11 @@ fn host_errors_need_neither_error_trait_nor_static_lifetime() {
 }
 
 #[call]
-async fn borrowed_write<A: ReceiverAccess<Family: WriteHost<Report: nitori_io::Combine>>>(
+async fn borrowed_write<A: ReceiverAccess<Family: WriteHost<(), Report: nitori_io::Combine>>>(
     io: &mut A,
-) -> Result<(), nitori_io::calls::WriteAllError<<A::Family as WriteHost>::Error>> {
+) -> Result<(), nitori_io::calls::WriteAllError<<A::Family as WriteHost<()>>::Error>> {
     let mut input = Bytes::from_static(b"abc");
-    io.write_all(&mut input).await.map(|_| ())
+    io.write_all(&mut input, ()).await.map(|_| ())
 }
 #[test]
 fn family_write_borrows_local_input() {
@@ -855,13 +856,14 @@ impl ChunkHost for RawHost<'_> {
         Poll::Ready(this.failure.map_or(Ok(None), |text| Err(RawFailure(text))))
     }
 }
-impl<'a> WriteHost for RawHost<'a> {
+impl<'a> WriteHost<()> for RawHost<'a> {
     type Error = RawFailure<'a>;
     type Report = ();
     fn poll_write<'visit, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         _: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
@@ -918,7 +920,7 @@ fn operation_errors_accept_borrowed_payloads_without_diagnostic_traits() {
     let mut input = Bytes::from_static(b"x");
     let returned = run(CallExecutor::execute(
         Pin::new(&mut host),
-        WriteAll::new(&mut input),
+        WriteAll::new(&mut input, ()),
     ));
     let error = returned.err().unwrap();
     assert_eq!(error.host_error().unwrap().0, message);
@@ -958,7 +960,7 @@ fn primitive_failures_do_not_require_host_diagnostics() {
     assert!(matches!(error, ReadExactError::InsufficientCapacity { .. }));
     let returned = run(CallExecutor::execute(
         Pin::new(&mut host),
-        WriteAll::new(Bytes::from_static(b"x")),
+        WriteAll::new(Bytes::from_static(b"x"), ()),
     ));
     let error = returned.err().unwrap();
     assert!(matches!(
@@ -1023,9 +1025,9 @@ fn local_validation_and_zero_length_composites_do_not_request_a_view() {
     let empty = pin!(Call::<F, _>::new(ReadArray::<0>::new()));
     assert!(matches!(
         empty.poll_return_with(None, &mut cx),
-        CallPoll::Ready(Ok(ReadValue { value: [], .. }))
+        CallPoll::Ready(Ok(Value { value: [], .. }))
     ));
-    let empty = pin!(Call::<F, _>::new(WriteAll::new(&b""[..])));
+    let empty = pin!(Call::<F, _>::new(WriteAll::new(&b""[..], ())));
     assert!(matches!(
         empty.poll_return_with(None, &mut cx),
         CallPoll::Ready(Ok(()))

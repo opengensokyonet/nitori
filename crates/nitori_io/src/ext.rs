@@ -1,6 +1,6 @@
 //! Synchronous capability polls on receivers.
 use crate::{
-    ChunkSegment, LentBuffer, LentOutcome, Read, ReadChunk, ReadSegment, Write, WriteLent,
+    ChunkSegment, Filled, LentBuffer, LentOutcome, Read, ReadChunk, ReadSegment, Write, WriteLent,
     WriteSegment,
 };
 use bytes::{Buf, BufMut};
@@ -34,33 +34,34 @@ where
     }
 }
 impl<H: Receiver + ?Sized> PollReadExt for H where H::Family: Read {}
-pub trait PollWriteExt: Receiver
+pub trait PollWriteExt<O>: Receiver
 where
-    Self::Family: Write,
+    Self::Family: Write<O>,
 {
     fn poll_write<B: Buf + ?Sized>(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         input: &mut B,
-    ) -> Poll<WriteResult<Self::Family>> {
-        Self::Family::poll_write(core::pin::pin!(self.view()), cx, input)
+        options: &O,
+    ) -> Poll<WriteResult<Self::Family, O>> {
+        Self::Family::poll_write(core::pin::pin!(self.view()), cx, input, options)
     }
     fn poll_write_lent<T, A, Fill>(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         wanted: NonZeroUsize,
         fill: Fill,
-    ) -> Poll<WriteLentResult<Self::Family, T, A>>
+    ) -> Poll<WriteLentResult<Self::Family, O, T, A>>
     where
-        Self::Family: WriteLent,
+        Self::Family: WriteLent<O>,
         Fill: for<'l> FnOnce(
-            &mut LentBuffer<<Self::Family as WriteLent>::Buffer<'l>>,
-        ) -> Result<T, A>,
+            &mut LentBuffer<<Self::Family as WriteLent<O>>::Buffer<'l>>,
+        ) -> Result<Filled<T, O>, A>,
     {
         Self::Family::poll_write_lent(core::pin::pin!(self.view()), cx, wanted, fill)
     }
 }
-impl<H: Receiver + ?Sized> PollWriteExt for H where H::Family: Write {}
+impl<H: Receiver + ?Sized, O> PollWriteExt<O> for H where H::Family: Write<O> {}
 
 /// A segment or no progress, with the family's metadata and error types.
 pub type ReadResult<F> = Result<Option<ReadSegment<<F as Read>::Metadata>>, <F as Read>::Error>;
@@ -73,10 +74,11 @@ pub type ChunkResult<F> = Result<
 >;
 
 /// An accepted segment or no progress, with the family's report and error
-/// types.
-pub type WriteResult<F> = Result<Option<WriteSegment<<F as Write>::Report>>, <F as Write>::Error>;
+/// types for the write options `O`.
+pub type WriteResult<F, O> =
+    Result<Option<WriteSegment<<F as Write<O>>::Report>>, <F as Write<O>>::Error>;
 
 /// What a loan came to, or no byte accepted, with the family's report and
-/// error types.
-pub type WriteLentResult<F, T, A> =
-    Result<Option<LentOutcome<<F as Write>::Report, T, A>>, <F as Write>::Error>;
+/// error types for the write options `O`.
+pub type WriteLentResult<F, O, T, A> =
+    Result<Option<LentOutcome<<F as Write<O>>::Report, T, A>>, <F as Write<O>>::Error>;

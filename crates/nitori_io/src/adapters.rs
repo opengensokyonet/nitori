@@ -1,10 +1,11 @@
 //! Explicit capability adapters: chunk reads with caller-selected allocation
-//! limits, byte budgets for composed accesses, skipping built from reads, and
-//! reading with the metadata merged into composition state.
+//! limits, byte budgets for composed accesses, skipping built from reads,
+//! reading with the metadata merged into composition state, and writing with
+//! the write options mapped into those of the sink.
 use crate::{
-    ChunkResult, ChunkSegment, LentBuffer, LentOutcome, PollReadExt as _, PollWriteExt as _, Read,
-    ReadChunk, ReadResult, Skip, Write, WriteLent, WriteLentResult, WriteResult,
-    helpers::poll_chunk_from_read,
+    ChunkResult, ChunkSegment, Filled, LentBuffer, LentOutcome, PollReadExt as _,
+    PollWriteExt as _, Read, ReadChunk, ReadResult, Skip, Write, WriteLent, WriteLentResult,
+    WriteResult, helpers::poll_chunk_from_read,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{
@@ -17,8 +18,10 @@ use core::{
 use nitori_call::{Compose, Direct, Lent, Receiver, ReceiverFamily};
 
 mod merged_metadata;
+mod options;
 mod skip;
 pub use merged_metadata::{MergedMetadata, Merging, MergingSource, MergingView};
+pub use options::{FixedOptions, MapOptions, MappedOptions, OptionsMapping, OptionsMappingView};
 pub use skip::{ReadChunkSkip, ReadSkip, Skippable};
 
 pin_project_lite::pin_project! {
@@ -152,38 +155,39 @@ where
         <T::Family as crate::ExactLen>::poll_remaining_len(core::pin::pin!(inner.view()), cx)
     }
 }
-impl<T: Receiver> Write for Direct<Chunked<T>>
+impl<T: Receiver, O> Write<O> for Direct<Chunked<T>>
 where
-    T::Family: Write,
+    T::Family: Write<O>,
 {
-    type Error = <T::Family as Write>::Error;
-    type Report = <T::Family as Write>::Report;
+    type Error = <T::Family as Write<O>>::Error;
+    type Report = <T::Family as Write<O>>::Report;
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<WriteResult<Self>>
+        options: &O,
+    ) -> Poll<WriteResult<Self, O>>
     where
         Self: 'visit,
     {
         let this = host.get_pin_mut();
-        this.project().inner.poll_write(cx, input)
+        this.project().inner.poll_write(cx, input, options)
     }
 }
-impl<T: Receiver> WriteLent for Direct<Chunked<T>>
+impl<T: Receiver, O> WriteLent<O> for Direct<Chunked<T>>
 where
-    T::Family: WriteLent,
+    T::Family: WriteLent<O>,
 {
-    type Buffer<'l> = <T::Family as WriteLent>::Buffer<'l>;
+    type Buffer<'l> = <T::Family as WriteLent<O>>::Buffer<'l>;
     fn poll_write_lent<'visit, U, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         wanted: NonZeroUsize,
         fill: Fill,
-    ) -> Poll<WriteLentResult<Self, U, A>>
+    ) -> Poll<WriteLentResult<Self, O, U, A>>
     where
         Self: 'visit,
-        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<U, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<U, O>, A>,
     {
         let this = host.get_pin_mut();
         this.project().inner.poll_write_lent(cx, wanted, fill)
@@ -438,14 +442,15 @@ where
         Poll::Ready(Ok(skipped))
     }
 }
-impl<F: Write> Write for Limited<F, WriteLimit> {
+impl<F: Write<O>, O> Write<O> for Limited<F, WriteLimit> {
     type Error = F::Error;
     type Report = F::Report;
     fn poll_write<'v, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<WriteResult<Self>>
+        options: &O,
+    ) -> Poll<WriteResult<Self, O>>
     where
         Self: 'v,
     {
@@ -458,7 +463,8 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
         let segment = ready!(F::poll_write(
             view.parent,
             cx,
-            &mut (&mut *input).take(remaining)
+            &mut (&mut *input).take(remaining),
+            options
         ))?;
         if let Some(segment) = &segment {
             let count = segment.count.get();
@@ -471,17 +477,17 @@ impl<F: Write> Write for Limited<F, WriteLimit> {
 
 /// Lends at most the remaining budget of the parent's storage. At the
 /// boundary it accepts no byte itself, without polling the parent.
-impl<F: WriteLent> WriteLent for Limited<F, WriteLimit> {
+impl<F: WriteLent<O>, O> WriteLent<O> for Limited<F, WriteLimit> {
     type Buffer<'l> = F::Buffer<'l>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         wanted: NonZeroUsize,
         fill: Fill,
-    ) -> Poll<WriteLentResult<Self, T, A>>
+    ) -> Poll<WriteLentResult<Self, O, T, A>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<T, O>, A>,
     {
         let view = host.project();
         let Some(remaining) = NonZeroUsize::new(view.limit.0) else {
@@ -533,33 +539,34 @@ impl<F: ReadChunk> ReadChunk for Lent<F> {
     }
 }
 /// Writes to the lent view.
-impl<F: Write> Write for Lent<F> {
+impl<F: Write<O>, O> Write<O> for Lent<F> {
     type Error = F::Error;
     type Report = F::Report;
     fn poll_write<'v, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<WriteResult<Self>>
+        options: &O,
+    ) -> Poll<WriteResult<Self, O>>
     where
         Self: 'v,
     {
         host.get_mut()
-            .with(|parent| F::poll_write(parent.into_pin(), cx, input))
+            .with(|parent| F::poll_write(parent.into_pin(), cx, input, options))
     }
 }
 /// Lends the storage of the lent view.
-impl<F: WriteLent> WriteLent for Lent<F> {
+impl<F: WriteLent<O>, O> WriteLent<O> for Lent<F> {
     type Buffer<'l> = F::Buffer<'l>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         wanted: NonZeroUsize,
         fill: Fill,
-    ) -> Poll<WriteLentResult<Self, T, A>>
+    ) -> Poll<WriteLentResult<Self, O, T, A>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<T, O>, A>,
     {
         host.get_mut()
             .with(|parent| F::poll_write_lent(parent.into_pin(), cx, wanted, fill))

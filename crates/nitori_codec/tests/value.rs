@@ -1,5 +1,5 @@
 //! Values with the metadata of their bytes: base values wrapped in
-//! `ReadValue`, inside composite values that take the metadata type as a
+//! `Value`, inside composite values that take the metadata type as a
 //! parameter, decoded in stages or whole.
 #![feature(impl_trait_in_assoc_type)]
 use bytes::BufMut;
@@ -11,9 +11,9 @@ use core::{
 use nitori_call::{AsAccess, Composed, ConstructedAccess, Lent, ReceiverAccess, call};
 use nitori_codec::{payload::Chunks, prelude::*};
 use nitori_io::{
-    Combine, ExactLen, Read, ReadChunk, ReadSegment, Write,
+    Combine, ExactLen, Read, ReadChunk, ReadSegment, Value, Write,
     adapters::{Limited, ReadLimit},
-    calls::{ReadArrayError, ReadValue},
+    calls::ReadArrayError,
     prelude::*,
 };
 
@@ -67,23 +67,23 @@ fn stream(data: &'static [u8], early: usize) -> ConstructedAccess<Received> {
 #[test]
 fn a_base_value_is_read_with_the_metadata_of_its_bytes() {
     let mut io = stream(b"abcd", 3);
-    let first = nitori_call::__private::run_sync(io.decode::<ReadValue<[u8; 2], ZeroRtt>>());
-    let second = nitori_call::__private::run_sync(io.decode::<ReadValue<[u8; 2], ZeroRtt>>());
+    let first = nitori_call::__private::run_sync(io.decode::<Value<[u8; 2], ZeroRtt>>());
+    let second = nitori_call::__private::run_sync(io.decode::<Value<[u8; 2], ZeroRtt>>());
     assert_eq!(
         (first.unwrap(), second.unwrap()),
         (
-            ReadValue {
+            Value {
                 value: *b"ab",
                 metadata: ZeroRtt(true)
             },
-            ReadValue {
+            Value {
                 value: *b"cd",
                 metadata: ZeroRtt(true)
             }
         )
     );
     let mut later = stream(b"ef", 0);
-    let third = nitori_call::__private::run_sync(later.decode::<ReadValue<[u8; 2], ZeroRtt>>());
+    let third = nitori_call::__private::run_sync(later.decode::<Value<[u8; 2], ZeroRtt>>());
     assert_eq!(third.unwrap().metadata, ZeroRtt(false));
 }
 
@@ -102,8 +102,8 @@ impl<S: AsAccess<Family: Read>> AsAccess for &mut Payload<S> {
 
 /// A composite value: each base field with the metadata of its bytes.
 struct Frame<P, M = ()> {
-    kind: ReadValue<[u8; 1], M>,
-    length: ReadValue<[u8; 1], M>,
+    kind: Value<[u8; 1], M>,
+    length: Value<[u8; 1], M>,
     payload: P,
 }
 
@@ -117,8 +117,8 @@ where
 {
     type Error = FrameError<S>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
-        let kind = ReadValue::<[u8; 1], M>::decode_from(io.access()).await?;
-        let length = ReadValue::<[u8; 1], M>::decode_from(io.access()).await?;
+        let kind = Value::<[u8; 1], M>::decode_from(io.access()).await?;
+        let length = Value::<[u8; 1], M>::decode_from(io.access()).await?;
         let [left] = length.value;
         Ok(Frame {
             kind,
@@ -156,8 +156,8 @@ where
 /// A composite payload of two base fields.
 #[derive(Debug, PartialEq)]
 struct Pair<M = ()> {
-    first: ReadValue<[u8; 1], M>,
-    second: ReadValue<[u8; 1], M>,
+    first: Value<[u8; 1], M>,
+    second: Value<[u8; 1], M>,
 }
 impl<S, M> DecodeFrom<S> for Pair<M>
 where
@@ -167,8 +167,8 @@ where
     type Error = FrameError<S>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: ReadValue::decode_from(io.access()).await?,
-            second: ReadValue::decode_from(io.access()).await?,
+            first: Value::decode_from(io.access()).await?,
+            second: Value::decode_from(io.access()).await?,
         })
     }
 }
@@ -182,11 +182,11 @@ fn a_frame_in_stages_keeps_its_header_and_the_payload_reports_its_own() {
     assert_eq!(
         (frame.kind, frame.length),
         (
-            ReadValue {
+            Value {
                 value: [7],
                 metadata: ZeroRtt(true)
             },
-            ReadValue {
+            Value {
                 value: [2],
                 metadata: ZeroRtt(true)
             }
@@ -195,13 +195,13 @@ fn a_frame_in_stages_keeps_its_header_and_the_payload_reports_its_own() {
     let mut payload = &mut frame.payload;
     let byte = nitori_call::__private::run_sync(payload.access().read_array::<1>()).unwrap();
     assert_eq!((byte.value, byte.metadata), (*b"x", ZeroRtt(false)));
-    let next = nitori_call::__private::run_sync(ReadValue::<[u8; 1], ZeroRtt>::decode_from(
+    let next = nitori_call::__private::run_sync(Value::<[u8; 1], ZeroRtt>::decode_from(
         &mut frame.payload,
     ))
     .unwrap();
     assert_eq!(
         next,
-        ReadValue {
+        Value {
             value: *b"y",
             metadata: ZeroRtt(false)
         }
@@ -223,11 +223,11 @@ fn a_composite_payload_takes_the_same_metadata_without_another_wrapper() {
     assert_eq!(
         frame.payload,
         Pair {
-            first: ReadValue {
+            first: Value {
                 value: *b"a",
                 metadata: ZeroRtt(false)
             },
-            second: ReadValue {
+            second: Value {
                 value: *b"b",
                 metadata: ZeroRtt(false)
             },
@@ -251,22 +251,22 @@ fn without_metadata_the_same_types_decode_from_memory() {
 }
 
 #[test]
-fn encoding_writes_the_value_and_ignores_the_metadata() {
+fn a_value_without_write_options_encodes_into_memory() {
     let mut output = Vec::new();
     output
-        .sync_encode_unpin(ReadValue {
+        .sync_encode_unpin(Value {
             value: *b"ab",
-            metadata: ZeroRtt(true),
+            metadata: (),
         })
         .unwrap();
     output
-        .sync_encode_unpin(ReadValue {
+        .sync_encode_unpin(Value {
             value: &b"c"[..],
             metadata: (),
         })
         .unwrap();
     assert_eq!(output, b"abc");
-    let mut value = ReadValue {
+    let mut value = Value {
         value: *b"abcd",
         metadata: ZeroRtt(false),
     };
@@ -281,9 +281,9 @@ async fn forward<R, W>(
 ) -> u64
 where
     R: ReadChunk<Metadata = ()> + ExactLen<Length = usize>,
-    W: Write<Report = ()>,
+    W: Write<(), Report = ()>,
     <R as Read>::Error: core::fmt::Debug,
-    <W as Write>::Error: core::fmt::Debug,
+    <W as Write<()>>::Error: core::fmt::Debug,
 {
     let Ok(mut frame) = source.decode::<Frame<Payload<_>>>().await else {
         panic!("the frame header is in the input");
@@ -395,10 +395,10 @@ fn metadata_merges_once_per_segment_in_order_across_pending() {
         next: 0,
         ready: false,
     });
-    let (decoded, pendings) = finish(io.decode::<ReadValue<[u8; 3], Order>>());
+    let (decoded, pendings) = finish(io.decode::<Value<[u8; 3], Order>>());
     assert_eq!(
         decoded.unwrap(),
-        ReadValue {
+        Value {
             value: *b"abc",
             metadata: Order(vec![0, 1, 2])
         }

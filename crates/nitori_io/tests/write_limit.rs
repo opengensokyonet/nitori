@@ -14,13 +14,14 @@ use nitori_io::{
 /// Reports more than it was offered, against the contract of `Write`.
 struct Overcounting;
 nitori_call::family_receiver!(impl [] for Overcounting);
-impl Write for Overcounting {
+impl Write<()> for Overcounting {
     type Error = Infallible;
     type Report = ();
     fn poll_write<'v, I: Buf + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut I,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, !>>
     where
         Self: 'v,
@@ -38,10 +39,11 @@ fn a_write_counted_beyond_the_limit_panics() {
         Pin::new(&mut limit),
         Pin::new(&mut host).view(),
     ));
-    let _ = <Limited<Overcounting, WriteLimit> as Write>::poll_write(
+    let _ = <Limited<Overcounting, WriteLimit> as Write<()>>::poll_write(
         limited.as_mut(),
         &mut Context::from_waker(Waker::noop()),
         &mut &b"abcdef"[..],
+        &(),
     );
 }
 

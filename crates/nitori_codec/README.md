@@ -54,8 +54,9 @@ assert_eq!(output, b"xyz");
 ```
 
 Byte arrays decode from a source and encode into a sink; slices and `Bytes`
-encode. An encoding returns the sink's reports of the bytes written, merged
-with `Combine`.
+encode. They write with the write options `()`, into sinks of
+`Write<()>` (see [Write options](#write-options)). An encoding returns
+the sink's reports of the bytes written, merged with `Combine`.
 
 ## Metadata
 
@@ -69,30 +70,27 @@ A source's reads carry metadata, such as whether the bytes arrived in
   as a marker whose value is a constant, counts as a base value even when
   it reads through another value's decoding, since it has no place for the
   metadata.
-- `nitori_io::calls::ReadValue<V, M>` decodes `V` from a source with
+- `nitori_io::Value<V, M>` decodes `V` from a source with
   metadata `M` and holds `{ value, metadata }`, the merged metadata of the
   bytes `V` read. `V` reads through a `nitori_io::adapters::MergingSource`,
   which reports no metadata to it.
 - A composite value decodes each part through that part's own decoding and
   reads no bytes itself. It takes the metadata type as a parameter `M`,
   `()` by default, and decodes from sources whose metadata is `M`. Each
-  base field is a `ReadValue<Field, M>`; a composite field takes the same
+  base field is a `Value<Field, M>`; a composite field takes the same
   `M` and is not wrapped again; a part kept to be read in stages, such as a
   payload over the source, reports the metadata of each later read itself.
-
-Encoding writes values and not their metadata: a `ReadValue` encodes its
-value, whatever `M` is, and its encoded length is the value's.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{AsAccess, ReceiverAccess, call};
 use nitori_codec::prelude::*;
-use nitori_io::{Combine, Read, calls::{ReadArrayError, ReadValue}};
+use nitori_io::{Combine, Read, Value, calls::ReadArrayError};
 
 /// A composite value of two base fields.
 struct Header<M = ()> {
-    kind: ReadValue<[u8; 1], M>,
-    length: ReadValue<[u8; 2], M>,
+    kind: Value<[u8; 1], M>,
+    length: Value<[u8; 2], M>,
 }
 impl<S, M> DecodeFrom<S> for Header<M>
 where
@@ -102,8 +100,8 @@ where
     type Error = ReadArrayError<<S::Family as Read>::Error>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Header {
-            kind: ReadValue::decode_from(io.access()).await?,
-            length: ReadValue::decode_from(io.access()).await?,
+            kind: Value::decode_from(io.access()).await?,
+            length: Value::decode_from(io.access()).await?,
         })
     }
 }
@@ -138,6 +136,70 @@ async fn drops<F: Read<Metadata = Early>>(
 }
 ```
 
+## Write options
+
+A sink's writes take options, the `O` of `nitori_io::Write<O>`, such as
+how urgently the bytes are to be sent, and encoded values give them by the
+same structure as metadata:
+
+- A base value writes with the options `()`, into sinks of `Write<()>`.
+- `Value<V, O>` encodes `V` into a sink of `Write<O>` with `metadata` as the
+  options of every byte `V` writes. `V` writes through the sink composed
+  with `nitori_io::adapters::MappedOptions(FixedOptions(metadata))`, which
+  takes any options, `()` included, and gives the sink these.
+- A composite value takes the options type as its parameter `O` and
+  encodes into sinks of `Write<O>`, each base field a `Value<Field, O>`, so
+  the bytes of each field are written with that field's options.
+
+A value decoded from a source with metadata `M` holds `M` where it would
+hold options. Written into a sink that takes other options, or none,
+the sink is composed with `nitori_io::adapters::MappedOptions`, whose
+mapping, a `MapOptions`, lends the sink's options for each segment's, or
+`FixedOptions` for one set for every segment. The encoded length
+of a `Value` is its value's.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{AsAccess, ComposedReceiver};
+use nitori_codec::prelude::*;
+use nitori_io::{
+    Combine, Value, Write,
+    adapters::{FixedOptions, MappedOptions},
+    calls::WriteArrayError,
+};
+
+/// A composite value of two base fields.
+struct Header<O = ()> {
+    kind: Value<[u8; 1], O>,
+    length: Value<[u8; 2], O>,
+}
+impl<S, O> EncodeInto<S> for Header<O>
+where
+    S: AsAccess<Family: Write<O, Report: Combine>>,
+    O: Unpin,
+{
+    type Output = <S::Family as Write<O>>::Report;
+    type Error = WriteArrayError<<S::Family as Write<O>>::Error>;
+    async fn encode_into(self, mut io: S) -> Result<Self::Output, Self::Error> {
+        let kind = self.kind.encode_into(io.access()).await?;
+        Ok(kind.combine(self.length.encode_into(io.access()).await?))
+    }
+}
+
+/// How urgently bytes are to be sent.
+#[derive(Clone, Copy)]
+struct Priority(u8);
+
+let header = Header {
+    kind: Value { value: [1], metadata: Priority(0) },
+    length: Value { value: [0, 5], metadata: Priority(3) },
+};
+// A vector takes no options: give it `()` for every segment.
+let mut output = ComposedReceiver::new(Vec::new(), MappedOptions(FixedOptions(())));
+output.sync_encode_unpin(header).unwrap();
+assert_eq!(output.into_parts().0, b"\x01\x00\x05");
+```
+
 ## Encoded length
 
 `EncodedLen` tells how many bytes a value encodes to, as a `u64`, for
@@ -158,7 +220,11 @@ pairing of capabilities, as the copies of `nitori_io::calls` pair them:
 - `Buffered { source, buffer }`: both only read and accept bytes, through
   the caller's buffer; an empty buffer fails.
 
-Each copies until the source ends and returns the copy's total: the count,
+Each copies until the source ends, writing every segment with the metadata
+it was read with as its write options, so the sink takes the source's
+metadata type, `()` for a source without; compose `MappedOptions`, with a
+`MapOptions` mapping or `FixedOptions`, on a sink that takes other options. Each returns the
+copy's total: the count,
 the merged metadata of what it read and the merged report of what the sink
 accepted. Bound the source to the bytes it is to contribute, such as with
 `ReadLimit`. Its `EncodedLen` is the source's exact remaining length

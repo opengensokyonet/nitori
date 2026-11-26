@@ -161,7 +161,7 @@ fn write_len<R>(segment: Option<nitori_io::WriteSegment<R>>) -> usize {
 }
 fn check<T: nitori_call::Receiver>(host: T, action: Rc<Cell<Action>>)
 where
-    T::Family: Read<Error = io::Error> + Write<Error = io::Error>,
+    T::Family: Read<Error = io::Error> + Write<(), Error = io::Error>,
 {
     let wakes = Arc::new(Wakes::default());
     let waker = Waker::from(wakes.clone());
@@ -170,7 +170,11 @@ where
     let mut output = vec![b'x'];
     let mut input = Bytes::from_static(b"12345");
     assert!(host.as_mut().poll_read(&mut cx, &mut output).is_pending());
-    assert!(host.as_mut().poll_write(&mut cx, &mut input).is_pending());
+    assert!(
+        host.as_mut()
+            .poll_write(&mut cx, &mut input, &())
+            .is_pending()
+    );
     assert_eq!(wakes.0.load(Ordering::Relaxed), 2);
     assert_eq!(output, b"x");
     assert_eq!(input, b"12345"[..]);
@@ -180,7 +184,7 @@ where
     };
     assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(error.to_string(), "read detail");
-    let Poll::Ready(Err(error)) = host.as_mut().poll_write(&mut cx, &mut input) else {
+    let Poll::Ready(Err(error)) = host.as_mut().poll_write(&mut cx, &mut input, &()) else {
         panic!()
     };
     assert_eq!(error.to_string(), "write detail");
@@ -192,7 +196,7 @@ where
         Poll::Ready(Err(_))
     ));
     assert!(matches!(
-        host.as_mut().poll_write(&mut cx, &mut &b""[..]),
+        host.as_mut().poll_write(&mut cx, &mut &b""[..], &()),
         Poll::Ready(Err(_))
     ));
     action.set(Action::Ready);
@@ -202,7 +206,7 @@ where
     );
     assert_eq!(output, b"xab");
     assert_eq!(
-        write_len(ready(host.as_mut().poll_write(&mut cx, &mut input))),
+        write_len(ready(host.as_mut().poll_write(&mut cx, &mut input, &()))),
         2
     );
     assert_eq!(input, b"345"[..]);

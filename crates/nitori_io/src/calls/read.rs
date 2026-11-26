@@ -1,7 +1,7 @@
 //! Read operations and their operation-specific failures.
 use crate::{
     ChunkSegment, Combine, Read as ReadHost, ReadChunk as ChunkHost, ReadChunkExt as _,
-    ReadExt as _, ReadSegment,
+    ReadExt as _, ReadSegment, Value,
     error::{self, DestinationFullError, IncompleteError, InsufficientCapacityError},
 };
 use bytes::{Buf, BufMut};
@@ -308,27 +308,17 @@ impl<E> ReadChunksExactError<E> {
 #[call(sync)]
 pub async fn read_array<const LENGTH: usize, F>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<ReadValue<[u8; LENGTH], <F as ReadHost>::Metadata>, ReadArrayError<F::Error>>
+) -> Result<Value<[u8; LENGTH], <F as ReadHost>::Metadata>, ReadArrayError<F::Error>>
 where
     F: ReadHost,
     <F as ReadHost>::Metadata: Combine,
 {
     let mut bytes = [0; LENGTH];
     let metadata = fill(io, &mut bytes.as_mut_slice(), LENGTH).await?;
-    Ok(ReadValue {
+    Ok(Value {
         value: bytes,
         metadata,
     })
-}
-
-/// A value decoded from bytes read whole, with the combined metadata of
-/// those bytes: what [`read_array`], [`read_le`] and [`read_be`] return.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ReadValue<T, M> {
-    /// The value.
-    pub value: T,
-    /// The combined metadata of its bytes.
-    pub metadata: M,
 }
 
 /// Failures that [`read_array`] can produce.
@@ -363,7 +353,7 @@ impl<E> ReadArrayError<E> {
 #[call(sync)]
 pub async fn read_le<T: EndianValue, F>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<ReadValue<T, <F as ReadHost>::Metadata>, ReadLeError<F::Error>>
+) -> Result<Value<T, <F as ReadHost>::Metadata>, ReadLeError<F::Error>>
 where
     F: ReadHost,
     <F as ReadHost>::Metadata: Combine,
@@ -373,7 +363,7 @@ where
     let metadata = fill(io, &mut bytes.as_mut(), length)
         .await
         .map_err(ReadLeError::from_fill)?;
-    Ok(ReadValue {
+    Ok(Value {
         value: T::from_le(bytes),
         metadata,
     })
@@ -423,7 +413,7 @@ impl<E> ReadLeError<E> {
 #[call(sync)]
 pub async fn read_be<T: EndianValue, F>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<ReadValue<T, <F as ReadHost>::Metadata>, ReadBeError<F::Error>>
+) -> Result<Value<T, <F as ReadHost>::Metadata>, ReadBeError<F::Error>>
 where
     F: ReadHost,
     <F as ReadHost>::Metadata: Combine,
@@ -433,7 +423,7 @@ where
     let metadata = fill(io, &mut bytes.as_mut(), length)
         .await
         .map_err(ReadBeError::from_fill)?;
-    Ok(ReadValue {
+    Ok(Value {
         value: T::from_be(bytes),
         metadata,
     })

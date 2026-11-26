@@ -1,6 +1,6 @@
 //! In-memory hosts and transparent pointer forwarding.
 use crate::{
-    ChunkSegment, LentBuffer, LentOutcome, LentSegment, Read, ReadChunk, ReadSegment, Skip,
+    ChunkSegment, Filled, LentBuffer, LentOutcome, LentSegment, Read, ReadChunk, ReadSegment, Skip,
     VecSpareCapacity, Write, WriteLent, WriteSegment,
 };
 use alloc::{collections::VecDeque, vec::Vec};
@@ -102,10 +102,10 @@ impl<T: AsRef<[u8]> + Unpin> Skip for Direct<Cursor<T>> {
 }
 macro_rules! memory_write {
     ($($ty:ty),* $(,)?) => {$ (
-        impl Write for Direct<$ty> {
-            type Error = Infallible;
+        impl Write<()> for Direct<$ty> {
+            type Error = !;
             type Report = ();
-            fn poll_write<'visit, I: Buf + ?Sized>(host: Pin<&mut Self::ReceiverView<'visit>>, _: &mut Context<'_>, input: &mut I) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>  where Self: 'visit {
+            fn poll_write<'visit, I: Buf + ?Sized>(host: Pin<&mut Self::ReceiverView<'visit>>, _: &mut Context<'_>, input: &mut I, (): &()) -> Poll<Result<Option<WriteSegment<()>>, !>>  where Self: 'visit {
  let this = host.get_pin_mut();
                 Poll::Ready(Ok(write_buffer(this.get_mut(), input)))
             }
@@ -113,14 +113,15 @@ macro_rules! memory_write {
     )*};
 }
 memory_write!(&mut [u8], Vec<u8>, BytesMut);
-impl Write for Direct<VecDeque<u8>> {
-    type Error = Infallible;
+impl Write<()> for Direct<VecDeque<u8>> {
+    type Error = !;
     type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
+        (): &(),
+    ) -> Poll<Result<Option<WriteSegment<()>>, !>>
     where
         Self: 'visit,
     {
@@ -153,7 +154,7 @@ impl<T: AsRef<[u8]> + Unpin> Read for Direct<Cursor<T>> {
     }
 }
 #[cfg(feature = "std")]
-impl<T: Unpin> Write for Direct<Cursor<T>>
+impl<T: Unpin> Write<()> for Direct<Cursor<T>>
 where
     Cursor<T>: std::io::Write,
 {
@@ -163,6 +164,7 @@ where
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
+        (): &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, Self::Error>>
     where
         Self: 'visit,
@@ -218,7 +220,7 @@ split_chunk!(Bytes, BytesMut);
 /// first, and keeps the filled bytes there without copying them. The lent
 /// buffer starts empty and is split off the written bytes, so the fill cannot
 /// reach them. Accepts no byte only at its maximum length.
-impl WriteLent for Direct<BytesMut> {
+impl WriteLent<()> for Direct<BytesMut> {
     type Buffer<'l> = &'l mut BytesMut;
     fn poll_write_lent<'visit, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -228,7 +230,7 @@ impl WriteLent for Direct<BytesMut> {
     ) -> Poll<Result<Option<LentOutcome<(), T, A>>, Self::Error>>
     where
         Self: 'visit,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut BytesMut>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut BytesMut>) -> Result<Filled<T, ()>, A>,
     {
         let sink = host.get_pin_mut().get_mut();
         let Some(granted) = NonZeroUsize::new(wanted.get().min(sink.remaining_mut())) else {
@@ -243,12 +245,12 @@ impl WriteLent for Direct<BytesMut> {
         // What is kept is what the lent buffer holds.
         let kept = NonZeroUsize::new(spare.len()).filter(|count| *count <= granted);
         let outcome = match (result, kept) {
-            (Ok(value), Some(count)) => LentOutcome::Kept(LentSegment {
+            (Ok(Filled { value, options: () }), Some(count)) => LentOutcome::Kept(LentSegment {
                 count,
                 report: (),
                 value,
             }),
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, options: () }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         if !matches!(outcome, LentOutcome::Kept(_)) {
@@ -265,7 +267,7 @@ impl WriteLent for Direct<BytesMut> {
 /// first, and keeps the filled bytes there without copying or zeroing them.
 /// The lent buffer reaches only the spare capacity, not the bytes written
 /// before. Accepts no byte only at its maximum length.
-impl WriteLent for Direct<Vec<u8>> {
+impl WriteLent<()> for Direct<Vec<u8>> {
     type Buffer<'l> = VecSpareCapacity<'l>;
     fn poll_write_lent<'visit, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -275,7 +277,7 @@ impl WriteLent for Direct<Vec<u8>> {
     ) -> Poll<Result<Option<LentOutcome<(), T, A>>, Self::Error>>
     where
         Self: 'visit,
-        Fill: for<'l> FnOnce(&mut LentBuffer<VecSpareCapacity<'l>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<VecSpareCapacity<'l>>) -> Result<Filled<T, ()>, A>,
     {
         let sink = host.get_pin_mut().get_mut();
         let Some(granted) = NonZeroUsize::new(wanted.get().min(sink.remaining_mut())) else {
@@ -287,7 +289,7 @@ impl WriteLent for Direct<Vec<u8>> {
         let result = fill(&mut lent);
         let spare = lent.into_storage();
         let outcome = match (result, NonZeroUsize::new(spare.filled())) {
-            (Ok(value), Some(count)) => {
+            (Ok(Filled { value, options: () }), Some(count)) => {
                 spare.keep();
                 LentOutcome::Kept(LentSegment {
                     count,
@@ -296,7 +298,7 @@ impl WriteLent for Direct<Vec<u8>> {
                 })
             }
             // What was put and not kept stays outside the vector's length.
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, options: () }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         Poll::Ready(Ok(Some(outcome)))
@@ -322,7 +324,7 @@ fn kept_from_slice(
 
 /// Lends the unwritten rest of the slice and advances past the filled bytes.
 /// Accepts no byte once the slice is used up.
-impl WriteLent for Direct<&mut [u8]> {
+impl WriteLent<()> for Direct<&mut [u8]> {
     type Buffer<'l> = &'l mut [u8];
     fn poll_write_lent<'visit, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -332,7 +334,7 @@ impl WriteLent for Direct<&mut [u8]> {
     ) -> Poll<Result<Option<LentOutcome<(), T, A>>, Self::Error>>
     where
         Self: 'visit,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut [u8]>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut [u8]>) -> Result<Filled<T, ()>, A>,
     {
         let sink = host.get_pin_mut().get_mut();
         let room = sink.len();
@@ -346,7 +348,7 @@ impl WriteLent for Direct<&mut [u8]> {
         let result = fill(&mut lent);
         let kept = kept_from_slice(lent.into_storage(), end, room, granted);
         let outcome = match (result, kept) {
-            (Ok(value), Some(count)) => {
+            (Ok(Filled { value, options: () }), Some(count)) => {
                 let rest = core::mem::take(sink);
                 *sink = &mut rest[count.get()..];
                 LentOutcome::Kept(LentSegment {
@@ -355,7 +357,7 @@ impl WriteLent for Direct<&mut [u8]> {
                     value,
                 })
             }
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, options: () }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         Poll::Ready(Ok(Some(outcome)))

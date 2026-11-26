@@ -22,11 +22,11 @@ async fn header<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
     Ok([tag, rest[0], rest[1]])
 }
 #[call(sync)]
-async fn encode<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+async fn encode<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>>(
     io: &mut A,
     input: &mut &[u8],
-) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
-    io.write_all(input).await.map(|_| ())
+) -> Result<(), WriteAllError<<A::Family as Write<()>>::Error>> {
+    io.write_all(input, ()).await.map(|_| ())
 }
 #[call(sync, yields = [u8; 3])]
 async fn headers<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(

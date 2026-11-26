@@ -15,6 +15,14 @@
 //! bytes it is to contribute first, such as with
 //! [`ReadLimit`](nitori_io::adapters::ReadLimit); [`EncodedLen`] is the
 //! source's exact remaining length ([`ExactLen`]).
+//!
+//! As in the copies, the bytes are written with the metadata they were read
+//! with as their write options: the sink takes the source's metadata
+//! type, `()` for a source without metadata. Compose
+//! [`MappedOptions`](nitori_io::adapters::MappedOptions), with a
+//! [`MapOptions`](nitori_io::adapters::MapOptions) mapping or
+//! [`FixedOptions`](nitori_io::adapters::FixedOptions), on a sink that takes
+//! other options.
 use crate::{EncodeInto, EncodedLen};
 use core::num::NonZeroUsize;
 use nitori_call::AsAccess;
@@ -61,14 +69,14 @@ pub struct Buffered<A, B> {
     pub buffer: B,
 }
 
-impl<A, S> EncodeInto<S> for Chunks<A>
+impl<A, S, M> EncodeInto<S> for Chunks<A>
 where
-    A: AsAccess<Family: ReadChunk>,
-    <A::Family as Read>::Metadata: Combine,
-    S: AsAccess<Family: Write<Report: Combine>>,
+    A: AsAccess<Family: ReadChunk<Metadata = M>>,
+    M: Combine,
+    S: AsAccess<Family: Write<M, Report: Combine>>,
 {
-    type Output = CopyTotal<<A::Family as Read>::Metadata, <S::Family as Write>::Report>;
-    type Error = CopyChunksError<<A::Family as Read>::Error, <S::Family as Write>::Error>;
+    type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
+    type Error = CopyChunksError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
         copy_chunks(
             &mut self.source.access(),
@@ -79,14 +87,15 @@ where
     }
 }
 
-impl<A, S> EncodeInto<S> for Fill<A>
+impl<A, S, M> EncodeInto<S> for Fill<A>
 where
-    A: AsAccess<Family: Read<Metadata: Combine>>,
-    S: AsAccess<Family: WriteLent>,
-    <S::Family as Write>::Report: Combine,
+    A: AsAccess<Family: Read<Metadata = M>>,
+    M: Combine + Clone,
+    S: AsAccess<Family: WriteLent<M>>,
+    <S::Family as Write<M>>::Report: Combine,
 {
-    type Output = CopyTotal<<A::Family as Read>::Metadata, <S::Family as Write>::Report>;
-    type Error = CopyIntoLentError<<A::Family as Read>::Error, <S::Family as Write>::Error>;
+    type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
+    type Error = CopyIntoLentError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
         copy_into_lent(
             &mut self.source.access(),
@@ -97,14 +106,15 @@ where
     }
 }
 
-impl<A, B, S> EncodeInto<S> for Buffered<A, B>
+impl<A, B, S, M> EncodeInto<S> for Buffered<A, B>
 where
-    A: AsAccess<Family: Read<Metadata: Combine>>,
+    A: AsAccess<Family: Read<Metadata = M>>,
+    M: Combine,
     B: AsMut<[u8]>,
-    S: AsAccess<Family: Write<Report: Combine>>,
+    S: AsAccess<Family: Write<M, Report: Combine>>,
 {
-    type Output = CopyTotal<<A::Family as Read>::Metadata, <S::Family as Write>::Report>;
-    type Error = CopyBufferedError<<A::Family as Read>::Error, <S::Family as Write>::Error>;
+    type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
+    type Error = CopyBufferedError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
         copy_buffered(
             &mut self.source.access(),

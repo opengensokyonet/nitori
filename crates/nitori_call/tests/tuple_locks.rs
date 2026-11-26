@@ -27,14 +27,14 @@ impl<A: Receivers, B: Receivers> Operation<(A, B)> for WriteFirstThenSecond<'_> 
 }
 impl<'s, A, B> Start<'s, (A, B)> for WriteFirstThenSecond<'_>
 where
-    A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
-    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
     fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {
         async move {
-            let mut first = pin!(a.write_all(&b"a"[..]));
-            let mut second = pin!(b.write_all(&b"b"[..]));
+            let mut first = pin!(a.write_all(&b"a"[..], ()));
+            let mut second = pin!(b.write_all(&b"b"[..], ()));
             poll_fn(|cx| match self.first.get() {
                 true => first.as_mut().poll(cx).map(|_| ()),
                 false => second.as_mut().poll(cx).map(|_| ()),

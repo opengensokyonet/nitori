@@ -126,7 +126,7 @@ async fn bytes<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Family =
     io: &mut A,
 ) -> usize {
     let mut count = 0;
-    while let Ok(nitori_io::calls::ReadValue { value: [byte], .. }) = io.read_array::<1>().await {
+    while let Ok(nitori_io::Value { value: [byte], .. }) = io.read_array::<1>().await {
         yield byte;
         count += 1;
     }

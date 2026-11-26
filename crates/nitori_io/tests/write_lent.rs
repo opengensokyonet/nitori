@@ -4,6 +4,7 @@
 //! adapters.
 use bytes::{Buf as _, BufMut, BytesMut};
 use nitori_call::{Receiver, ReceiverAccess, call, family_receiver};
+use nitori_io::Filled;
 use nitori_io::{
     LentBuffer, LentOutcome, LentSegment, Write, WriteLent, WriteSegment,
     adapters::{Chunked, WriteLimit},
@@ -65,14 +66,17 @@ fn lend_of(outcome: Option<LentOutcome<(), usize, &'static str>>) -> Lend {
 fn lend_put<S>(sink: &mut S, wanted: usize, bytes: &[u8], called: &Cell<usize>) -> Lend
 where
     S: Receiver + Unpin,
-    S::Family: WriteLent<Report = ()>,
-    <S::Family as Write>::Error: Debug,
+    S::Family: WriteLent<(), Report = ()>,
+    <S::Family as Write<()>>::Error: Debug,
 {
     let polled = Pin::new(sink).poll_write_lent(&mut cx(), nz(wanted), |lent| {
         called.set(called.get() + 1);
         let granted = lent.granted().get();
         lent.buffer().put_slice(&bytes[..bytes.len().min(granted)]);
-        Ok::<_, &'static str>(granted)
+        Ok::<_, &'static str>(Filled {
+            value: granted,
+            options: (),
+        })
     });
     lend_of(ready(polled))
 }
@@ -81,13 +85,13 @@ where
 fn lend_give_up<S>(sink: &mut S, wanted: usize, bytes: &[u8]) -> Lend
 where
     S: Receiver + Unpin,
-    S::Family: WriteLent<Report = ()>,
-    <S::Family as Write>::Error: Debug,
+    S::Family: WriteLent<(), Report = ()>,
+    <S::Family as Write<()>>::Error: Debug,
 {
     let polled = Pin::new(sink).poll_write_lent(&mut cx(), nz(wanted), |lent| {
         let granted = lent.granted().get();
         lent.buffer().put_slice(&bytes[..bytes.len().min(granted)]);
-        Err::<usize, _>("gave up")
+        Err::<Filled<usize, ()>, _>("gave up")
     });
     lend_of(ready(polled))
 }
@@ -308,7 +312,10 @@ fn a_fill_that_raises_the_limit_and_overfills_is_not_kept() {
         Pin::new(&mut bytes).poll_write_lent(&mut cx(), nz(2), |lent| {
             lent.buffer().set_limit(10);
             lent.buffer().put_slice(b"abcde");
-            Ok::<_, !>("value")
+            Ok::<_, !>(Filled {
+                value: "value",
+                options: (),
+            })
         }),
     );
     assert!(matches!(outcome, Some(LentOutcome::NotKept("value"))));
@@ -325,13 +332,14 @@ struct Spy {
     last_wanted: Rc<Cell<usize>>,
 }
 family_receiver!(impl [] for Spy);
-impl Write for Spy {
+impl Write<()> for Spy {
     type Error = !;
     type Report = ();
     fn poll_write<'v, B: bytes::Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, !>>
     where
         Self: 'v,
@@ -347,7 +355,7 @@ impl Write for Spy {
         ))
     }
 }
-impl WriteLent for Spy {
+impl WriteLent<()> for Spy {
     type Buffer<'l> = &'l mut Vec<u8>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -357,7 +365,7 @@ impl WriteLent for Spy {
     ) -> Poll<Result<Option<LentOutcome<(), T, A>>, !>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<Filled<T, ()>, A>,
     {
         let this = host.get_pin_mut().get_mut();
         this.polls.set(this.polls.get() + 1);
@@ -372,12 +380,12 @@ impl WriteLent for Spy {
             .filter(|count| *count <= wanted.get())
             .and_then(NonZeroUsize::new);
         let outcome = match (result, count) {
-            (Ok(value), Some(count)) => LentOutcome::Kept(LentSegment {
+            (Ok(Filled { value, .. }), Some(count)) => LentOutcome::Kept(LentSegment {
                 count,
                 report: (),
                 value,
             }),
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, .. }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         if !matches!(outcome, LentOutcome::Kept(_)) {
@@ -390,11 +398,11 @@ impl WriteLent for Spy {
 /// Lend through an access, as an operation does.
 async fn lend_through<A>(io: &mut A, wanted: usize, bytes: &[u8], called: &Cell<usize>) -> Lend
 where
-    A: ReceiverAccess<Family: WriteLent<Report = (), Error = !>>,
+    A: ReceiverAccess<Family: WriteLent<(), Report = (), Error = !>>,
 {
     let outcome = poll_fn(|cx| {
         io.poll_access(cx, |view, cx| {
-            let polled = <A::Family as WriteLent>::poll_write_lent(
+            let polled = <A::Family as WriteLent<()>>::poll_write_lent(
                 view.into_pin(),
                 cx,
                 nz(wanted),
@@ -402,7 +410,10 @@ where
                     called.set(called.get() + 1);
                     let granted = lent.granted().get();
                     lent.buffer().put_slice(&bytes[..bytes.len().min(granted)]);
-                    Ok::<_, &'static str>(granted)
+                    Ok::<_, &'static str>(Filled {
+                        value: granted,
+                        options: (),
+                    })
                 },
             );
             polled.map(|result| result.unwrap())
@@ -413,7 +424,7 @@ where
 }
 
 #[call(sync)]
-async fn lend_limited<F: WriteLent<Report = (), Error = !>>(
+async fn lend_limited<F: WriteLent<(), Report = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     budget: usize,
     wanted: usize,

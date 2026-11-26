@@ -4,7 +4,8 @@
 //! Reads use an initialized, bounded 8 KiB scratch buffer to support arbitrary
 //! `BufMut` destinations without unsafe code. No data is prefetched or retained
 //! across polls. Writes offer the input's first contiguous chunk and advance it
-//! only after success. The original `std::io::Error` is preserved.
+//! only after success; the adapted writers take no write options, so they
+//! are sinks of `Write<()>`. The original `std::io::Error` is preserved.
 use crate::{Read, ReadSegment, Write, WriteSegment};
 use bytes::{Buf, BufMut};
 use core::{
@@ -82,13 +83,14 @@ impl<T: io::Read> Read for Direct<Std<T>> {
         })
     }
 }
-impl<T: io::Write> Write for Direct<Std<T>> {
+impl<T: io::Write> Write<()> for Direct<Std<T>> {
     type Error = io::Error;
     type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
+        (): &(),
     ) -> Poll<io::Result<Option<WriteSegment<()>>>>
     where
         Self: 'visit,
@@ -157,13 +159,14 @@ impl<T: tokio::io::AsyncRead> Read for Direct<Tokio<T>> {
     }
 }
 #[cfg(feature = "tokio")]
-impl<T: tokio::io::AsyncWrite> Write for Direct<Tokio<T>> {
+impl<T: tokio::io::AsyncWrite> Write<()> for Direct<Tokio<T>> {
     type Error = io::Error;
     type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
+        (): &(),
     ) -> Poll<io::Result<Option<WriteSegment<()>>>>
     where
         Self: 'visit,
@@ -230,13 +233,14 @@ impl<T: futures_io::AsyncRead> Read for Direct<Futures<T>> {
     }
 }
 #[cfg(feature = "futures")]
-impl<T: futures_io::AsyncWrite> Write for Direct<Futures<T>> {
+impl<T: futures_io::AsyncWrite> Write<()> for Direct<Futures<T>> {
     type Error = io::Error;
     type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut I,
+        (): &(),
     ) -> Poll<io::Result<Option<WriteSegment<()>>>>
     where
         Self: 'visit,

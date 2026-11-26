@@ -5,9 +5,9 @@ use bytes::{Buf, BufMut, Bytes};
 use futures_core::Stream;
 use nitori_call::{ReceiverAccess, call, family_receiver};
 use nitori_io::{
-    ChunkSegment, Combine, ReadSegment, WriteSegment,
+    ChunkSegment, Combine, ReadSegment, Value, WriteSegment,
     adapters::{Chunked, ReadLimit, WriteLimit},
-    calls::{ReadTotal, ReadValue, WriteAllError},
+    calls::{ReadTotal, WriteAllError},
     helpers::{poll_chunk_from_read, poll_read_from_chunk},
     prelude::*,
 };
@@ -130,13 +130,14 @@ struct Reporting {
     polls: Rc<Cell<usize>>,
 }
 family_receiver!(impl [] for Reporting);
-impl Write for Reporting {
+impl Write<()> for Reporting {
     type Error = !;
     type Report = Writes;
     fn poll_write<'v, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<Writes>>, !>>
     where
         Self: 'v,
@@ -260,7 +261,7 @@ fn read_array_returns_the_value_with_its_combined_metadata() {
     let read = source.sync_read_array_unpin::<4>().unwrap();
     assert_eq!(
         read,
-        ReadValue {
+        Value {
             value: *b"abcd",
             metadata: Early(true)
         }
@@ -269,7 +270,7 @@ fn read_array_returns_the_value_with_its_combined_metadata() {
     let read = source.sync_read_array_unpin::<2>().unwrap();
     assert_eq!(
         read,
-        ReadValue {
+        Value {
             value: *b"ef",
             metadata: Early(false)
         }
@@ -287,7 +288,7 @@ fn read_le_and_read_be_return_the_value_with_the_metadata() {
     let read = source.sync_read_le_unpin::<u16>().unwrap();
     assert_eq!(
         read,
-        ReadValue {
+        Value {
             value: 0x0201,
             metadata: Early(true)
         }
@@ -295,7 +296,7 @@ fn read_le_and_read_be_return_the_value_with_the_metadata() {
     let read = source.sync_read_be_unpin::<u32>().unwrap();
     assert_eq!(
         read,
-        ReadValue {
+        Value {
             value: 0x0102_0304,
             metadata: Early(false)
         }
@@ -471,7 +472,7 @@ fn poll_chunk_from_read_carries_the_reads_metadata() {
 fn write_all_returns_the_combined_report_of_its_segments() {
     let mut sink = Reporting::default();
     // Two bytes per write: three segments for five bytes.
-    let report = sink.sync_write_all_unpin(&b"abcde"[..]).unwrap();
+    let report = sink.sync_write_all_unpin(&b"abcde"[..], ()).unwrap();
     assert_eq!(report, Writes(3));
     assert_eq!(sink.bytes, b"abcde");
 }
@@ -479,7 +480,7 @@ fn write_all_returns_the_combined_report_of_its_segments() {
 #[test]
 fn write_all_of_nothing_is_the_default_report_and_never_polls_the_host() {
     let mut sink = Reporting::default();
-    let report = sink.sync_write_all_unpin(&b""[..]).unwrap();
+    let report = sink.sync_write_all_unpin(&b""[..], ()).unwrap();
     assert_eq!(report, Writes::default());
     assert_eq!(sink.polls.get(), 0);
 }
@@ -487,12 +488,12 @@ fn write_all_of_nothing_is_the_default_report_and_never_polls_the_host() {
 #[test]
 fn write_le_write_be_and_write_array_return_their_reports() {
     let mut sink = Reporting::default();
-    assert_eq!(sink.sync_write_le_unpin(0x0102_u16).unwrap(), Writes(1));
+    assert_eq!(sink.sync_write_le_unpin(0x0102_u16, ()).unwrap(), Writes(1));
     assert_eq!(
-        sink.sync_write_be_unpin(0x0102_0304_u32).unwrap(),
+        sink.sync_write_be_unpin(0x0102_0304_u32, ()).unwrap(),
         Writes(2)
     );
-    assert_eq!(sink.sync_write_array_unpin(*b"xyz").unwrap(), Writes(2));
+    assert_eq!(sink.sync_write_array_unpin(*b"xyz", ()).unwrap(), Writes(2));
     assert_eq!(sink.bytes, [2, 1, 1, 2, 3, 4, b'x', b'y', b'z']);
 }
 
@@ -503,7 +504,7 @@ type LimitedWrites = (
 );
 
 #[call(sync)]
-async fn write_limited<F: Write<Report = Writes, Error = !>>(
+async fn write_limited<F: Write<(), Report = Writes, Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     budget: usize,
 ) -> LimitedWrites {
@@ -511,10 +512,10 @@ async fn write_limited<F: Write<Report = Writes, Error = !>>(
     let mut seen = Vec::new();
     let mut input = &b"abcde"[..];
     for _ in 0..3 {
-        let segment = limited.write(&mut input).await.unwrap();
+        let segment = limited.write(&mut input, &()).await.unwrap();
         seen.push(segment.map(|segment| (segment.count.get(), segment.report)));
     }
-    let result = limited.write_all(&b"fg"[..]).await;
+    let result = limited.write_all(&b"fg"[..], ()).await;
     (seen, result)
 }
 

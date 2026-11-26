@@ -412,13 +412,13 @@ fn future_continues_after_stream_delivery_without_replaying_items() {
 }
 
 async fn write_through_trait_only<
-    F: nitori_io::Write<Report = ()>,
+    F: nitori_io::Write<(), Report = ()>,
     T: CallExecutor<Receivers = F> + ?Sized + Unpin,
 >(
     target: &mut T,
     input: Bytes,
 ) -> Result<(), WriteAllError<F::Error>> {
-    target.write_all_unpin(input).await.map(|_| ())
+    target.write_all_unpin(input, ()).await.map(|_| ())
 }
 
 nitori_call::family_receiver!(impl [] for Memory);

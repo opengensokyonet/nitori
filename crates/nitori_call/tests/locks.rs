@@ -20,35 +20,35 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
 
 /// Waits until `open` is set, then writes `message`.
 #[call(sync)]
-async fn write_when_open<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+async fn write_when_open<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>>(
     io: &mut A,
     open: &Cell<bool>,
     message: &[u8],
-) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
+) -> Result<(), WriteAllError<<A::Family as Write<()>>::Error>> {
     poll_fn(|_| match open.get() {
         true => Poll::Ready(()),
         false => Poll::Pending,
     })
     .await;
-    io.write_all(message).await.map(|_| ())
+    io.write_all(message, ()).await.map(|_| ())
 }
 
 /// Writes, computes without the view, and writes again.
 #[call(sync)]
-async fn write_compute_write<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+async fn write_compute_write<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>>(
     io: &mut A,
     during: &dyn Fn(),
-) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
-    io.write_all(&b"a"[..]).await?;
+) -> Result<(), WriteAllError<<A::Family as Write<()>>::Error>> {
+    io.write_all(&b"a"[..], ()).await?;
     io.release_view().await;
     during();
-    io.write_all(&b"b"[..]).await.map(|_| ())
+    io.write_all(&b"b"[..], ()).await.map(|_| ())
 }
 
 #[test]
 fn operations_run_on_the_value_behind_a_std_mutex() {
     let output = std::sync::Mutex::new(Vec::new());
-    (&output).sync_write_all_unpin(&b"hi"[..]).unwrap();
+    (&output).sync_write_all_unpin(&b"hi"[..], ()).unwrap();
     assert_eq!(*output.lock().unwrap(), b"hi");
 }
 
@@ -68,7 +68,7 @@ fn a_poisoned_std_mutex_panics() {
         let _guard = output.lock().unwrap();
         panic!("poison");
     });
-    let _ = (&output).sync_write_all_unpin(&b"x"[..]);
+    let _ = (&output).sync_write_all_unpin(&b"x"[..], ());
 }
 
 /// A fixed acquired view stays fixed when composed: the lock is kept
@@ -79,7 +79,7 @@ fn assert_send_task<F: Future + Send>(_: F) {}
 #[test]
 fn executions_on_std_mutexes_can_be_awaited_in_tasks() {
     let output = std::sync::Mutex::new(Vec::new());
-    assert_send_task(async { (&output).write_all_unpin(&b"a"[..]).await });
+    assert_send_task(async { (&output).write_all_unpin(&b"a"[..], ()).await });
     let source = std::sync::Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
     assert_send_task(async {
         drive_composed(
@@ -132,13 +132,14 @@ impl<L: Lock<Value = Connection>> Compose<Lent<Locked<L>>> for StreamOf {
 }
 #[derive(Debug, PartialEq)]
 struct Closed;
-impl Write for Stream {
+impl Write<()> for Stream {
     type Error = Closed;
     type Report = ();
     fn poll_write<'v, I: Buf + ?Sized>(
         view: Pin<&mut StreamView<'v>>,
         _: &mut Context<'_>,
         input: &mut I,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Closed>>
     where
         Self: 'v,
@@ -190,7 +191,7 @@ mod tokio_sync {
     #[test]
     fn executions_can_be_awaited_in_tasks() {
         let output = Mutex::new(Vec::new());
-        assert_send_task(async { (&output).write_all_unpin(&b"a"[..]).await });
+        assert_send_task(async { (&output).write_all_unpin(&b"a"[..], ()).await });
         let source = Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
         assert_send_task(async {
             drive_composed(
@@ -270,7 +271,7 @@ mod futures_lock {
     #[test]
     fn executions_can_be_awaited_in_tasks() {
         let output = Mutex::new(Vec::new());
-        assert_send_task(async { (&output).write_all_unpin(&b"a"[..]).await });
+        assert_send_task(async { (&output).write_all_unpin(&b"a"[..], ()).await });
         let source = Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
         assert_send_task(async {
             drive_composed(
@@ -310,8 +311,8 @@ impl<A: nitori_call::Receivers, B: nitori_call::Receivers> nitori_call::Operatio
 }
 impl<'s, 'a, A, B> nitori_call::Start<'s, (A, B)> for WriteBoth<'a>
 where
-    A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
-    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
     fn start(
@@ -320,9 +321,9 @@ where
         _: nitori_call::Emitter<'s, std::convert::Infallible>,
     ) -> Self::Fut {
         async move {
-            let _ = a.write_all(self.first).await;
+            let _ = a.write_all(self.first, ()).await;
             (self.between)();
-            let _ = b.write_all(self.second).await;
+            let _ = b.write_all(self.second, ()).await;
         }
     }
 }
@@ -377,13 +378,14 @@ struct Ledger;
 impl ReceiverFamily for Ledger {
     type ReceiverView<'v> = std::cell::RefMut<'v, Vec<u8>>;
 }
-impl Write for Ledger {
+impl Write<()> for Ledger {
     type Error = std::convert::Infallible;
     type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         input: &mut I,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
@@ -439,9 +441,9 @@ impl<A: nitori_call::Receivers, B: nitori_call::Receivers, C: nitori_call::Recei
 }
 impl<'s, A, B, C> nitori_call::Start<'s, (A, B, C)> for WriteThree
 where
-    A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
-    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
-    C: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
+    C: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
     fn start(
@@ -450,9 +452,9 @@ where
         _: nitori_call::Emitter<'s, std::convert::Infallible>,
     ) -> Self::Fut {
         async move {
-            let _ = c.write_all(&b"c"[..]).await;
-            let _ = a.write_all(&b"a"[..]).await;
-            let _ = b.write_all(&b"b"[..]).await;
+            let _ = c.write_all(&b"c"[..], ()).await;
+            let _ = a.write_all(&b"a"[..], ()).await;
+            let _ = b.write_all(&b"b"[..], ()).await;
         }
     }
 }
@@ -483,15 +485,14 @@ async fn copy_bytes<F, G>(
 ) -> usize
 where
     F: Read<Metadata: nitori_io::Combine>,
-    G: Write<Report: nitori_io::Combine>,
+    G: Write<(), Report: nitori_io::Combine>,
 {
     let mut copied = 0;
     while copied < length {
-        let Ok(nitori_io::calls::ReadValue { value: [byte], .. }) = source.read_array::<1>().await
-        else {
+        let Ok(nitori_io::Value { value: [byte], .. }) = source.read_array::<1>().await else {
             break;
         };
-        if sink.write_all(&[byte][..]).await.is_err() {
+        if sink.write_all(&[byte][..], ()).await.is_err() {
             break;
         }
         copied += 1;
@@ -503,7 +504,7 @@ where
 #[call(yields = usize)]
 async fn copy_in_steps<
     A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>,
-    B: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>,
+    B: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 >(
     source: &mut A,
     sink: &mut B,

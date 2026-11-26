@@ -1,8 +1,9 @@
 //! Futures that decode from or encode into a borrowed source or sink are
 //! `Send` when the source or sink and its family are: base values,
-//! composite values with metadata, and values read from a type that keeps
-//! the source, through generic accesses and concrete ones.
-use bytes::BufMut;
+//! composite values with metadata, values read from a type that keeps the
+//! source, and values written with options, through generic accesses and
+//! concrete ones.
+use bytes::{Buf, BufMut};
 use core::{
     num::NonZeroUsize,
     pin::Pin,
@@ -11,9 +12,9 @@ use core::{
 use nitori_call::{AsAccess, Composed, ConstructedAccess, ReceiverAccess};
 use nitori_codec::prelude::*;
 use nitori_io::{
-    Combine, Read, ReadSegment, Write,
+    Combine, Read, ReadSegment, Value, Write, WriteSegment,
     adapters::{Limited, ReadLimit},
-    calls::{ReadArrayError, ReadValue},
+    calls::ReadArrayError,
 };
 
 /// Checks that `future` is `Send`, then runs it.
@@ -66,8 +67,8 @@ type Early = ConstructedAccess<Received>;
 /// A composite value: two base fields with the metadata of their bytes.
 #[derive(Debug, PartialEq)]
 struct Pair<M = ()> {
-    first: ReadValue<[u8; 1], M>,
-    second: ReadValue<[u8; 1], M>,
+    first: Value<[u8; 1], M>,
+    second: Value<[u8; 1], M>,
 }
 impl<S, M> DecodeFrom<S> for Pair<M>
 where
@@ -77,8 +78,8 @@ where
     type Error = ReadArrayError<<S::Family as Read>::Error>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: ReadValue::decode_from(io.access()).await?,
-            second: ReadValue::decode_from(io.access()).await?,
+            first: Value::decode_from(io.access()).await?,
+            second: Value::decode_from(io.access()).await?,
         })
     }
 }
@@ -119,13 +120,11 @@ where
         io: Composed::new(&mut *io, ReadLimit(3)),
     };
     let pair = Pair::decode_from(&mut payload).await.ok()?;
-    let last = ReadValue::<[u8; 1], M>::decode_from(&mut payload)
-        .await
-        .ok()?;
+    let last = Value::<[u8; 1], M>::decode_from(&mut payload).await.ok()?;
     Some((pair, last.value))
 }
 
-async fn encode_through<I: ReceiverAccess<Family: Write<Report = ()>>>(io: &mut I) -> bool {
+async fn encode_through<I: ReceiverAccess<Family: Write<(), Report = ()>>>(io: &mut I) -> bool {
     io.encode(*b"ab").await.is_ok() && io.encode(&b"cd"[..]).await.is_ok()
 }
 
@@ -169,4 +168,70 @@ fn encoding_into_a_borrowed_sink_is_send() {
     assert!(send(encode_through(&mut io)));
     assert!(send(encode_through(&mut &mut io)));
     assert_eq!(io.into_inner(), b"xyabcdabcd");
+}
+
+/// How urgently a segment is to be sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Priority(u8);
+
+/// A sink that takes priorities and records each segment with its own.
+#[derive(Default)]
+struct Prioritized {
+    segments: Vec<(Vec<u8>, Priority)>,
+}
+nitori_call::family_receiver!(impl [] for Prioritized);
+impl Write<Priority> for Prioritized {
+    type Error = !;
+    type Report = ();
+    fn poll_write<'v, B: Buf + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+        input: &mut B,
+        options: &Priority,
+    ) -> Poll<Result<Option<WriteSegment<()>>, !>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        let Some(count) = NonZeroUsize::new(input.remaining()) else {
+            return Poll::Ready(Ok(None));
+        };
+        let mut bytes = vec![0; count.get()];
+        input.copy_to_slice(&mut bytes);
+        this.segments.push((bytes, *options));
+        Poll::Ready(Ok(Some(WriteSegment { count, report: () })))
+    }
+}
+
+async fn value_through<P, I>(io: &mut I, options: P) -> bool
+where
+    P: Unpin,
+    I: ReceiverAccess<Family: Write<P, Report = ()>>,
+{
+    io.encode(Value {
+        value: *b"ab",
+        metadata: options,
+    })
+    .await
+    .is_ok()
+}
+
+#[test]
+fn a_value_with_options_into_a_borrowed_sink_is_send() {
+    let mut io = ConstructedAccess::new(Prioritized::default());
+    send(io.encode(Value {
+        value: *b"xy",
+        metadata: Priority(1),
+    }))
+    .unwrap();
+    assert!(send(value_through(&mut io, Priority(2))));
+    assert!(send(value_through(&mut &mut io, Priority(3))));
+    assert_eq!(
+        io.into_inner().segments,
+        [
+            (b"xy".to_vec(), Priority(1)),
+            (b"ab".to_vec(), Priority(2)),
+            (b"ab".to_vec(), Priority(3)),
+        ]
+    );
 }

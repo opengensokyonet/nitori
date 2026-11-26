@@ -1,7 +1,7 @@
 //! Skipping built from reading: composition states that give a reader the
 //! [`Skip`] capability by reading and dropping what it reads.
 use crate::{
-    ChunkResult, ExactLen, LentBuffer, Read, ReadChunk, ReadResult, Skip, Write, WriteLent,
+    ChunkResult, ExactLen, Filled, LentBuffer, Read, ReadChunk, ReadResult, Skip, Write, WriteLent,
     WriteLentResult, WriteResult,
 };
 use bytes::{Buf, BufMut};
@@ -114,32 +114,33 @@ impl<F: ExactLen, S> ExactLen for Skippable<F, S> {
     }
 }
 
-impl<F: Write, S> Write for Skippable<F, S> {
+impl<F: Write<O>, S, O> Write<O> for Skippable<F, S> {
     type Error = F::Error;
     type Report = F::Report;
     fn poll_write<'v, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut I,
-    ) -> Poll<WriteResult<Self>>
+        options: &O,
+    ) -> Poll<WriteResult<Self, O>>
     where
         Self: 'v,
     {
-        F::poll_write(host, cx, input)
+        F::poll_write(host, cx, input, options)
     }
 }
 
-impl<F: WriteLent, S> WriteLent for Skippable<F, S> {
+impl<F: WriteLent<O>, S, O> WriteLent<O> for Skippable<F, S> {
     type Buffer<'l> = F::Buffer<'l>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         wanted: NonZeroUsize,
         fill: Fill,
-    ) -> Poll<WriteLentResult<Self, T, A>>
+    ) -> Poll<WriteLentResult<Self, O, T, A>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<T, O>, A>,
     {
         F::poll_write_lent(host, cx, wanted, fill)
     }

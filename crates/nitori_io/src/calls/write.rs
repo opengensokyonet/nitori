@@ -8,25 +8,27 @@ use bytes::Buf;
 use nitori_call::{ReceiverAccess, call};
 use snafu::{IntoError, Snafu};
 
-/// Accept all of `input` and return the combined report of the segments
-/// accepted. Pass `&mut buffer` to keep the cursor: after a failure or
-/// cancellation it holds the unaccepted tail.
+/// Accept all of `input`, every segment with the write options
+/// `options`, and return the combined report of the segments accepted.
+/// Pass `&mut buffer` to keep the cursor: after a failure or cancellation it
+/// holds the unaccepted tail. Pass `()` to a sink that takes no options.
 #[call(sync)]
-pub async fn write_all<F, B>(
+pub async fn write_all<F, O, B>(
     io: &mut impl ReceiverAccess<Family = F>,
     input: B,
-) -> Result<<F as WriteHost>::Report, WriteAllError<F::Error>>
+    options: O,
+) -> Result<<F as WriteHost<O>>::Report, WriteAllError<F::Error>>
 where
-    F: WriteHost,
-    <F as WriteHost>::Report: Combine,
+    F: WriteHost<O>,
+    <F as WriteHost<O>>::Report: Combine,
     B: Buf,
 {
     let mut input = input;
     let mut completed = 0;
-    let mut combined = <F as WriteHost>::Report::default();
+    let mut combined = <F as WriteHost<O>>::Report::default();
     while input.has_remaining() {
         let before = input.remaining();
-        match io.write(&mut input).await {
+        match io.write(&mut input, &options).await {
             Ok(None) => return Err(error::WriteZeroSnafu { completed }.build().into()),
             Ok(Some(WriteSegment { count, report })) => {
                 assert_eq!(
@@ -73,17 +75,19 @@ impl<E> WriteAllError<E> {
     }
 }
 
-/// Write a fixed-size array completely and return the combined report.
+/// Write a fixed-size array completely with the write options
+/// `options` and return the combined report.
 #[call(sync)]
-pub async fn write_array<const LENGTH: usize, F>(
+pub async fn write_array<const LENGTH: usize, F, O>(
     io: &mut impl ReceiverAccess<Family = F>,
     bytes: [u8; LENGTH],
-) -> Result<<F as WriteHost>::Report, WriteArrayError<F::Error>>
+    options: O,
+) -> Result<<F as WriteHost<O>>::Report, WriteArrayError<F::Error>>
 where
-    F: WriteHost,
-    <F as WriteHost>::Report: Combine,
+    F: WriteHost<O>,
+    <F as WriteHost<O>>::Report: Combine,
 {
-    write_all(io, bytes.as_ref())
+    write_all(io, bytes.as_ref(), options)
         .await
         .map_err(WriteArrayError::from_write_all)
 }
@@ -128,19 +132,20 @@ impl<E> WriteArrayError<E> {
     }
 }
 
-/// Encode a primitive number in little endian, write it completely and return
-/// the combined report.
+/// Encode a primitive number in little endian, write it completely with the
+/// write options `options` and return the combined report.
 #[call(sync)]
-pub async fn write_le<T: EndianValue, F>(
+pub async fn write_le<T: EndianValue, F, O>(
     io: &mut impl ReceiverAccess<Family = F>,
     value: T,
-) -> Result<<F as WriteHost>::Report, WriteLeError<F::Error>>
+    options: O,
+) -> Result<<F as WriteHost<O>>::Report, WriteLeError<F::Error>>
 where
-    F: WriteHost,
-    <F as WriteHost>::Report: Combine,
+    F: WriteHost<O>,
+    <F as WriteHost<O>>::Report: Combine,
 {
     let bytes = value.to_le();
-    write_all(io, bytes.as_ref())
+    write_all(io, bytes.as_ref(), options)
         .await
         .map_err(WriteLeError::from_write_all)
 }
@@ -185,19 +190,20 @@ impl<E> WriteLeError<E> {
     }
 }
 
-/// Encode a primitive number in big endian, write it completely and return
-/// the combined report.
+/// Encode a primitive number in big endian, write it completely with the
+/// write options `options` and return the combined report.
 #[call(sync)]
-pub async fn write_be<T: EndianValue, F>(
+pub async fn write_be<T: EndianValue, F, O>(
     io: &mut impl ReceiverAccess<Family = F>,
     value: T,
-) -> Result<<F as WriteHost>::Report, WriteBeError<F::Error>>
+    options: O,
+) -> Result<<F as WriteHost<O>>::Report, WriteBeError<F::Error>>
 where
-    F: WriteHost,
-    <F as WriteHost>::Report: Combine,
+    F: WriteHost<O>,
+    <F as WriteHost<O>>::Report: Combine,
 {
     let bytes = value.to_be();
-    write_all(io, bytes.as_ref())
+    write_all(io, bytes.as_ref(), options)
         .await
         .map_err(WriteBeError::from_write_all)
 }

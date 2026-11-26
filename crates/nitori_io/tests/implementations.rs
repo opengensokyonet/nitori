@@ -123,12 +123,12 @@ fn native_chunks_are_bounded_and_zero_copy() {
 }
 fn write<T: nitori_call::Receiver + Unpin>(sink: &mut T) -> usize
 where
-    T::Family: Write,
-    <T::Family as Write>::Error: std::fmt::Debug,
+    T::Family: Write<()>,
+    <T::Family as Write<()>>::Error: std::fmt::Debug,
 {
     let mut input = (&b"ab"[..]).chain(&b"cde"[..]);
     let input: &mut dyn Buf = &mut input;
-    let count = segment_len(ready(Pin::new(sink).poll_write(&mut cx(), input)));
+    let count = segment_len(ready(Pin::new(sink).poll_write(&mut cx(), input, &())));
     assert_eq!(input.remaining(), 5 - count);
     count
 }
@@ -219,7 +219,7 @@ fn std_errors_preserve_buffers_and_empty_requests_reach_host() {
         for mut input in [&b"abc"[..], &b""[..]] {
             let before = input;
             assert!(matches!(
-                Pin::new(&mut host).poll_write(&mut cx(), &mut input),
+                Pin::new(&mut host).poll_write(&mut cx(), &mut input, &()),
                 Poll::Ready(Err(_))
             ));
             assert_eq!(input, before);
@@ -243,7 +243,7 @@ fn operations_extend_actual_resources_and_forwarding_receivers() {
     }
     let mut output = Vec::new();
     {
-        let mut call = pin!(output.write_all_unpin(&b"abcd"[..]));
+        let mut call = pin!(output.write_all_unpin(&b"abcd"[..], ()));
         let Poll::Ready(result) = call.as_mut().poll(&mut cx()) else {
             panic!("ready")
         };

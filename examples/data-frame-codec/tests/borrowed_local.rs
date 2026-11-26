@@ -3,7 +3,6 @@
 use bytes::{Buf, Bytes};
 use nitori_call::{Call, CallPoll, Lend, Receiver, ReceiverAccess, call};
 use nitori_io::{Write, WriteExt as _};
-use std::convert::Infallible;
 use std::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
@@ -14,13 +13,14 @@ struct Output {
     waited: bool,
 }
 
-impl Write for Output {
-    type Error = Infallible;
+impl Write<()> for Output {
+    type Error = !;
     type Report = ();
     fn poll_write<'visit, Input: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, !>>
     where
         Self: 'visit,
@@ -40,17 +40,17 @@ impl Write for Output {
 }
 
 #[call]
-async fn write_local_buffer<A: ReceiverAccess<Family: Write<Error = Infallible>>>(
+async fn write_local_buffer<A: ReceiverAccess<Family: Write<(), Error = !>>>(
     io: &mut A,
-) -> Result<(Bytes, usize, Bytes, usize), Infallible> {
+) -> Result<(Bytes, usize, Bytes, usize), !> {
     let mut buf = Bytes::from_static(b"abc");
     let first_count = io
-        .write(&mut buf)
+        .write(&mut buf, &())
         .await?
         .map_or(0, |segment| segment.count.get());
     let tail = buf.clone();
     let second_count = io
-        .write(&mut buf)
+        .write(&mut buf, &())
         .await?
         .map_or(0, |segment| segment.count.get());
     Ok((buf, first_count, tail, second_count))

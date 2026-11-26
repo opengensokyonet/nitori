@@ -7,6 +7,7 @@
 //! and a sink composed with a skip state.
 use bytes::{Buf, BufMut, Bytes};
 use nitori_call::{ReceiverAccess, call, family_receiver};
+use nitori_io::Filled;
 use nitori_io::{
     Combine, LentBuffer, LentOutcome, LentSegment, ReadSegment, WriteSegment,
     adapters::{ReadChunkSkip, ReadLimit, ReadSkip, WriteLimit},
@@ -44,13 +45,14 @@ struct Tally {
     bytes: Vec<u8>,
 }
 family_receiver!(impl [] for Tally);
-impl Write for Tally {
+impl Write<()> for Tally {
     type Error = !;
     type Report = Writes;
     fn poll_write<'v, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<Writes>>, !>>
     where
         Self: 'v,
@@ -66,7 +68,7 @@ impl Write for Tally {
         })))
     }
 }
-impl WriteLent for Tally {
+impl WriteLent<()> for Tally {
     type Buffer<'l> = &'l mut Vec<u8>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -76,7 +78,7 @@ impl WriteLent for Tally {
     ) -> Poll<Result<Option<LentOutcome<Writes, T, A>>, !>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<Filled<T, ()>, A>,
     {
         let this = host.get_pin_mut().get_mut();
         let before = this.bytes.len();
@@ -90,12 +92,12 @@ impl WriteLent for Tally {
             .filter(|count| *count <= granted.get())
             .and_then(NonZeroUsize::new);
         let outcome = match (result, count) {
-            (Ok(value), Some(count)) => LentOutcome::Kept(LentSegment {
+            (Ok(Filled { value, .. }), Some(count)) => LentOutcome::Kept(LentSegment {
                 count,
                 report: Writes(1),
                 value,
             }),
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, .. }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         if !matches!(outcome, LentOutcome::Kept(_)) {
@@ -154,13 +156,13 @@ async fn chunks_with<R, W>(
     writes: usize,
     chunk: NonZeroUsize,
 ) -> (
-    Result<CopyTotal<(), <W as Write>::Report>, CopyChunksError<!, !>>,
+    Result<CopyTotal<(), <W as Write<()>>::Report>, CopyChunksError<!, !>>,
     usize,
     usize,
 )
 where
     R: ReadChunk<Metadata = (), Error = !>,
-    W: Write<Error = !, Report: Combine>,
+    W: Write<(), Error = !, Report: Combine>,
 {
     let mut limited_source = source.compose(ReadLimit(reads));
     let mut limited_sink = sink.compose(WriteLimit(writes));
@@ -179,13 +181,13 @@ async fn lent_with<R, W>(
     writes: usize,
     chunk: NonZeroUsize,
 ) -> (
-    Result<CopyTotal<(), <W as Write>::Report>, CopyIntoLentError<!, !>>,
+    Result<CopyTotal<(), <W as Write<()>>::Report>, CopyIntoLentError<!, !>>,
     usize,
     usize,
 )
 where
     R: Read<Metadata = (), Error = !>,
-    W: WriteLent<Error = !, Report: Combine>,
+    W: WriteLent<(), Error = !, Report: Combine>,
 {
     let mut limited_source = source.compose(ReadLimit(reads));
     let mut limited_sink = sink.compose(WriteLimit(writes));
@@ -204,13 +206,13 @@ async fn buffered_with<R, W>(
     writes: usize,
     buffer: &mut [u8],
 ) -> (
-    Result<CopyTotal<(), <W as Write>::Report>, CopyBufferedError<!, !>>,
+    Result<CopyTotal<(), <W as Write<()>>::Report>, CopyBufferedError<!, !>>,
     usize,
     usize,
 )
 where
     R: Read<Metadata = (), Error = !>,
-    W: Write<Error = !, Report: Combine>,
+    W: Write<(), Error = !, Report: Combine>,
 {
     let mut limited_source = source.compose(ReadLimit(reads));
     let mut limited_sink = sink.compose(WriteLimit(writes));
@@ -528,7 +530,7 @@ async fn lent_into_skippable<R, W>(
 ) -> Result<u64, CopyIntoLentError<!, !>>
 where
     R: Read<Metadata = (), Error = !>,
-    W: WriteLent<Report = (), Error = !>,
+    W: WriteLent<(), Report = (), Error = !>,
 {
     let mut limited = sink.compose(WriteLimit(budget));
     let mut by_reading = limited.compose(ReadSkip);

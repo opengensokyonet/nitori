@@ -33,13 +33,14 @@ impl Read for Closed {
         Poll::Ready(Err("closed"))
     }
 }
-impl Write for Closed {
+impl Write<()> for Closed {
     type Error = &'static str;
     type Report = ();
     fn poll_write<'v, B: Buf + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         _: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, &'static str>>
     where
         Self: 'v,
@@ -134,16 +135,16 @@ fn read_limit_caps_chunks() {
 }
 
 #[call(sync)]
-async fn write_limited<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+async fn write_limited<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>>(
     io: &mut A,
     budget: usize,
     payload: &[u8],
 ) -> (
     usize,
-    Result<(), WriteAllError<<A::Family as Write>::Error>>,
+    Result<(), WriteAllError<<A::Family as Write<()>>::Error>>,
 ) {
     let mut limited = io.compose(WriteLimit(budget));
-    let result = limited.write_all(payload).await.map(|_| ());
+    let result = limited.write_all(payload, ()).await.map(|_| ());
     (limited.into_state().0, result)
 }
 
@@ -175,16 +176,16 @@ fn write_limit_accepts_nothing_at_the_boundary_without_the_parent() {
 }
 
 #[call(sync)]
-async fn write_header<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+async fn write_header<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>>(
     io: &mut A,
 ) -> Result<(), usize> {
-    io.write_array([0xff])
+    io.write_array([0xff], ())
         .await
         .map_err(|error| error.completed())?;
-    io.write_le(0x0102_u16)
+    io.write_le(0x0102_u16, ())
         .await
         .map_err(|error| error.completed())?;
-    io.write_be(0x0304_u16)
+    io.write_be(0x0304_u16, ())
         .await
         .map(|_| ())
         .map_err(|error| error.completed())
@@ -200,7 +201,7 @@ fn endian_writes_round_trip() {
     assert_eq!(input.sync_read_be_unpin::<u16>().unwrap().value, 0x0304);
     let mut output = Vec::new();
     for value in [-1.5_f64, f64::MIN_POSITIVE] {
-        output.sync_write_be_unpin(value).unwrap();
+        output.sync_write_be_unpin(value, ()).unwrap();
     }
     let mut input2 = output.as_slice();
     assert_eq!(input2.sync_read_be_unpin::<f64>().unwrap().value, -1.5);
@@ -214,7 +215,7 @@ fn endian_writes_round_trip() {
 fn endian_write_reports_progress_when_the_destination_fills() {
     let mut storage = [0_u8; 3];
     let mut output = storage.as_mut_slice();
-    let error = output.sync_write_le_unpin(0x0102_0304_u32).unwrap_err();
+    let error = output.sync_write_le_unpin(0x0102_0304_u32, ()).unwrap_err();
     assert!(matches!(error, WriteLeError::WriteZero { .. }));
     assert_eq!(error.completed(), 3);
     assert_eq!(storage, [0x04, 0x03, 0x02]);

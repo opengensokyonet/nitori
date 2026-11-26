@@ -10,10 +10,12 @@ Each method accepts a pinned `Self::ReceiverView<'visit>` for any valid visit li
 errors and chunks are stable associated types independent of that visit.
 `Read` fills any `BufMut`; `ReadChunk: Read` additionally returns owned `Buf`
 chunks from the same cursor, and `Skip: Read` advances that cursor without
-delivering the bytes (see [Skipping](#skipping)). `Write` accepts any `Buf`;
-`WriteLent: Write` lends the sink's own storage to be filled in place (see
+delivering the bytes (see [Skipping](#skipping)). `Write<O>` accepts any `Buf`
+and writes it with the write options `O`, `()` for a sink that takes none;
+`WriteLent<O>: Write<O>` lends the sink's own storage to be filled in place (see
 [Lending storage](#lending-storage)). Reads report their bytes in segments with
-metadata and writes with a report (see [Metadata and reports](#metadata-and-reports)). Buffer generics belong
+metadata and writes with a report (see [Metadata and reports](#metadata-and-reports)),
+and each segment is written with its options (see [Write options](#write-options)). Buffer generics belong
 to the methods. Neither hosts nor buffers require `Send`, `Sync`, `Unpin`, or
 `'static`. These traits are not dyn-compatible; buffer arguments can be unsized.
 
@@ -68,29 +70,34 @@ Crates that define operations enable `impl_trait_in_assoc_type`; using the
 generated host methods needs no features. Local buffers and their cursor views
 may stay borrowed across Pending.
 
-In the table `M` is `F::Metadata` and `R` is `F::Report`.
+In the table `M` is `F::Metadata`, and for writes with options of type `O`,
+`R` is `<F as Write<O>>::Report` and `F::Error` is `<F as Write<O>>::Error`.
 
 | Operation | Final value |
 | --- | --- |
 | `read::Read::new(&mut destination)` | `Result<Option<ReadSegment<M>>, F::Error>` |
 | `read_chunk::ReadChunk::new(nonzero_maximum)` | `Result<Option<ChunkSegment<F::Chunk, M>>, F::Error>` |
 | `skip::Skip::new(maximum)` | `Result<Option<F::Count>, F::Error>` |
-| `write::Write::new(&mut input)` | `Result<Option<WriteSegment<R>>, F::Error>` |
+| `write::Write::new(&mut input, &options)` | `Result<Option<WriteSegment<R>>, F::Error>` |
 | `ReadExact::new(&mut destination, length)` | `Result<M, ReadExactError<F::Error>>` |
 | `ReadToEnd::new(&mut destination)` | `Result<ReadTotal<M>, ReadToEndError<F::Error>>` |
 | `ReadChunks::new(maximum, nonzero_chunk_maximum)` | yields `ChunkSegment`s; `Result<usize, ReadChunksError<F::Error>>` |
 | `ReadChunksExact::new(length, nonzero_chunk_maximum)` | yields `ChunkSegment`s; `Result<(), ReadChunksExactError<F::Error>>` |
 | `SkipExact::new(length)` | `Result<(), SkipExactError<F::Error, F::Count>>` |
 | `SkipToEnd::new()` | `Result<(), F::Error>` |
-| `WriteAll::new(input)` | `Result<R, WriteAllError<F::Error>>` |
-| `ReadArray::<LENGTH>::new()` | `Result<ReadValue<[u8; LENGTH], M>, ReadArrayError<F::Error>>` |
-| `ReadLe::<T>::new()` | `Result<ReadValue<T, M>, ReadLeError<F::Error>>` |
-| `ReadBe::<T>::new()` | `Result<ReadValue<T, M>, ReadBeError<F::Error>>` |
-| `WriteArray::<LENGTH>::new(bytes)` | `Result<R, WriteArrayError<F::Error>>` |
-| `WriteLe::new(value)`, `WriteBe::new(value)` | `Result<R, WriteLeError<F::Error>>`, `Result<R, WriteBeError<F::Error>>` |
+| `WriteAll::new(input, options)` | `Result<R, WriteAllError<F::Error>>` |
+| `ReadArray::<LENGTH>::new()` | `Result<Value<[u8; LENGTH], M>, ReadArrayError<F::Error>>` |
+| `ReadLe::<T>::new()` | `Result<Value<T, M>, ReadLeError<F::Error>>` |
+| `ReadBe::<T>::new()` | `Result<Value<T, M>, ReadBeError<F::Error>>` |
+| `WriteArray::<LENGTH>::new(bytes, options)` | `Result<R, WriteArrayError<F::Error>>` |
+| `WriteLe::new(value, options)`, `WriteBe::new(value, options)` | `Result<R, WriteLeError<F::Error>>`, `Result<R, WriteBeError<F::Error>>` |
 
 The operations that combine segments need `M: Combine` or `R: Combine`. The
-copies, which take a source and a sink, are listed under [Copying](#copying).
+writes take their options by value, keep them across Pending and lend each
+segment's poll `&options`; call `io.write_all(input, ())` on a sink without
+options. `Value { value, metadata }`, at the crate root, is a value with the
+metadata of its bytes. The copies, which take a source and a sink, are listed
+under [Copying](#copying).
 
 The derived operations are also functions, such as `calls::read_exact(io,
 destination, length)`, for use inside other operations.
@@ -120,7 +127,8 @@ wrapper families define their own views. Host methods also work on custom
 | `VecDeque<u8>` | consume front | append | — | consume front | — |
 | `std::io::Cursor<T>` | when `T: AsRef<[u8]> + Unpin` | when the cursor implements `std::io::Write` and `T: Unpin` | — | when `T: AsRef<[u8]> + Unpin` | — |
 
-Memory hosts have no metadata and no report: both are `()`. Memory
+Memory hosts take no write options and have no metadata and no report:
+they write with `Write<()>` and `WriteLent<()>`, and the rest are `()`. Memory
 operations use `!`, except cursor writes which preserve
 `std::io::Error`. A full slice writer accepts nothing, `None`. A cursor write offers one
 contiguous input segment; `WriteAll` handles the remaining segments. Use a
@@ -169,7 +177,8 @@ Bridge reads use an initialized stack buffer of at most 8 KiB, then copy only
 successful bytes to the caller's arbitrary `BufMut`. This preserves the buffer
 on Pending and errors without unsafe code. They retain no unread bytes or
 per-poll buffer pointers. Writes pass one contiguous input segment directly to
-the host. Empty requests still reach the host. Flush, close, and seek remain
+the host; the adapted writers take no options, so the bridges write with
+`Write<()>`. Empty requests still reach the host. Flush, close, and seek remain
 explicit operations on the underlying object; dropping a bridge adds no flush.
 
 `adapters::Chunked<T>` adds copying `ReadChunk` to a host whose family implements `Read`, including a bridge,
@@ -274,13 +283,13 @@ use nitori_io::{adapters::WriteLimit, calls::WriteAllError, prelude::*};
 
 /// Write `payload` only if it fits in `room` bytes; report what is left.
 #[call(sync)]
-async fn write_bounded<F: Write<Report = ()>, A: ReceiverAccess<Family = F>>(
+async fn write_bounded<F: Write<(), Report = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     payload: &[u8],
     room: usize,
 ) -> (usize, Result<(), WriteAllError<F::Error>>) {
     let mut bounded = io.compose(WriteLimit(room));
-    let result = bounded.write_all(payload).await;
+    let result = bounded.write_all(payload, ()).await;
     (bounded.into_state().0, result)
 }
 
@@ -369,9 +378,9 @@ they arrived in 0-RTT. A segment has one metadata value, so a fill stops where
 the attributes of the source's bytes change, leaving the destination short;
 a chunk of `ReadChunk` likewise ends there, in a `ChunkSegment { chunk,
 metadata }`. Each `poll_write` reports one `WriteSegment { count, report }`,
-with what accepting the bytes produced as `Write::Report`. What the caller
-wants done with the bytes, such as send parameters, is not part of `Write`.
-`None` is no segment: EOF or no progress for reads, nothing accepted for
+with what accepting the bytes produced as `Write::Report`; how the caller
+wants the bytes written is the write options it passes (see
+[Write options](#write-options)). `None` is no segment: EOF or no progress for reads, nothing accepted for
 writes.
 
 The associated types have no defaults. A host without attributes writes
@@ -429,7 +438,8 @@ use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     Combine,
     adapters::MergedMetadata,
-    calls::{ReadArrayError, ReadValue},
+    Value,
+    calls::ReadArrayError,
     prelude::*,
 };
 
@@ -453,24 +463,179 @@ async fn pair<F: Read<Metadata = ()>>(
 #[call(sync)]
 async fn early_pair<F: Read<Metadata = Early>>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<ReadValue<[u8; 2], Early>, ReadArrayError<F::Error>> {
+) -> Result<Value<[u8; 2], Early>, ReadArrayError<F::Error>> {
     let mut merging = io.compose(MergedMetadata::default());
     let value = pair(&mut merging).await?;
-    Ok(ReadValue {
+    Ok(Value {
         value,
         metadata: merging.into_state().0,
     })
 }
 ```
 
+## Write options
+
+`Write<O>` is generic over the write options `O`: what the caller wants
+done with a segment's bytes, such as the priority of a send or the path it
+takes. Each `poll_write` borrows the segment's `&O`, and `Error`, `Report`
+and, for lending, `Buffer` are chosen for each `O`, so a sink can implement
+several options types, for example `Write<()>` beside `Write<O>` when `O`
+has a default. Memory sinks and bridges take none: `Write<()>`. An adapter
+that forwards a sink, such as a loan of a view, `Chunked`, a write budget
+or `ReadSkip`, forwards every options type of the sink.
+
+A written value carries its options as a `Value { value, metadata }`,
+whose `metadata` is the options of its bytes, as it is the metadata of
+the bytes a value was read from.
+
+The composition state `adapters::MappedOptions(map)` writes through a sink
+of `Write<O>` with other options: for a `map` that implements
+`adapters::MapOptions<M, Options = O>`, it gives each segment the options
+`map.map_options(&m)` lends for the `m` it is written with, making a sink of
+`Write<M>`; a copy from a source with metadata `M` then chooses the options
+of each segment from its metadata. The mapping lends options it keeps, so it
+chooses among a few ready ones, as below, or lends a part of what it is
+given; one that computes the options keeps the result in itself and lends
+it.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+use bytes::Buf;
+use nitori_call::{ComposedReceiver, family_receiver};
+use nitori_io::{WriteSegment, adapters::{MapOptions, MappedOptions}, prelude::*};
+use std::{num::NonZeroUsize, pin::Pin, task::{Context, Poll}};
+
+/// How urgently bytes are to be sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Priority(u8);
+
+/// A sink that records each segment with its priority.
+#[derive(Default)]
+struct Sent(Vec<(Vec<u8>, Priority)>);
+family_receiver!(impl [] for Sent);
+impl Write<Priority> for Sent {
+    type Error = !;
+    type Report = ();
+    fn poll_write<'v, B: Buf + ?Sized>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+        input: &mut B,
+        priority: &Priority,
+    ) -> Poll<Result<Option<WriteSegment<()>>, !>>
+    where
+        Self: 'v,
+    {
+        let bytes = input.copy_to_bytes(input.remaining()).to_vec();
+        let count = NonZeroUsize::new(bytes.len());
+        host.get_pin_mut().get_mut().0.push((bytes, *priority));
+        Poll::Ready(Ok(count.map(|count| WriteSegment { count, report: () })))
+    }
+}
+
+/// Whether bytes arrived early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Early(bool);
+
+/// Lends one of two priorities by whether bytes arrived early.
+struct ByArrival {
+    early: Priority,
+    late: Priority,
+}
+impl MapOptions<Early> for ByArrival {
+    type Options = Priority;
+    fn map_options<'a>(&'a mut self, early: &'a Early) -> &'a Priority {
+        if early.0 { &self.early } else { &self.late }
+    }
+}
+
+// Early bytes are sent first.
+let urgency = ByArrival { early: Priority(0), late: Priority(7) };
+let mut sink = ComposedReceiver::new(Sent::default(), MappedOptions(urgency));
+sink.sync_write_all_unpin(&b"ab"[..], Early(true)).unwrap();
+sink.sync_write_all_unpin(&b"c"[..], Early(false)).unwrap();
+let (sent, _) = sink.into_parts();
+assert_eq!(sent.0, [(b"ab".to_vec(), Priority(0)), (b"c".to_vec(), Priority(7))]);
+```
+
+With the mapping `adapters::FixedOptions(o)`, `MappedOptions(FixedOptions(o))`
+gives every segment `o`, borrowed, whatever it is written with, so the composed sink implements `Write<M>` for every
+`M`, `()` included: code that writes only to sinks without options, or a
+whole copy, can then write to a sink that takes them. `MappedOptions`
+composes on any family, inside an operation with `io.compose(..)` or kept
+with a receiver in a `ComposedReceiver`, and forwards `Write` and
+`WriteLent`. The mapping is called on every write of a segment, a write that
+waits included; a fill's options are mapped when it returns `Filled`, not
+when it gives up, and the sink
+gets a clone of the options the mapping lends, so lending needs
+`Options: Clone`.
+
+```rust
+#![feature(impl_trait_in_assoc_type)]
+# use bytes::Buf;
+# use nitori_call::family_receiver;
+# use nitori_io::WriteSegment;
+# use std::{num::NonZeroUsize, pin::Pin, task::{Context, Poll}};
+# #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+# struct Priority(u8);
+# #[derive(Default)]
+# struct Sent(Vec<(Vec<u8>, Priority)>);
+# family_receiver!(impl [] for Sent);
+# impl Write<Priority> for Sent {
+#     type Error = !;
+#     type Report = ();
+#     fn poll_write<'v, B: Buf + ?Sized>(
+#         host: Pin<&mut Self::ReceiverView<'v>>,
+#         _: &mut Context<'_>,
+#         input: &mut B,
+#         priority: &Priority,
+#     ) -> Poll<Result<Option<WriteSegment<()>>, !>>
+#     where
+#         Self: 'v,
+#     {
+#         let bytes = input.copy_to_bytes(input.remaining()).to_vec();
+#         let count = NonZeroUsize::new(bytes.len());
+#         host.get_pin_mut().get_mut().0.push((bytes, *priority));
+#         Poll::Ready(Ok(count.map(|count| WriteSegment { count, report: () })))
+#     }
+# }
+use nitori_call::{ReceiverAccess, call};
+use nitori_io::{
+    adapters::{FixedOptions, MappedOptions},
+    calls::WriteAllError,
+    prelude::*,
+};
+
+/// Writes only to sinks without options.
+#[call(sync)]
+async fn greet<F: Write<(), Report = ()>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<(), WriteAllError<F::Error>> {
+    io.write_all(&b"hello"[..], ()).await
+}
+
+#[call(sync)]
+async fn urgent_greeting<F: Write<Priority, Report = (), Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) {
+    greet(&mut io.compose(MappedOptions(FixedOptions(Priority(0))))).await.unwrap();
+}
+
+let mut sink = Sent::default();
+sink.sync_urgent_greeting_unpin();
+assert_eq!(sink.0, [(b"hello".to_vec(), Priority(0))]);
+```
+
 ## Lending storage
 
-A sink that implements `WriteLent` lends its own storage, so a source can
+A sink that implements `WriteLent<O>` lends its own storage, so a source can
 produce bytes straight into it. In one poll `poll_write_lent` grants between
 one and `wanted` bytes and calls the fill with a `&mut LentBuffer` that holds
 at most the granted count. The fill puts a prefix into `buffer()`, a
-`bytes::buf::Limit` it can pass to `Read::poll_read`, and returns its value,
-or gives up with its own error, which writes nothing. The sink then counts
+`bytes::buf::Limit` it can pass to `Read::poll_read`, and returns
+`Filled { value, options }`: its value and the write options of the
+bytes it put, which the sink writes them with if it keeps them. The grant
+therefore does not depend on the options. The fill can also give up with
+its own error, which writes nothing. The sink then counts
 what it keeps from its own storage, not from what the fill reports, and
 answers a `LentOutcome`: `Kept(LentSegment { count, report, value })` with at
 least one byte, `NotKept(value)` when no byte was put or the loan was broken
@@ -481,11 +646,12 @@ it reads from polls synchronously.
 
 A sink lends with `LentBuffer::new` on storage that has room for the grant,
 and takes the storage back with `into_storage` if it counts through it. A
-sink that lends also implements `Write`; neither is derived from the other.
+sink that lends also implements `Write` with the same options; neither is
+derived from the other.
 
 ```rust
 use bytes::BufMut;
-use nitori_io::{LentOutcome, LentSegment, PollWriteExt};
+use nitori_io::{Filled, LentOutcome, LentSegment, PollWriteExt};
 use std::{num::NonZeroUsize, pin::Pin, task::{Context, Poll, Waker}};
 
 let mut sink = bytes::BytesMut::new();
@@ -493,7 +659,7 @@ let mut cx = Context::from_waker(Waker::noop());
 let Poll::Ready(Ok(Some(LentOutcome::Kept(LentSegment { count, .. })))) = Pin::new(&mut sink)
     .poll_write_lent(&mut cx, NonZeroUsize::new(8).unwrap(), |lent| {
         lent.buffer().put_slice(b"abc");
-        Ok::<_, !>(())
+        Ok::<_, !>(Filled { value: (), options: () })
     })
 else { panic!("a memory sink lends at once") };
 assert_eq!((count.get(), &sink[..]), (3, &b"abc"[..]));
@@ -515,6 +681,17 @@ what the two implement, with no specialization:
 - `calls::copy_buffered(source, sink, buffer)` reads into a buffer of the
   caller's and writes it out, for a source and a sink with only `Read` and
   `Write`. An empty buffer is an `InsufficientCapacityError` before any IO.
+
+A copy writes each segment with the metadata it was read with as its write
+options: the source has `Metadata = M`, the sink implements `Write<M>`
+(`WriteLent<M>` for `copy_into_lent`, which also needs `M: Clone` to merge
+the metadata it gives the sink), and the copy takes no options of its
+own. `copy_buffered` writes a segment completely before reading the next, so
+bytes of different metadata are never written together. A copy from a
+source without metadata into a sink without options is `()` to `()`. For
+a sink that takes other options, compose `adapters::MappedOptions` on it,
+with a `MapOptions` mapping to choose them from each segment's metadata, or
+with `FixedOptions` to write the whole copy with one (see [Write options](#write-options)).
 
 Each returns a `CopyTotal { count, metadata, report }` with the count as a
 `u64` and the segments' metadata and reports merged with `Combine`. Their
@@ -580,7 +757,8 @@ when the host error implements `Error + 'static`. Primitive variants delegate
 diagnostics transparently; host variants retain the original source directly.
 Array/numeric failures report progress but do not return the partial array.
 
-`write::Write` borrows its input cursor and advances it by the accepted count.
+`write::Write` borrows its input cursor and its options, and advances the
+cursor by the accepted count.
 `WriteAll` takes any `Buf` by value; pass `&mut buffer` to keep the cursor,
 which after a failure or cancellation holds the unaccepted tail. Its errors
 report the total accepted bytes. A write that accepts nothing of nonempty input,

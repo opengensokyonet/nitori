@@ -28,39 +28,42 @@ where
     }
 }
 
-/// Writes the array whole and returns the merged report.
+/// Writes the array whole with the write options `()` and
+/// returns the merged report.
 impl<S, const N: usize> EncodeInto<S> for [u8; N]
 where
-    S: AsAccess<Family: Write<Report: Combine>>,
+    S: AsAccess<Family: Write<(), Report: Combine>>,
 {
-    type Output = <S::Family as Write>::Report;
-    type Error = WriteArrayError<<S::Family as Write>::Error>;
+    type Output = <S::Family as Write<()>>::Report;
+    type Error = WriteArrayError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        sink.access().write_array(self).await
+        sink.access().write_array(self, ()).await
     }
 }
 
-/// Writes the slice whole and returns the merged report.
+/// Writes the slice whole with the write options `()` and
+/// returns the merged report.
 impl<S> EncodeInto<S> for &[u8]
 where
-    S: AsAccess<Family: Write<Report: Combine>>,
+    S: AsAccess<Family: Write<(), Report: Combine>>,
 {
-    type Output = <S::Family as Write>::Report;
-    type Error = WriteAllError<<S::Family as Write>::Error>;
+    type Output = <S::Family as Write<()>>::Report;
+    type Error = WriteAllError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        sink.access().write_all(self).await
+        sink.access().write_all(self, ()).await
     }
 }
 
-/// Writes the bytes whole and returns the merged report.
+/// Writes the bytes whole with the write options `()` and
+/// returns the merged report.
 impl<S> EncodeInto<S> for Bytes
 where
-    S: AsAccess<Family: Write<Report: Combine>>,
+    S: AsAccess<Family: Write<(), Report: Combine>>,
 {
-    type Output = <S::Family as Write>::Report;
-    type Error = WriteAllError<<S::Family as Write>::Error>;
+    type Output = <S::Family as Write<()>>::Report;
+    type Error = WriteAllError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        sink.access().write_all(self).await
+        sink.access().write_all(self, ()).await
     }
 }
 

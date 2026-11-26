@@ -3,6 +3,7 @@
 //! After each resumption every byte is where it should be, once and in order.
 use bytes::{Buf, BufMut, Bytes};
 use nitori_call::{Constructed, drive, family_receiver};
+use nitori_io::Filled;
 use nitori_io::{
     ChunkSegment, LentBuffer, LentOutcome, LentSegment, ReadSegment, WriteSegment,
     calls::{CopyBuffered, CopyChunks, CopyIntoLent},
@@ -184,13 +185,14 @@ impl Observed {
     }
 }
 family_receiver!(impl [] for Observed);
-impl Write for Observed {
+impl Write<()> for Observed {
     type Error = !;
     type Report = ();
     fn poll_write<'v, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, !>>
     where
         Self: 'v,
@@ -208,7 +210,7 @@ impl Write for Observed {
         ))
     }
 }
-impl WriteLent for Observed {
+impl WriteLent<()> for Observed {
     type Buffer<'l> = &'l mut Vec<u8>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -218,7 +220,7 @@ impl WriteLent for Observed {
     ) -> Poll<Result<Option<LentOutcome<(), T, A>>, !>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<Filled<T, ()>, A>,
     {
         let this = host.get_pin_mut().get_mut();
         if this.waits(cx) {
@@ -237,12 +239,12 @@ impl WriteLent for Observed {
             .filter(|count| *count <= granted.get())
             .and_then(NonZeroUsize::new);
         let outcome = match (result, count) {
-            (Ok(value), Some(count)) => LentOutcome::Kept(LentSegment {
+            (Ok(Filled { value, .. }), Some(count)) => LentOutcome::Kept(LentSegment {
                 count,
                 report: (),
                 value,
             }),
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, .. }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         if !matches!(outcome, LentOutcome::Kept(_)) {

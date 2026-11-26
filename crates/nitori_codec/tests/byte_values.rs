@@ -45,11 +45,11 @@ fn a_short_source_fails_an_array_with_what_it_read() {
 }
 
 #[call(sync)]
-async fn write_three<F: Write<Report: Combine>>(
+async fn write_three<F: Write<(), Report: Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<F::Report, WriteAllError<F::Error>>
 where
-    <F as Write>::Error: core::fmt::Debug,
+    <F as Write<()>>::Error: core::fmt::Debug,
 {
     io.encode(*b"ab").await.unwrap();
     io.encode(&b"cd"[..]).await?;
@@ -67,7 +67,7 @@ fn byte_values_encode_inside_an_operation_and_on_a_host() {
 }
 
 #[call(sync)]
-async fn bounded<F: Write<Report = ()>>(
+async fn bounded<F: Write<(), Report = ()>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<(), WriteArrayError<F::Error>> {
     io.compose(WriteLimit(2)).encode(*b"abc").await
@@ -99,13 +99,14 @@ impl Combine for Segments {
 #[derive(Default)]
 struct Pairs(Vec<u8>);
 nitori_call::family_receiver!(impl [] for Pairs);
-impl Write for Pairs {
+impl Write<()> for Pairs {
     type Error = !;
     type Report = Segments;
     fn poll_write<'v, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<Segments>>, !>>
     where
         Self: 'v,

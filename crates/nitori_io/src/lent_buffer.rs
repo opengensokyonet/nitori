@@ -1,5 +1,5 @@
 //! The storage a [`WriteLent`](crate::WriteLent) sink lends for one fill,
-//! and what the loan came to.
+//! what the fill produced, and what the loan came to.
 use crate::{
     LentSegment,
     error::{self, InsufficientCapacityError},
@@ -99,4 +99,16 @@ pub enum LentOutcome<R, T, A> {
     NotKept(T),
     /// The fill gave up, and nothing is written.
     GaveUp(A),
+}
+
+/// What a fill put into a lent buffer produced: its value and the write
+/// options of the bytes it put, which the sink writes them with when it
+/// keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Filled<T, O> {
+    /// The value the sink hands back in [`LentOutcome`].
+    pub value: T,
+    /// The write options of the bytes put, dropped when the sink keeps
+    /// none of them.
+    pub options: O,
 }

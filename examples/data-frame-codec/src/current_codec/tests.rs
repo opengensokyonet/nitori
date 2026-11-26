@@ -171,13 +171,14 @@ pub(super) struct Output {
     bytes: Vec<u8>,
     waited: bool,
 }
-impl nitori_io::Write for Output {
-    type Error = Infallible;
+impl nitori_io::Write<()> for Output {
+    type Error = !;
     type Report = ();
     fn poll_write<'visit, Input: bytes::Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         input: &mut Input,
+        _: &(),
     ) -> Poll<Result<Option<nitori_io::WriteSegment<Self::Report>>, Self::Error>>
     where
         Self: 'visit,
@@ -203,8 +204,8 @@ fn named_write_preserves_partial_progress_across_pending() {
         bytes: Vec::new(),
         waited: false,
     };
-    let mut call = pin!(Call::new(WriteAll::new(Bytes::from_static(b"abc"))));
-    let poll = |call: Pin<&mut Call<Output, WriteAll<Bytes>>>, output: &mut Output| {
+    let mut call = pin!(Call::new(WriteAll::new(Bytes::from_static(b"abc"), ())));
+    let poll = |call: Pin<&mut Call<Output, WriteAll<(), Bytes>>>, output: &mut Output| {
         call.poll_return_with(
             Some(Lend::Fixed(pin!(Pin::new(output).view()))),
             &mut Context::from_waker(Waker::noop()),

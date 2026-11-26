@@ -3,6 +3,7 @@
 //! and how they behave when a side waits, fills up or fails.
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nitori_call::{Constructed, ReceiverAccess, call, drive, family_receiver};
+use nitori_io::Filled;
 use nitori_io::{
     ChunkSegment, Combine, LentBuffer, LentOutcome, LentSegment, ReadSegment, WriteSegment,
     adapters::ReadLimit,
@@ -116,11 +117,14 @@ impl ReadChunk for Segmented {
     }
 }
 
-/// A sink that accepts or lends at most two bytes at a time and reports one
-/// write for each, and can fail once it holds enough bytes.
+/// A sink that accepts or lends at most two bytes at a time, writes each
+/// segment with an [`Early`] mark it records with the segment's bytes, and
+/// reports one write for each, and can fail once it holds enough bytes.
 #[derive(Default)]
 struct Tally {
     bytes: Vec<u8>,
+    /// Each accepted segment and the options it was written with.
+    segments: Vec<(Vec<u8>, Early)>,
     fail_at: Option<usize>,
 }
 impl Tally {
@@ -129,13 +133,14 @@ impl Tally {
     }
 }
 family_receiver!(impl [] for Tally);
-impl Write for Tally {
+impl Write<Early> for Tally {
     type Error = &'static str;
     type Report = Writes;
     fn poll_write<'v, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut B,
+        options: &Early,
     ) -> Poll<Result<Option<WriteSegment<Writes>>, &'static str>>
     where
         Self: 'v,
@@ -147,14 +152,17 @@ impl Write for Tally {
         let count = input.remaining().min(2);
         let mut copy = vec![0; count];
         input.copy_to_slice(&mut copy);
-        this.bytes.extend(copy);
+        this.bytes.extend(&copy);
+        if count > 0 {
+            this.segments.push((copy, *options));
+        }
         Poll::Ready(Ok(NonZeroUsize::new(count).map(|count| WriteSegment {
             count,
             report: Writes(1),
         })))
     }
 }
-impl WriteLent for Tally {
+impl WriteLent<Early> for Tally {
     type Buffer<'l> = &'l mut Vec<u8>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -164,7 +172,7 @@ impl WriteLent for Tally {
     ) -> Poll<Result<Option<LentOutcome<Writes, T, A>>, &'static str>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<Filled<T, Early>, A>,
     {
         let this = host.get_pin_mut().get_mut();
         if this.failed() {
@@ -181,12 +189,15 @@ impl WriteLent for Tally {
             .filter(|count| *count <= granted.get())
             .and_then(NonZeroUsize::new);
         let outcome = match (result, count) {
-            (Ok(value), Some(count)) => LentOutcome::Kept(LentSegment {
-                count,
-                report: Writes(1),
-                value,
-            }),
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, options }), Some(count)) => {
+                this.segments.push((this.bytes[before..].to_vec(), options));
+                LentOutcome::Kept(LentSegment {
+                    count,
+                    report: Writes(1),
+                    value,
+                })
+            }
+            (Ok(Filled { value, .. }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => LentOutcome::GaveUp(abandoned),
         };
         if !matches!(outcome, LentOutcome::Kept(_)) {
@@ -410,6 +421,34 @@ fn copying_nothing_gives_the_default_metadata_and_report() {
     }
 }
 
+/// The segments each of the three copies wrote, with the options it
+/// wrote them with.
+fn segments_written(segments: &[(&'static [u8], bool)]) -> [Vec<(Vec<u8>, Early)>; 3] {
+    let mut chunks = (Segmented::new(segments), Tally::default());
+    chunks.sync_copy_chunks_unpin(nz(10)).unwrap();
+    let mut lent = (Segmented::new(segments), Tally::default());
+    lent.sync_copy_into_lent_unpin(nz(10)).unwrap();
+    let mut buffered = (Segmented::new(segments), Tally::default());
+    let mut buffer = [0; 4];
+    buffered.sync_copy_buffered_unpin(&mut buffer).unwrap();
+    [chunks.1.segments, lent.1.segments, buffered.1.segments]
+}
+
+#[test]
+fn copies_write_each_segment_with_the_metadata_it_was_read_with() {
+    // Two bytes per write: "cde" takes two writes, both with its metadata,
+    // and no write joins bytes of two segments.
+    let expected = vec![
+        (b"ab".to_vec(), Early(true)),
+        (b"cd".to_vec(), Early(false)),
+        (b"e".to_vec(), Early(false)),
+        (b"f".to_vec(), Early(true)),
+    ];
+    for written in segments_written(&[(b"ab", true), (b"cde", false), (b"f", true)]) {
+        assert_eq!(written, expected);
+    }
+}
+
 // A source that waits.
 
 #[derive(Default)]
@@ -468,13 +507,14 @@ struct Shared {
     gave_up: Rc<Cell<usize>>,
 }
 family_receiver!(impl [] for Shared);
-impl Write for Shared {
+impl Write<()> for Shared {
     type Error = !;
     type Report = ();
     fn poll_write<'v, B: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         input: &mut B,
+        _: &(),
     ) -> Poll<Result<Option<WriteSegment<()>>, !>>
     where
         Self: 'v,
@@ -489,7 +529,7 @@ impl Write for Shared {
         ))
     }
 }
-impl WriteLent for Shared {
+impl WriteLent<()> for Shared {
     type Buffer<'l> = &'l mut Vec<u8>;
     fn poll_write_lent<'v, T, A, Fill>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -499,7 +539,7 @@ impl WriteLent for Shared {
     ) -> Poll<Result<Option<LentOutcome<(), T, A>>, !>>
     where
         Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<T, A>,
+        Fill: for<'l> FnOnce(&mut LentBuffer<&'l mut Vec<u8>>) -> Result<Filled<T, ()>, A>,
     {
         let this = host.get_pin_mut().get_mut();
         let mut bytes = this.bytes.borrow_mut();
@@ -513,12 +553,12 @@ impl WriteLent for Shared {
             .filter(|count| *count <= wanted.get())
             .and_then(NonZeroUsize::new);
         let outcome = match (result, count) {
-            (Ok(value), Some(count)) => LentOutcome::Kept(LentSegment {
+            (Ok(Filled { value, .. }), Some(count)) => LentOutcome::Kept(LentSegment {
                 count,
                 report: (),
                 value,
             }),
-            (Ok(value), None) => LentOutcome::NotKept(value),
+            (Ok(Filled { value, .. }), None) => LentOutcome::NotKept(value),
             (Err(abandoned), _) => {
                 this.gave_up.set(this.gave_up.get() + 1);
                 LentOutcome::GaveUp(abandoned)
@@ -773,7 +813,7 @@ async fn chunks_exactly<R, W>(
 ) -> u64
 where
     R: ReadChunk<Metadata = (), Error = !>,
-    W: Write<Report = (), Error = !>,
+    W: Write<(), Report = (), Error = !>,
 {
     let mut limited = source.compose(ReadLimit(length));
     copy_chunks(&mut limited, sink, nz(4)).await.unwrap().count
@@ -786,7 +826,7 @@ async fn lent_exactly<R, W>(
 ) -> u64
 where
     R: Read<Metadata = (), Error = !>,
-    W: WriteLent<Report = (), Error = !>,
+    W: WriteLent<(), Report = (), Error = !>,
 {
     let mut limited = source.compose(ReadLimit(length));
     copy_into_lent(&mut limited, sink, nz(4))
@@ -802,7 +842,7 @@ async fn buffered_exactly<R, W>(
 ) -> u64
 where
     R: Read<Metadata = (), Error = !>,
-    W: Write<Report = (), Error = !>,
+    W: Write<(), Report = (), Error = !>,
 {
     let mut limited = source.compose(ReadLimit(length));
     let mut buffer = [0; 4];

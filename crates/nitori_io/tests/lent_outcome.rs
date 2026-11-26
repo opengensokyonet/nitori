@@ -7,7 +7,7 @@
 use bytes::{BufMut, BytesMut};
 use nitori_call::{Receiver, ReceiverAccess, call};
 use nitori_io::{
-    LentBuffer, LentOutcome,
+    Filled, LentBuffer, LentOutcome,
     adapters::{ReadChunkSkip, ReadSkip, WriteLimit},
     prelude::*,
 };
@@ -51,14 +51,17 @@ fn lend<S>(
     sink: &mut S,
     wanted: usize,
     fill: impl for<'l> FnOnce(
-        &mut LentBuffer<<S::Family as WriteLent>::Buffer<'l>>,
+        &mut LentBuffer<<S::Family as WriteLent<()>>::Buffer<'l>>,
     ) -> Result<&'static str, &'static str>,
 ) -> Outcome
 where
     S: Receiver + Unpin,
-    S::Family: WriteLent<Report = (), Error = !>,
+    S::Family: WriteLent<(), Report = (), Error = !>,
 {
-    match Pin::new(sink).poll_write_lent(&mut cx(), nz(wanted), fill) {
+    let polled = Pin::new(sink).poll_write_lent(&mut cx(), nz(wanted), |lent| {
+        fill(lent).map(|value| Filled { value, options: () })
+    });
+    match polled {
         Poll::Ready(Ok(outcome)) => outcome,
         Poll::Ready(Err(never)) => never,
         Poll::Pending => panic!("unexpected Pending"),
@@ -69,7 +72,7 @@ where
 fn put<S>(sink: &mut S, bytes: &'static [u8]) -> Kind
 where
     S: Receiver + Unpin,
-    S::Family: WriteLent<Report = (), Error = !>,
+    S::Family: WriteLent<(), Report = (), Error = !>,
 {
     kind(lend(sink, 8, |lent| {
         lent.buffer().put_slice(bytes);
@@ -435,12 +438,12 @@ fn run_plan<B: BufMut>(lent: &mut LentBuffer<B>, plan: Plan) -> Result<&'static 
 /// Lend through an access, as an operation does.
 async fn plan_through<A>(io: &mut A, wanted: usize, plan: Plan) -> Outcome
 where
-    A: ReceiverAccess<Family: WriteLent<Report = (), Error = !>>,
+    A: ReceiverAccess<Family: WriteLent<(), Report = (), Error = !>>,
 {
     poll_fn(|cx| {
         io.poll_access(cx, |view, cx| {
-            <A::Family as WriteLent>::poll_write_lent(view.into_pin(), cx, nz(wanted), |lent| {
-                run_plan(lent, plan)
+            <A::Family as WriteLent<()>>::poll_write_lent(view.into_pin(), cx, nz(wanted), |lent| {
+                run_plan(lent, plan).map(|value| Filled { value, options: () })
             })
             .map(|result| result.unwrap())
         })
@@ -449,7 +452,7 @@ where
 }
 
 #[call(sync)]
-async fn plans_limited<F: WriteLent<Report = (), Error = !>>(
+async fn plans_limited<F: WriteLent<(), Report = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     budget: usize,
     wanted: usize,
@@ -464,7 +467,7 @@ async fn plans_limited<F: WriteLent<Report = (), Error = !>>(
 }
 
 #[call(sync)]
-async fn plans_skippable<F: WriteLent<Report = (), Error = !>>(
+async fn plans_skippable<F: WriteLent<(), Report = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     wanted: usize,
     plans: &[Plan],

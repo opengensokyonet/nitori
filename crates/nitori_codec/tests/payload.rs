@@ -7,14 +7,14 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{Composed, ConstructedAccess};
+use nitori_call::{Composed, ComposedReceiver, ConstructedAccess};
 use nitori_codec::{
     payload::{Buffered, Chunks, Fill, SourceLengthError},
     prelude::*,
 };
 use nitori_io::{
     Combine, ExactLen, Read, ReadSegment,
-    adapters::ReadLimit,
+    adapters::{FixedOptions, MappedOptions, ReadLimit},
     calls::{CopyBufferedError, CopyTotal},
 };
 
@@ -126,7 +126,9 @@ impl Read for Received {
 
 #[test]
 fn writing_a_source_returns_the_merged_metadata_of_what_it_read() {
-    let mut output = Vec::new();
+    // The vector takes no write options: give it `()` for every segment,
+    // whatever it was read with.
+    let mut output = ComposedReceiver::new(Vec::new(), MappedOptions(FixedOptions(())));
     let total: CopyTotal<ZeroRtt, ()> = output
         .sync_encode_unpin(Buffered {
             source: ConstructedAccess::new(Received {
@@ -147,7 +149,7 @@ fn writing_a_source_returns_the_merged_metadata_of_what_it_read() {
         })
         .unwrap();
     assert_eq!((total.count, total.metadata), (3, ZeroRtt(false)));
-    assert_eq!(output, b"abcdecde");
+    assert_eq!(output.into_parts().0, b"abcdecde");
 }
 
 /// A source whose length is wider than 64 bits.

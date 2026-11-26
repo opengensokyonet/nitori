@@ -14,12 +14,12 @@ use std::{
 };
 
 #[call(sync)]
-async fn write_twice<F: Write<Report: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
+async fn write_twice<F: Write<(), Report: nitori_io::Combine>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     bytes: &[u8],
 ) -> Result<(), WriteAllError<F::Error>> {
-    io.write_all(bytes).await?;
-    io.write_all(bytes).await.map(|_| ())
+    io.write_all(bytes, ()).await?;
+    io.write_all(bytes, ()).await.map(|_| ())
 }
 
 /// The family bounded in the where clause, with an anonymous access, calling
@@ -30,7 +30,7 @@ async fn write_four<F>(
     bytes: &[u8],
 ) -> Result<(), WriteAllError<F::Error>>
 where
-    F: Write<Report: nitori_io::Combine>,
+    F: Write<(), Report: nitori_io::Combine>,
 {
     write_twice(io, bytes).await?;
     io.write_twice(bytes).await
@@ -38,10 +38,10 @@ where
 
 /// An operation with a family bound calling one with a named family.
 #[call(sync)]
-async fn write_eight<A: ReceiverAccess<Family: Write<Report: nitori_io::Combine>>>(
+async fn write_eight<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>>(
     io: &mut A,
     bytes: &[u8],
-) -> Result<(), WriteAllError<<A::Family as Write>::Error>> {
+) -> Result<(), WriteAllError<<A::Family as Write<()>>::Error>> {
     io.write_four(bytes).await?;
     io.write_four(bytes).await
 }
