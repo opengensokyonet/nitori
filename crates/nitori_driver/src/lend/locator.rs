@@ -83,7 +83,7 @@ where
     PT: Pos,
     C::Chain: FindUp<A, IA>,
     UpKind<C, A, IA>: FindBelow<C::Parts, X, IK, Sh = Sh>,
-    Sh: ToShape + Collect<UpFk<C, A, IA>, LocFk<C, A, IA, X, IK>, C::Fk>,
+    Sh: ToShape + Collect<UpFk<C, A, IA>, LocFk<C, A, IA, X, IK>>,
     <Sh as ToShape>::Shape: Shape<Key = L::Key>,
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, X, IK>>::Rel>,
     MRoute<C, A, IA, X, IK>: Len + 'static,
@@ -111,7 +111,7 @@ where
     {
         let input = <L::Input as Lend<C, PI>>::build(ins, at);
         let anchor: UpFk<C, A, IA> = at.prefix();
-        let all = Sh::collect(rows, &anchor, at, false, |m, _| m.clone());
+        let all = Sh::collect(rows, &anchor, |_| false, |m, _| m.clone());
         let (keys, members): (Vec<L::Key>, Vec<LocFk<C, A, IA, X, IK>>) =
             all.iter().map(|(k, m)| (k.clone(), m.clone())).unzip();
         let picked = L::pick::<PI>(input, &keys)

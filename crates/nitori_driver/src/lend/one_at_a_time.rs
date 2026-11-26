@@ -51,27 +51,26 @@ impl<T: UnderBody> UnderBody for OneAtATime<T> {
     type Depth<Rt: Len, Sd> = Sd;
 }
 
-impl<MC, AF, LF, IA: 'static, IK: 'static, Sh, T, PT: Pos, Cs, MF>
-    Gather<MC, AF, LF, UnderPos<IA, IK, Sh, OnePos<PT, Cs, MF>>> for OneAtATime<T>
+impl<MC, AF, IA: 'static, IK: 'static, Sh, T, PT: Pos, Cs, MF>
+    Gather<MC, AF, UnderPos<IA, IK, Sh, OnePos<PT, Cs, MF>>> for OneAtATime<T>
 where
     MC: Ctx<Fk = MF>,
     MF: Clone + 'static,
     T: UnderBody + Body<MC, PT, Cols = Cs>,
     Cs: Rebor<MC::Route>,
-    Sh: Collect<AF, MF, LF>,
+    Sh: Collect<AF, MF>,
 {
     type Cols = Cs;
     fn gather<'a>(
         rows: &'a [(&'a MF, Span)],
         hs: Cs::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MF) -> bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, OnePos<PT, Cs, MF>>>
     where
         Self: 'a,
     {
-        let all = Sh::collect(rows, anchor, at, line, |m, span| (m.clone(), span));
+        let all = Sh::collect(rows, anchor, is_own, |m, span| (m.clone(), span));
         let (keys, members) =
             <<Sh::Shape as Shape>::Out<(MF, Span)> as Members<(MF, Span)>>::iter(&all)
                 .map(|(k, m)| (k.clone(), m.clone()))

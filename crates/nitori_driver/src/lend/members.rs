@@ -122,26 +122,25 @@ where
     }
 }
 
-impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, H: Need, T: Need>
-    Gather<MC, AF, LF, UnderPos<IA, IK, Sh, PB>> for HCons<H, T>
+impl<MC: Ctx, AF, IA: 'static, IK: 'static, Sh, PB: Pos, H: Need, T: Need>
+    Gather<MC, AF, UnderPos<IA, IK, Sh, PB>> for HCons<H, T>
 where
     Self: ItemComps + Body<MC, PB>,
     <Self as ItemComps>::Out: 'static,
     <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
-    Sh: Collect<AF, MC::Fk, LF>,
+    Sh: Collect<AF, MC::Fk>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
         rows: &'a [(&'a MC::Fk, super::rows::Span)],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MC::Fk) -> bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
+        by_shape::<Self, MC, AF, Sh, PB>(rows, hs, anchor, is_own)
     }
 }
 

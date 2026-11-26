@@ -1,7 +1,7 @@
 //! The needs taken at every member below an anchor.
 use super::{
     Lend,
-    list::{Answer, Append, Len, Prefix, RouteLine},
+    list::{Append, IsOwnBranch, Len, Prefix, RouteLine},
     plan::{Anchored, ExCol, NodeSet, PartPlan, Plan, ShCol, Shared},
     rows::{Rows, Span},
     tree::{
@@ -117,19 +117,16 @@ where
 /// The result of an `Under` at its position `P`, from the full keys of
 /// the members' kind `rows`, with their places in the walk, and the
 /// handles of what each member takes,
-/// with every member as the lend point `MC`; the anchor's full key is
-/// `AF`, the lend point's `LF`.
-pub trait Gather<MC: Ctx, AF, LF, P: Pos>: UnderBody {
+/// with each member as the lend point `MC`; the anchor's full key is `AF`.
+pub trait Gather<MC: Ctx, AF, P: Pos>: UnderBody {
     /// What the members take.
     type Cols: Plan;
-    /// The result; `line` is whether the members' kind and the lend
-    /// point's are on one line from the root ([`Collect`]).
+    /// The result, marking keyed members in the own branch via `is_own`.
     fn gather<'a>(
         rows: &'a [(&'a MC::Fk, Span)],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MC::Fk) -> bool,
     ) -> Self::Collected<'a, P>
     where
         Self: 'a;
@@ -138,86 +135,82 @@ pub trait Gather<MC: Ctx, AF, LF, P: Pos>: UnderBody {
 /// The members' views, each from its part of the handles, gathered by the
 /// shape `Sh`: the members and the handles are in the order of the walk,
 /// so each member's part is the next ([`PartPlan`]).
-pub(super) fn by_shape<'a, Bd, MC: Ctx, AF, LF, Sh, PB: Pos>(
+pub(super) fn by_shape<'a, Bd, MC: Ctx, AF, Sh, PB: Pos>(
     rows: &'a [(&'a MC::Fk, Span)],
     hs: <Bd::Cols as Plan>::Hs<'a>,
     anchor: &AF,
-    at: &LF,
-    line: bool,
+    is_own: impl Fn(&MC::Fk) -> bool,
 ) -> <Sh::Shape as Shape>::Out<Bd::View<'a, PB>>
 where
     Bd: Body<MC, PB> + 'a,
     Bd::Cols: PartPlan<MC::Route>,
-    Sh: Collect<AF, MC::Fk, LF>,
+    Sh: Collect<AF, MC::Fk>,
 {
     let mut left = <Bd::Cols as PartPlan<MC::Route>>::left(hs);
-    Sh::collect(rows, anchor, at, line, |m, span| {
+    Sh::collect(rows, anchor, is_own, |m, span| {
         let part = <Bd::Cols as PartPlan<MC::Route>>::part(&mut left, span);
         Bd::build(part, m)
     })
 }
 
-impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
-    Gather<MC, AF, LF, UnderPos<IA, IK, Sh, PB>> for Mut<X>
+impl<MC: Ctx, AF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
+    Gather<MC, AF, UnderPos<IA, IK, Sh, PB>> for Mut<X>
 where
     Self: Body<MC, PB>,
     <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
-    Sh: Collect<AF, MC::Fk, LF>,
+    Sh: Collect<AF, MC::Fk>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
         rows: &'a [(&'a MC::Fk, Span)],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MC::Fk) -> bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
+        by_shape::<Self, MC, AF, Sh, PB>(rows, hs, anchor, is_own)
     }
 }
-impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
-    Gather<MC, AF, LF, UnderPos<IA, IK, Sh, PB>> for Ref<X>
+impl<MC: Ctx, AF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
+    Gather<MC, AF, UnderPos<IA, IK, Sh, PB>> for Ref<X>
 where
     Self: Body<MC, PB>,
     <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
-    Sh: Collect<AF, MC::Fk, LF>,
+    Sh: Collect<AF, MC::Fk>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
         rows: &'a [(&'a MC::Fk, Span)],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MC::Fk) -> bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
+        by_shape::<Self, MC, AF, Sh, PB>(rows, hs, anchor, is_own)
     }
 }
-impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, B: AtTarget + 'static, T: Need>
-    Gather<MC, AF, LF, UnderPos<IA, IK, Sh, PB>> for At<B, T>
+impl<MC: Ctx, AF, IA: 'static, IK: 'static, Sh, PB: Pos, B: AtTarget + 'static, T: Need>
+    Gather<MC, AF, UnderPos<IA, IK, Sh, PB>> for At<B, T>
 where
     Self: Body<MC, PB>,
     <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
-    Sh: Collect<AF, MC::Fk, LF>,
+    Sh: Collect<AF, MC::Fk>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
         rows: &'a [(&'a MC::Fk, Span)],
         hs: <Self::Cols as Plan>::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MC::Fk) -> bool,
     ) -> Self::Collected<'a, UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
+        by_shape::<Self, MC, AF, Sh, PB>(rows, hs, anchor, is_own)
     }
 }
 
@@ -239,6 +232,8 @@ pub type MCx<C, A, IA, Bd, IK> = Cx<
 pub type MFk<C, A, IA, Bd, IK> = <MCx<C, A, IA, Bd, IK> as Ctx>::Fk;
 
 type BodyB<Bd> = <Bd as UnderBody>::B;
+type MemberLine<C, A, IA, Bd, IK> =
+    <MRoute<C, A, IA, BodyB<Bd>, IK> as RouteLine<<C as Ctx>::Route>>::Out;
 
 impl<C: Ctx, A: 'static, Bd, IA: 'static, IK: 'static, Sh, PB: Pos>
     Lend<C, UnderPos<IA, IK, Sh, PB>> for Under<A, Bd>
@@ -249,9 +244,9 @@ where
     UpKind<C, A, IA>: FindBelow<C::Parts, BodyB<Bd>, IK, Sh = Sh>,
     UpPre<C, A, IA>: Append<<UpKind<C, A, IA> as FindBelow<C::Parts, BodyB<Bd>, IK>>::Rel>,
     MRoute<C, A, IA, BodyB<Bd>, IK>: Len + RouteLine<C::Route> + 'static,
-    <MRoute<C, A, IA, BodyB<Bd>, IK> as RouteLine<C::Route>>::Out: Answer,
+    MemberLine<C, A, IA, Bd, IK>: IsOwnBranch<MFk<C, A, IA, Bd, IK>, C::Fk>,
     MCx<C, A, IA, Bd, IK>: Ctx,
-    Bd: Gather<MCx<C, A, IA, Bd, IK>, UpFk<C, A, IA>, C::Fk, UnderPos<IA, IK, Sh, PB>>,
+    Bd: Gather<MCx<C, A, IA, Bd, IK>, UpFk<C, A, IA>, UnderPos<IA, IK, Sh, PB>>,
     C::Fk: Prefix<UpFk<C, A, IA>>,
     UpPre<C, A, IA>: 'static,
 {
@@ -259,12 +254,7 @@ where
         UpPre<C, A, IA>,
         (
             NodeSet<MRoute<C, A, IA, BodyB<Bd>, IK>, MFk<C, A, IA, Bd, IK>, UpPre<C, A, IA>>,
-            <Bd as Gather<
-                MCx<C, A, IA, Bd, IK>,
-                UpFk<C, A, IA>,
-                C::Fk,
-                UnderPos<IA, IK, Sh, PB>,
-            >>::Cols,
+            <Bd as Gather<MCx<C, A, IA, Bd, IK>, UpFk<C, A, IA>, UnderPos<IA, IK, Sh, PB>>>::Cols,
         ),
     >;
     fn build<'a>(
@@ -275,7 +265,8 @@ where
         Self: 'a,
     {
         let anchor: UpFk<C, A, IA> = at.prefix();
-        let line = <<MRoute<C, A, IA, BodyB<Bd>, IK> as RouteLine<C::Route>>::Out as Answer>::YES;
-        Bd::gather(rows, hs, &anchor, at, line)
+        Bd::gather(rows, hs, &anchor, |member| {
+            MemberLine::<C, A, IA, Bd, IK>::is_own_branch(member, at)
+        })
     }
 }

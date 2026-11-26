@@ -83,25 +83,24 @@ where
         ComponentWaker::new(node, number_of::<X>())
     }
 }
-impl<MC: Ctx, AF, LF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
-    Gather<MC, AF, LF, super::tree::UnderPos<IA, IK, Sh, PB>> for WakerOf<X>
+impl<MC: Ctx, AF, IA: 'static, IK: 'static, Sh, PB: Pos, X: 'static>
+    Gather<MC, AF, super::tree::UnderPos<IA, IK, Sh, PB>> for WakerOf<X>
 where
     Self: Body<MC, PB>,
     <Self as Body<MC, PB>>::Cols: PartPlan<MC::Route>,
-    Sh: Collect<AF, MC::Fk, LF>,
+    Sh: Collect<AF, MC::Fk>,
 {
     type Cols = <Self as Body<MC, PB>>::Cols;
     fn gather<'a>(
         rows: &'a [(&'a MC::Fk, super::rows::Span)],
         hs: <Self::Cols as super::plan::Plan>::Hs<'a>,
         anchor: &AF,
-        at: &LF,
-        line: bool,
+        is_own: impl Fn(&MC::Fk) -> bool,
     ) -> Self::Collected<'a, super::tree::UnderPos<IA, IK, Sh, PB>>
     where
         Self: 'a,
     {
-        by_shape::<Self, MC, AF, LF, Sh, PB>(rows, hs, anchor, at, line)
+        by_shape::<Self, MC, AF, Sh, PB>(rows, hs, anchor, is_own)
     }
 }
 impl<MC, X, I> CheckBody<MC, WakerPos<I>> for WakerOf<X> {}

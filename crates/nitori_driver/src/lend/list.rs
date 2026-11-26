@@ -158,18 +158,6 @@ where
     type Out = <I::Out as And<Q::Out>>::Out;
 }
 
-/// An answer as a value.
-pub trait Answer {
-    /// Whether the answer is yes.
-    const YES: bool;
-}
-impl Answer for True {
-    const YES: bool = true;
-}
-impl Answer for False {
-    const YES: bool = false;
-}
-
 /// One answer is yes when the count is not zero.
 pub trait NonZero {
     /// [`True`] or [`False`].
@@ -270,6 +258,24 @@ impl<H, T> SameBranch<HNil> for HCons<H, T> {
 impl<H: PartialEq, T: SameBranch<T2>, T2> SameBranch<HCons<H, T2>> for HCons<H, T> {
     fn same_branch(&self, other: &HCons<H, T2>) -> bool {
         self.head == other.head && self.tail.same_branch(&other.tail)
+    }
+}
+
+/// Whether a member is on the lend point's branch, for the answer of
+/// [`RouteLine`]. Only kinds on the same line have comparable key prefixes.
+pub trait IsOwnBranch<MF, LF> {
+    fn is_own_branch(member: &MF, lend_point: &LF) -> bool;
+}
+
+impl<MF: SameBranch<LF>, LF> IsOwnBranch<MF, LF> for True {
+    fn is_own_branch(member: &MF, lend_point: &LF) -> bool {
+        member.same_branch(lend_point)
+    }
+}
+
+impl<MF, LF> IsOwnBranch<MF, LF> for False {
+    fn is_own_branch(_: &MF, _: &LF) -> bool {
+        false
     }
 }
 
