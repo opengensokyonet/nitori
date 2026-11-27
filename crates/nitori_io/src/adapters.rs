@@ -20,11 +20,11 @@ mod options;
 mod read_limit;
 mod skip;
 mod write_limit;
-pub use merged_metadata::{MergedMetadata, Merging};
-pub use options::{FixedOptions, MapOptions, MappedOptions, OptionsMapping};
-pub use read_limit::{Limited, ReadLimit};
+pub use merged_metadata::{MergedMetadata, MergedMetadataParts, Merging};
+pub use options::{FixedOptions, MapOptions, MappedOptions, MappedOptionsParts, OptionsMapping};
+pub use read_limit::{Limited, ReadLimit, ReadLimitParts};
 pub use skip::{ReadChunkSkip, ReadSkip, Skippable};
-pub use write_limit::{WriteLimit, WriteLimited};
+pub use write_limit::{WriteLimit, WriteLimitParts, WriteLimited};
 
 pin_project_lite::pin_project! {
     /// Add copying chunk reads to any reader, with a shared underlying cursor.

@@ -76,16 +76,17 @@ fn chunked_skips_on_its_inner_source_between_chunks() {
 fn a_budget_bounds_skips_and_reports_eof_at_its_boundary() {
     let mut framed = ReadLimit::new(&b"abcdef"[..], 4u8);
     assert_eq!(framed.sync_skip_unpin(Infinite), Ok(Some(4usize)));
-    assert_eq!(framed.get_ref(), (&&b"ef"[..], &0));
+    assert_eq!(framed.get_ref(), &&b"ef"[..]);
+    assert_eq!(framed.quota(), &0);
     assert_eq!(framed.sync_skip_unpin(Infinite), Ok(None));
-    assert_eq!(framed.get_ref().0, &&b"ef"[..]);
+    assert_eq!(framed.get_ref(), &&b"ef"[..]);
 }
 
 #[test]
 fn budgets_and_maxima_of_other_widths_meet_a_usize_count() {
     let mut framed = ReadLimit::new(&b"abcdef"[..], u64::MAX);
     assert_eq!(framed.sync_skip_unpin(2u8), Ok(Some(2usize)));
-    assert_eq!(framed.get_ref().1, &(u64::MAX - 2));
+    assert_eq!(framed.quota(), &(u64::MAX - 2));
     let mut framed = ReadLimit::new(&b"abcdef"[..], Infinite);
     assert_eq!(framed.sync_skip_unpin(5u128), Ok(Some(5usize)));
     assert_eq!(framed.sync_skip_unpin(5u128), Ok(Some(1)));
@@ -105,7 +106,7 @@ fn the_boundary_answers_without_polling_the_parent() {
 fn a_zero_maximum_at_a_zero_budget_answers_none_without_polling_the_parent() {
     let mut framed = ReadLimit::new(Failing, 0usize);
     assert_eq!(framed.sync_skip_unpin(0usize), Ok(None));
-    assert_eq!(framed.get_ref().1, &0);
+    assert_eq!(framed.quota(), &0);
 }
 
 #[test]
@@ -132,7 +133,7 @@ where
 {
     let mut limited = ReadLimit::new(&mut *io, budget);
     let result = limited.skip(maximum).await;
-    (result, limited.into_parts().1)
+    (result, limited.into_parts().quota)
 }
 
 #[test]
@@ -235,7 +236,8 @@ fn a_cancelled_skip_leaves_the_source_and_the_budget_in_step() {
         assert!(matches!(poll, CallPoll::Pending));
     }
     drop(call);
-    let (source, budget) = framed.get_ref();
+    let source = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!(source.bytes, b"bcdef");
     assert_eq!(budget, &4);
     let mut call = pin!(Call::<Limited<Delayed<'_>, usize>, _>::new(SkipAll::new(4)));
@@ -251,7 +253,8 @@ fn a_cancelled_skip_leaves_the_source_and_the_budget_in_step() {
         }
     };
     assert_eq!(result, Ok(()));
-    let (source, budget) = framed.get_ref();
+    let source = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!((source.bytes, budget), (&b"f"[..], &0));
 }
 
@@ -279,7 +282,8 @@ fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
         assert!(matches!(poll, CallPoll::Pending));
     }
     drop(call);
-    let (chunked, budget) = framed.get_ref();
+    let chunked = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!(chunked.get_ref().bytes, b"bcdef");
     assert_eq!(budget, &4);
     let mut call = pin!(Call::<Framed<'_>, _>::new(SkipAll::new(4)));
@@ -295,7 +299,8 @@ fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
         }
     };
     assert_eq!(result, Ok(()));
-    let (chunked, budget) = framed.get_ref();
+    let chunked = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!((chunked.get_ref().bytes, budget), (&b"f"[..], &0));
 }
 

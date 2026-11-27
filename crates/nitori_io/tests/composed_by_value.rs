@@ -2,7 +2,11 @@
 //! `into_parts` returns that access to read on after the composition.
 #![feature(impl_trait_in_assoc_type)]
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
+use nitori_io::{
+    adapters::{ReadLimit, ReadLimitParts},
+    calls::ReadArrayError,
+    prelude::*,
+};
 
 /// Wraps the access it is given, as it is, in a read budget.
 fn limit<I: ReceiverAccess>(io: I, budget: usize) -> ReadLimit<I> {
@@ -23,7 +27,7 @@ async fn read_within_then_after<F: Read<Metadata: nitori_io::Combine>>(
 ) -> Reads<F::Error> {
     let mut limited = limit(io, 1);
     let within = limited.read_array::<2>().await.map(|read| read.value);
-    let (io, left) = limited.into_parts();
+    let ReadLimitParts { io, quota: left } = limited.into_parts();
     let after = io.read_array::<1>().await.map(|read| read.value);
     (within, left, after)
 }
@@ -56,12 +60,15 @@ async fn compose_on_composed<F: Read<Metadata: nitori_io::Combine>>(
     let mut outer = limit(io, 3);
     let mut inner = ReadLimit::new(&mut outer, 1usize);
     let first = inner.read_array::<2>().await.map(|read| read.value);
-    let inner_left = inner.into_parts().1;
+    let inner_left = inner.into_parts().quota;
     let mut nested = limit(outer, 1);
     let second = nested.read_array::<1>().await.map(|read| read.value);
-    let (mut outer, nested_left) = nested.into_parts();
+    let ReadLimitParts {
+        io: mut outer,
+        quota: nested_left,
+    } = nested.into_parts();
     let third = outer.read_array::<1>().await.map(|read| read.value);
-    let outer_left = outer.into_parts().1;
+    let outer_left = outer.into_parts().quota;
     (first, second, third, [inner_left, nested_left, outer_left])
 }
 

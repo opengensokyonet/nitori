@@ -2,6 +2,7 @@
 use crate::{ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
 use bytes::Buf;
 use core::{
+    fmt,
     marker::PhantomData,
     num::NonZeroUsize,
     pin::Pin,
@@ -15,7 +16,10 @@ use nitori_call::{
 // Match the bridge read buffer. Scratch storage lasts for only one poll.
 const SCRATCH_LEN: usize = 8192;
 
-/// The family of a view of `F` wrapped by [`ReadSkip`] or [`ReadChunkSkip`].
+/// The family of a wrapped view of `F`.
+///
+/// Use `ReadSkip<()>` for `S` to skip by reading or `ReadChunkSkip<()>`
+/// to skip by dropping chunks. The IO parameter of the marker is `()`.
 ///
 /// Both forward [`Read`], [`ReadChunk`], [`ExactLen`], [`Write`] and
 /// [`WriteLent`] when `F` supports them.
@@ -25,7 +29,6 @@ macro_rules! skip_wrapper {
     ($(#[$doc:meta])* $W:ident, $proj:ident) => {
         pin_project_lite::pin_project! {
             $(#[$doc])*
-            #[derive(Debug)]
             pub struct $W<IO> {
                 #[pin]
                 io: IO,
@@ -36,16 +39,26 @@ macro_rules! skip_wrapper {
             pub const fn new(io: IO) -> Self {
                 Self { io }
             }
-            fn io_pin(self: Pin<&mut Self>) -> Pin<&mut IO> {
-                self.project().io
-            }
             /// Borrow the inner IO.
             pub const fn get_ref(&self) -> &IO {
                 &self.io
             }
+            /// Borrow the inner IO mutably.
+            pub fn get_mut(&mut self) -> &mut IO {
+                &mut self.io
+            }
+            /// Borrow the pinned inner IO.
+            pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut IO> {
+                self.project().io
+            }
             /// Return the inner IO.
             pub fn into_inner(self) -> IO {
                 self.io
+            }
+        }
+        impl<IO> fmt::Debug for $W<IO> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($W)).finish_non_exhaustive()
             }
         }
         impl<F: ReceiverFamily> ReceiverFamily for Skippable<F, $W<()>> {
@@ -97,7 +110,9 @@ macro_rules! skip_wrapper {
 
 skip_wrapper!(
     /// A source that skips by reading up to 8 KiB into a stack buffer on
-    /// each poll and discarding the bytes.
+    /// each poll and discarding the bytes. It keeps no additional state.
+    /// Each poll reports what it consumed, so a count tracked by the
+    /// caller stays in step across cancellation.
     ///
     /// The skipped count is `usize`. A maximum of zero polls an empty read.
     ReadSkip,
@@ -106,8 +121,10 @@ skip_wrapper!(
 skip_wrapper!(
     /// A source that skips by reading and dropping one chunk per poll.
     ///
-    /// The skipped count is `usize`. A maximum of zero polls an empty read,
-    /// which can still report the source's terminal error.
+    /// The skipped count is `usize`. A maximum above `usize::MAX` or
+    /// [`Infinite`](crate::Infinite) requests a chunk of at most `usize::MAX`.
+    /// A maximum of zero polls an empty read, which can still report the
+    /// source's terminal error.
     ReadChunkSkip,
     ReadChunkSkipView
 );
@@ -126,7 +143,7 @@ impl<F: Read> Skip for Skippable<F, ReadSkip<()>> {
         let mut scratch = [0; SCRATCH_LEN];
         let allowed = crate::Min::min(maximum, SCRATCH_LEN);
         let segment = ready!(F::poll_read(
-            host.io_pin(),
+            host.get_pin_mut(),
             cx,
             &mut &mut scratch[..allowed]
         ))?;
@@ -150,10 +167,10 @@ impl<F: ReadChunk> Skip for Skippable<F, ReadChunkSkip<()>> {
     {
         let Some(allowed) = NonZeroUsize::new(crate::Min::min(maximum, usize::MAX)) else {
             let mut empty: &mut [u8] = &mut [];
-            ready!(F::poll_read(host.io_pin(), cx, &mut empty))?;
+            ready!(F::poll_read(host.get_pin_mut(), cx, &mut empty))?;
             return Poll::Ready(Ok(Some(0)));
         };
-        let chunk = ready!(F::poll_read_chunk(host.io_pin(), cx, allowed))?;
+        let chunk = ready!(F::poll_read_chunk(host.get_pin_mut(), cx, allowed))?;
         Poll::Ready(Ok(chunk.map(|segment| {
             let count = segment.chunk.remaining();
             assert!(

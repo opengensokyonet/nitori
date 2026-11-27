@@ -30,19 +30,19 @@ async fn read_two_within_one<F: Read<Metadata: nitori_io::Combine>>(
 ) -> (Result<[u8; 2], ReadArrayError<F::Error>>, usize) {
     let mut limited = ReadLimit::new(&mut *io, 1usize);
     let result = limited.read_array::<2>().await.map(|read| read.value);
-    (result, limited.into_parts().1)
+    (result, limited.into_parts().quota)
 }
 
 #[test]
 fn the_budget_outlives_each_call() {
     let mut framed = ReadLimit::new(&b"abcdef"[..], 3usize);
     assert_eq!(framed.sync_read_two_unpin().unwrap(), *b"ab");
-    assert_eq!(framed.get_ref().1, &1);
+    assert_eq!(framed.quota(), &1);
     // One byte is left in the budget: the next read of two stops after it.
     let error = framed.sync_read_two_unpin().unwrap_err();
     assert_eq!(error.completed(), 1);
-    assert_eq!(framed.get_ref().1, &0);
-    let (rest, _) = framed.into_parts();
+    assert_eq!(framed.quota(), &0);
+    let rest = framed.into_parts().io;
     assert_eq!(rest, b"def");
 }
 
@@ -53,9 +53,10 @@ fn a_call_composes_again_within_the_budget() {
     assert_eq!(result.unwrap_err().completed(), 1);
     assert_eq!(inner, 0);
     // The byte read through the inner budget is counted by the outer one.
-    assert_eq!(framed.get_ref().1, &3);
+    assert_eq!(framed.quota(), &3);
     assert_eq!(framed.sync_read_two_unpin().unwrap(), *b"bc");
-    assert_eq!(framed.get_ref(), (&&b"def"[..], &1));
+    assert_eq!(framed.get_ref(), &&b"def"[..]);
+    assert_eq!(framed.quota(), &1);
 }
 
 /// A source that delivers one byte on every second poll.
@@ -109,7 +110,8 @@ fn a_cancelled_call_leaves_the_source_and_the_budget_in_step() {
         assert!(matches!(poll, CallPoll::Pending));
     }
     drop(call);
-    let (source, budget) = framed.get_ref();
+    let source = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!(source.bytes, b"bcdef");
     assert_eq!(budget, &3);
     // A new call goes on from there.
@@ -126,7 +128,7 @@ fn a_cancelled_call_leaves_the_source_and_the_budget_in_step() {
         }
     };
     assert_eq!(read.unwrap(), *b"bc");
-    assert_eq!(framed.get_ref().1, &1);
+    assert_eq!(framed.quota(), &1);
 }
 
 fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {

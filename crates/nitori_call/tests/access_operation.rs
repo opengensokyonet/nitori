@@ -482,7 +482,7 @@ async fn check_nested_limits<F: Read<Metadata = (), Error = !>>(
     }
     assert_eq!(outer.read_array::<3>().await.unwrap().value, [7, 3, 0]);
     assert!(outer.read_array::<1>().await.is_err());
-    assert_eq!(outer.into_parts().1, 0);
+    assert_eq!(outer.into_parts().quota, 0);
     assert_eq!(io.read_array::<1>().await.unwrap().value, [8]);
 }
 

@@ -191,7 +191,7 @@ fn writing_a_source_returns_the_merged_metadata_of_what_it_read() {
     };
     let total = (&mut source, &mut output).sync_write_fill_unpin();
     assert_eq!((total.count, total.metadata), (3, ZeroRtt(false)));
-    assert_eq!(output.into_parts().0, b"abcdecde");
+    assert_eq!(output.into_parts().io, b"abcdecde");
 }
 
 /// A source whose length is wider than 64 bits.

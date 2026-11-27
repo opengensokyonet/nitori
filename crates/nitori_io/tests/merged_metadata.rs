@@ -136,10 +136,10 @@ where
 {
     let mut first = MergedMetadata::new(&mut *io, Default::default());
     let bytes = plain::<3, _>(&mut first).await;
-    let early = first.into_parts().1;
+    let early = first.into_parts().merged;
     let mut second = MergedMetadata::new(&mut *io, Default::default());
     let later = plain::<3, _>(&mut second).await;
-    (bytes, early, later, second.into_parts().1)
+    (bytes, early, later, second.into_parts().merged)
 }
 
 #[test]
@@ -171,7 +171,7 @@ where
     );
     let skipped = merging.skip(Infinite).await.unwrap();
     let Ok(left) = merging.remaining_len().await;
-    (chunk, skipped, left, merging.into_parts().1)
+    (chunk, skipped, left, merging.into_parts().merged)
 }
 
 #[test]
@@ -192,7 +192,7 @@ where
 {
     let mut merging = MergedMetadata::new(&mut *io, Default::default());
     let skipped = merging.skip(Infinite).await.unwrap();
-    (skipped, merging.into_parts().1)
+    (skipped, merging.into_parts().merged)
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn state_kept_with_a_receiver_merges_every_call() {
     let mut io = MergedMetadata::new(Received::new(b"abcd", 1), ZeroRtt::default());
     assert_eq!(io.sync_plain_unpin::<2>(), *b"ab");
     assert_eq!(io.sync_plain_unpin::<2>(), *b"cd");
-    assert_eq!(io.into_parts().1, ZeroRtt(true));
+    assert_eq!(io.into_parts().merged, ZeroRtt(true));
 }
 
 /// A type of the caller's that lends an access to the stream it keeps.
@@ -316,7 +316,7 @@ where
     let mut merging = MergedMetadata::new(&mut *io, Default::default());
     merging.read_array::<2>().await.unwrap();
     merging.read_chunk(NonZeroUsize::MIN).await.unwrap();
-    merging.into_parts().1
+    merging.into_parts().merged
 }
 
 #[test]

@@ -463,7 +463,7 @@ async fn plans_limited<F: WriteLent<(), Report = (), Error = !>>(
     for plan in plans {
         kinds.push(kind(plan_through(&mut limited, wanted, *plan).await));
     }
-    (kinds, limited.into_parts().1)
+    (kinds, limited.into_parts().budget)
 }
 
 #[call(sync)]

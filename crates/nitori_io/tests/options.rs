@@ -10,7 +10,7 @@ use core::{
 use nitori_call::{ReceiverAccess, call, family_receiver};
 use nitori_io::{
     Combine, Filled, LentBuffer, LentOutcome, LentSegment, WriteSegment,
-    adapters::{FixedOptions, MapOptions, MappedOptions, OptionsMapping},
+    adapters::{FixedOptions, MapOptions, MappedOptions, MappedOptionsParts, OptionsMapping},
     calls::{CopyTotal, WriteAllError, copy_chunks},
     prelude::*,
 };
@@ -218,7 +218,7 @@ fn an_options_mapping_writes_each_segment_with_the_options_it_maps_it_to() {
     let mut sink = MappedOptions::new(Recorder::default(), ByArrival::default());
     sink.sync_write_all_unpin(&b"abc"[..], Early(true)).unwrap();
     sink.sync_write_all_unpin(&b"d"[..], Early(false)).unwrap();
-    let (recorder, _) = sink.into_parts();
+    let recorder = sink.into_parts().io;
     assert_eq!(
         recorder.segments,
         [
@@ -235,7 +235,7 @@ fn an_options_mapping_maps_the_options_a_fill_returns() {
     lend(&mut sink, b"ab", Some(Early(true)));
     lend(&mut sink, b"c", Some(Early(false)));
     lend(&mut sink, b"d", None::<Early>);
-    let (recorder, _) = sink.into_parts();
+    let recorder = sink.into_parts().io;
     assert_eq!(
         recorder.segments,
         [segment(b"ab", Priority(0)), segment(b"c", Priority(9))]
@@ -256,6 +256,25 @@ impl MapOptions<Early> for Counted {
 }
 
 #[test]
+fn a_borrowed_mapping_retains_state_between_wrappers() {
+    let mut recorder = Recorder::default();
+    let mut mapping = Counted {
+        calls: 0,
+        priority: Priority(2),
+    };
+    for (index, bytes) in [b"ab".as_slice(), b"c".as_slice()].into_iter().enumerate() {
+        let mut sink = MappedOptions::new(&mut recorder, &mut mapping);
+        sink.sync_write_all_unpin(bytes, Early(true)).unwrap();
+        assert_eq!(sink.map().calls, index + 1);
+    }
+    assert_eq!(mapping.calls, 2);
+    assert_eq!(
+        recorder.segments,
+        [segment(b"ab", Priority(2)), segment(b"c", Priority(2))]
+    );
+}
+
+#[test]
 fn an_options_mapping_is_called_only_for_a_fill_that_returns_options() {
     let counted = Counted {
         calls: 0,
@@ -270,7 +289,10 @@ fn an_options_mapping_is_called_only_for_a_fill_that_returns_options() {
         lend(&mut sink, b"c", None::<Early>),
         LentOutcome::GaveUp(())
     ));
-    let (recorder, counted) = sink.into_parts();
+    let MappedOptionsParts {
+        io: recorder,
+        map: counted,
+    } = sink.into_parts();
     assert_eq!(counted.calls, 1);
     assert_eq!(recorder.segments, [segment(b"ab", Priority(2))]);
 }
@@ -294,7 +316,10 @@ fn an_options_mapping_is_called_on_every_write_a_waiting_one_included() {
     assert!(
         matches!(written, Poll::Ready(Ok(Some(WriteSegment { count, .. }))) if count.get() == 2)
     );
-    let (recorder, counted) = sink.into_parts();
+    let MappedOptionsParts {
+        io: recorder,
+        map: counted,
+    } = sink.into_parts();
     assert_eq!(counted.calls, 2);
     assert_eq!(recorder.segments, [segment(b"ab", Priority(2))]);
 }
@@ -305,7 +330,7 @@ fn fixed_options_write_every_segment_with_them_whatever_it_is_written_with() {
     sink.sync_write_all_unpin(&b"ab"[..], ()).unwrap();
     sink.sync_write_all_unpin(&b"c"[..], Early(true)).unwrap();
     lend(&mut sink, b"d", Some(Early(false)));
-    let (recorder, _) = sink.into_parts();
+    let recorder = sink.into_parts().io;
     assert_eq!(
         recorder.segments,
         [
@@ -349,7 +374,7 @@ impl Write<NoClone> for NonCloningSink {
 fn fixed_options_do_not_need_to_clone_options_for_ordinary_writes() {
     let mut sink = MappedOptions::new(NonCloningSink::default(), FixedOptions(NoClone(7)));
     sink.sync_write_all_unpin(&b"abc"[..], ()).unwrap();
-    let (sink, _) = sink.into_parts();
+    let sink = sink.into_parts().io;
     assert_eq!(
         sink.segments,
         [
@@ -446,5 +471,29 @@ fn the_mapping_applies_when_polling_a_view_directly() {
         assert!(matches!(written, Poll::Ready(Ok(Some(segment))) if segment.count.get() == 2));
     }
     assert_eq!(input, b"z");
-    assert_eq!(sink.into_parts().0.segments, [segment(b"xy", Priority(3))]);
+    assert_eq!(sink.into_parts().io.segments, [segment(b"xy", Priority(3))]);
+}
+
+#[test]
+fn a_mapping_can_wrap_an_inner_view_directly() {
+    use core::pin::pin;
+    use nitori_call::Receiver;
+
+    let mut recorder = Recorder::default();
+    let mut mapping = Counted {
+        calls: 0,
+        priority: Priority(4),
+    };
+    let mut input = b"xyz".as_slice();
+    let view = Pin::new(&mut recorder).view();
+    let written = <OptionsMapping<Recorder<Priority>, Counted> as Write<Early>>::poll_write(
+        pin!(MappedOptions::new(view, &mut mapping)),
+        &mut Context::from_waker(Waker::noop()),
+        &mut input,
+        &Early(true),
+    );
+    assert!(matches!(written, Poll::Ready(Ok(Some(segment))) if segment.count.get() == 2));
+    assert_eq!(input, b"z");
+    assert_eq!(mapping.calls, 1);
+    assert_eq!(recorder.segments, [segment(b"xy", Priority(4))]);
 }

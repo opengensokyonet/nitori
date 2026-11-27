@@ -1,5 +1,5 @@
 //! Replacing IO in structs, enums, and nested values.
-use nitori_codec::staged::{MapIo, Vacant, take_io};
+use nitori_codec::staged::{IoParts, MapIo, Vacant, take_io};
 
 #[derive(Debug, PartialEq, Eq, MapIo)]
 #[map_io(S)]
@@ -27,8 +27,15 @@ fn extracting_io_keeps_the_other_fields() {
         io: vec![1, 2],
         bytes: *b"ab",
     };
-    let (vacant, io): (Record<'_, Vacant, 2>, _) = take_io(record);
+    let IoParts { value: vacant, io }: IoParts<Record<'_, Vacant, 2>, _> = take_io(record);
     assert_eq!(io, [1, 2]);
+    let same_value = take_io(Record {
+        name: "data",
+        io: (),
+        bytes: *b"ab",
+    })
+    .value;
+    assert_eq!(vacant, same_value);
     let record = vacant.map_io(|_| "replacement");
     assert_eq!(
         record,
@@ -62,7 +69,7 @@ fn mapping_preserves_the_enum_variant_and_nested_fields() {
             3,
         ),
     );
-    let (vacant, io): (Envelope<Event<Vacant>>, _) = take_io(event);
+    let IoParts { value: vacant, io }: IoParts<Envelope<Event<Vacant>>, _> = take_io(event);
     assert_eq!(io, b"xy");
     let mapped = vacant.map_io(|_| vec![1, 2]);
     assert_eq!(

@@ -66,12 +66,13 @@ Implement `staged::MapIo` for the value that holds the IO. The derive
 supports structs and enums. Use `#[map_io(S)]` when `S` is the IO type
 parameter, or `#[map_io(within = P)]` when a field of type `P: MapIo`
 holds it. Each variant keeps the IO in one field. `take_io(value)`
-returns the value with a `Vacant` slot and the IO it held.
+returns `IoParts { value, io }` with a `Vacant` slot in `value` and the
+extracted IO in `io`.
 `MapIo::map_io` can fill that slot with another IO object.
 
 ```rust
 use nitori_call::ReceiverAccess;
-use nitori_codec::{prelude::*, staged::{MapIo, take_io}};
+use nitori_codec::{prelude::*, staged::{IoParts, MapIo, take_io}};
 use nitori_io::{Read, calls::ReadArrayError};
 
 #[derive(MapIo)]
@@ -92,7 +93,7 @@ impl<S: ReceiverAccess<Family: Read<Metadata = ()>>> DecodeFrom<S> for Tagged<S>
 
 async fn read_tag() {
     let tagged = Tagged::decode_from(b"abc".as_slice()).await.unwrap();
-    let (tagged, mut source) = take_io(tagged);
+    let IoParts { value: tagged, io: mut source } = take_io(tagged);
     assert_eq!(tagged.tag, b'a');
     assert_eq!(source.sync_decode_unpin::<[u8; 2]>().unwrap(), *b"bc");
 }
@@ -238,7 +239,7 @@ let header = Header {
 // A vector takes no options: give it `()` for every segment.
 let mut output = MappedOptions::new(Vec::new(), FixedOptions(()));
 output.sync_encode_unpin(header).unwrap();
-assert_eq!(output.into_parts().0, b"\x01\x00\x05");
+assert_eq!(output.into_parts().io, b"\x01\x00\x05");
 ```
 
 ## Encoded length

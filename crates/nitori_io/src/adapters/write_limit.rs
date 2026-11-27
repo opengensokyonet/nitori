@@ -17,11 +17,25 @@ use nitori_call::{
 type WritePoll<R, E> = Poll<Result<Option<WriteSegment<R>>, E>>;
 type LendPoll<R, T, A, E> = Poll<Result<Option<LentOutcome<R, T, A>>, E>>;
 
+/// The inner IO and the remaining write budget returned by [`WriteLimit::into_parts`].
+#[derive(Debug)]
+pub struct WriteLimitParts<IO, B> {
+    /// The wrapped IO.
+    pub io: IO,
+    /// The stored value or borrow of the remaining write budget.
+    pub budget: B,
+}
+
 pin_project_lite::pin_project! {
     /// A sink that accepts up to a byte budget, shared by ordinary and lent writes.
     ///
-    /// At zero it accepts no bytes without polling the sink. The budget is spent
-    /// only on accepted writes and persists between calls on a wrapped receiver.
+    /// At zero it accepts no bytes without polling the sink. With input
+    /// remaining, [`write_all`](crate::calls::write_all) reports this as zero
+    /// progress. With budget remaining, requests reach the inner sink,
+    /// including empty ones.
+    /// The budget is spent only on accepted writes and persists between calls
+    /// on a wrapped receiver. The wrapper exposes only [`Write`] and
+    /// [`WriteLent`].
     pub struct WriteLimit<IO, B = usize> {
         #[pin]
         io: IO,
@@ -44,14 +58,32 @@ impl<'q, IO> WriteLimit<IO, &'q mut usize> {
 }
 
 impl<IO, B> WriteLimit<IO, B> {
-    /// Borrow the inner IO and the budget storage.
-    pub const fn get_ref(&self) -> (&IO, &B) {
-        (&self.io, &self.budget)
+    /// Borrow the inner IO.
+    pub const fn get_ref(&self) -> &IO {
+        &self.io
     }
 
-    /// Return the inner IO and the remaining budget or its borrow.
-    pub fn into_parts(self) -> (IO, B) {
-        (self.io, self.budget)
+    /// Borrow the inner IO mutably.
+    pub fn get_mut(&mut self) -> &mut IO {
+        &mut self.io
+    }
+
+    /// Borrow the pinned inner IO.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut IO> {
+        self.project().io
+    }
+
+    /// Borrow the remaining write budget.
+    pub const fn budget(&self) -> &B {
+        &self.budget
+    }
+
+    /// Return the inner IO and the remaining write budget.
+    pub fn into_parts(self) -> WriteLimitParts<IO, B> {
+        WriteLimitParts {
+            io: self.io,
+            budget: self.budget,
+        }
     }
 }
 

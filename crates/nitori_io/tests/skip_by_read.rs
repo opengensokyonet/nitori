@@ -278,7 +278,8 @@ fn a_cancelled_skip_by_reading_leaves_a_budget_above_it_in_step() {
         assert!(matches!(poll, CallPoll::Pending));
     }
     drop(call);
-    let (inner, budget) = framed.get_ref();
+    let inner = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!(inner.get_ref().bytes, b"bcdef");
     assert_eq!(budget, &4);
     let mut call = pin!(Call::<Framed<'_>, _>::new(SkipExact::new(4)));
@@ -294,7 +295,8 @@ fn a_cancelled_skip_by_reading_leaves_a_budget_above_it_in_step() {
         }
     };
     assert!(result.is_ok());
-    let (inner, budget) = framed.get_ref();
+    let inner = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!((inner.get_ref().bytes, budget), (&b"f"[..], &0));
 }
 
@@ -320,7 +322,8 @@ fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
         assert!(matches!(poll, CallPoll::Pending));
     }
     drop(call);
-    let (inner, budget) = framed.get_ref();
+    let inner = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!(inner.get_ref().bytes, b"bcdef");
     assert_eq!(budget, &4);
     let mut call = pin!(Call::<ChunkFramed<'_>, _>::new(SkipExact::new(4)));
@@ -336,7 +339,8 @@ fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
         }
     };
     assert!(result.is_ok());
-    let (inner, budget) = framed.get_ref();
+    let inner = framed.get_ref();
+    let budget = framed.quota();
     assert_eq!((inner.get_ref().bytes, budget), (&b"f"[..], &0));
 }
 
@@ -356,7 +360,7 @@ async fn skip_by_reading_on_composed<F: Read<Metadata: nitori_io::Combine>>(
     let mut skipping = ReadSkip::new(&mut budget);
     let skipped = skipping.skip_exact(length).await;
     let read = skipping.read_array::<1>().await.map(|read| read.value);
-    (skipped, read, budget.into_parts().1)
+    (skipped, read, budget.into_parts().quota)
 }
 
 /// As above, by chunks.
@@ -373,7 +377,7 @@ async fn skip_by_chunks_on_composed<F: ReadChunk<Metadata: nitori_io::Combine>>(
     let mut skipping = ReadChunkSkip::new(&mut budget);
     let skipped = skipping.skip_exact(length).await;
     let read = skipping.read_array::<1>().await.map(|read| read.value);
-    (skipped, read, budget.into_parts().1)
+    (skipped, read, budget.into_parts().quota)
 }
 
 #[test]
@@ -473,9 +477,11 @@ fn nested_skip_wrappers_keep_send_for_borrowed_sources() {
         pin!(require_send(chunk_reader.skip_unpin(2u8))).poll(&mut cx),
         Poll::Ready(Ok(Some(2)))
     );
-    assert_eq!(reader.into_inner().into_parts(), (b"cd".as_slice(), 1));
-    assert_eq!(
+    for parts in [
+        reader.into_inner().into_parts(),
         chunk_reader.into_inner().into_parts(),
-        (b"cd".as_slice(), 1)
-    );
+    ] {
+        assert_eq!(parts.io, b"cd");
+        assert_eq!(parts.quota, 1);
+    }
 }

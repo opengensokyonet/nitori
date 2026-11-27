@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 use nitori_call::{AccessMode, AccessOperation, Receiver, ReceiverAccess, call};
 use nitori_codec::{
     prelude::*,
-    staged::{MapIo, MapOk, Vacant, take_io},
+    staged::{IoParts, MapIo, MapOk, Vacant, take_io},
 };
 use nitori_io::{
     Read, Write,
@@ -113,7 +113,10 @@ fn the_same_entry_points_on_a_slot_and_on_a_receiver() {
     assert_eq!(io, b"z");
 
     let mut output = Vec::new();
-    let (held, output) = take_io(send(encode_on_receiver(&mut output)));
+    let IoParts {
+        value: held,
+        io: output,
+    } = take_io(send(encode_on_receiver(&mut output)));
     assert_eq!(held.tag, b'x');
     output.sync_encode_unpin(*b"y").unwrap();
     assert_eq!(output, b"xy");
@@ -138,8 +141,8 @@ where
         );
         // Store the projected decode future in MapOk so rustc can prove Send.
         MapOk::new(future, |value: D::With<Bounded<'_, 'b, A>>| {
-            let (value, payload) = take_io(value);
-            (value, payload.into_parts().1)
+            let IoParts { value, io: payload } = take_io(value);
+            (value, payload.into_parts().quota)
         })
     }
 }

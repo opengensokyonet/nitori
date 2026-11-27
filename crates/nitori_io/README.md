@@ -249,8 +249,8 @@ or sink. Call them with an access inside an operation or with a receiver
 outside it. At zero, a read reports EOF and a write accepts no bytes,
 which `write_all` reports as zero progress. Both answer at the boundary
 without polling the inner view. The budget survives Pending and
-cancellation. `into_parts` returns the inner IO and what remains, and
-`borrowing(io, &mut budget)` updates a budget stored by the caller.
+cancellation. `into_parts` returns `io` and the remaining `quota` or `budget` in a
+struct. `borrowing(io, &mut budget)` updates a budget stored by the caller.
 
 `ReadLimit<IO, L = usize, B = L>` uses a logical quota of type `L`. All
 unsigned integer widths, `Infinite`, and custom quotas are supported. A
@@ -287,7 +287,7 @@ async fn write_bounded<F: Write<(), Report = ()>, A: ReceiverAccess<Family = F>>
 ) -> (usize, Result<(), WriteAllError<F::Error>>) {
     let mut bounded = WriteLimit::new(io, room);
     let result = bounded.write_all(payload, ()).await;
-    (bounded.into_parts().1, result)
+    (bounded.into_parts().budget, result)
 }
 
 fn main() {
@@ -458,7 +458,7 @@ async fn early_pair<F: Read<Metadata = Early>>(
     let value = pair(&mut merging).await?;
     Ok(Value {
         value,
-        metadata: merging.into_parts().1,
+        metadata: merging.into_parts().merged,
     })
 }
 ```
@@ -491,7 +491,7 @@ it.
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use bytes::Buf;
-use nitori_call::{family_receiver};
+use nitori_call::family_receiver;
 use nitori_io::{WriteSegment, adapters::{MapOptions, MappedOptions}, prelude::*};
 use std::{num::NonZeroUsize, pin::Pin, task::{Context, Poll}};
 
@@ -543,14 +543,14 @@ let urgency = ByArrival { early: Priority(0), late: Priority(7) };
 let mut sink = MappedOptions::new(Sent::default(), urgency);
 sink.sync_write_all_unpin(&b"ab"[..], Early(true)).unwrap();
 sink.sync_write_all_unpin(&b"c"[..], Early(false)).unwrap();
-let (sent, _) = sink.into_parts();
+let sent = sink.into_parts().io;
 assert_eq!(sent.0, [(b"ab".to_vec(), Priority(0)), (b"c".to_vec(), Priority(7))]);
 ```
 
 `MappedOptions::new(sink, FixedOptions(o))` gives every segment the sink
 options `o`, so the wrapped sink implements `Write<M>` for every `M`,
-including `()`. `MappedOptions` owns its mapping and wraps a view, receiver,
-or access. It supports `Write` and `WriteLent` when the sink does. The mapping is called on every write of a segment, a write that
+including `()`. `MappedOptions` can own its mapping or borrow it mutably
+and can wrap a view, receiver, or access. It supports `Write` and `WriteLent` when the sink does. The mapping is called on every write of a segment, a write that
 waits included; a fill's options are mapped when it returns `Filled`, not
 when it gives up, and the sink
 gets a clone of the options the mapping lends, so lending needs

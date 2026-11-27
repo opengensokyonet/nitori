@@ -11,7 +11,6 @@ use std::{
     collections::VecDeque,
     convert::Infallible,
     future::{Future, poll_fn},
-    marker::PhantomPinned,
     ops::ControlFlow,
     pin::{Pin, pin},
     rc::Rc,
@@ -90,29 +89,24 @@ fn composition_keeps_a_child_inside_its_record() {
     ));
 }
 
-/// Composition state that must stay pinned while composed.
-struct PinnedLimit {
-    limit: usize,
-    _pinned: PhantomPinned,
-}
+/// The read adapter borrows a quota owned by the operation. The projection
+/// receives an ordinary mutable borrow of that quota.
 #[call]
-async fn read_pinned_word(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
-    let state = pin!(PinnedLimit {
-        limit: 1,
-        _pinned: PhantomPinned,
-    });
-    // SAFETY: the quota is borrowed in place while the state stays pinned.
-    let quota = unsafe { state.map_unchecked_mut(|state| &mut state.limit) }.get_mut();
-    read_array::<2, _>(&mut BoundedRead(io, quota)).await
+async fn read_word_with_borrowed_quota(
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
+) -> (Pair, usize) {
+    let mut quota = 1;
+    let result = read_array::<2, _>(&mut BoundedRead(io, &mut quota)).await;
+    (result, quota)
 }
 
 #[test]
-fn pinned_state_composes_through_a_pin() {
+fn a_projected_read_updates_the_borrowed_quota() {
     let mut input = b"AB".as_slice();
-    let mut call = pin!(Call::new(ReadPinnedWord::new()));
+    let mut call = pin!(Call::new(ReadWordWithBorrowedQuota::new()));
     assert!(matches!(
         poll(call.as_mut(), Pin::new(&mut input)),
-        Poll::Ready(Err(ReadError::Incomplete { completed: 1 }))
+        Poll::Ready((Err(ReadError::Incomplete { completed: 1 }), 0))
     ));
     assert_eq!(input, b"B");
 }

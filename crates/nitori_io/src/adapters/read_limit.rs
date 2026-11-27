@@ -18,13 +18,24 @@ use nitori_call::{
 type ReadPoll<E, M> = Poll<Result<Option<ReadSegment<M>>, E>>;
 type ChunkPoll<C, E, M> = Poll<Result<Option<ChunkSegment<C, M>>, E>>;
 
+/// The inner IO and the remaining read quota returned by [`ReadLimit::into_parts`].
+#[derive(Debug)]
+pub struct ReadLimitParts<IO, B> {
+    /// The wrapped IO.
+    pub io: IO,
+    /// The stored value or borrow of the remaining read quota.
+    pub quota: B,
+}
+
 pin_project_lite::pin_project! {
     /// A source that lets reads and skips consume up to a byte quota.
     ///
     /// A zero quota answers EOF without polling the source. While the quota
-    /// remains positive, even empty requests reach the source. Exact length
-    /// queries report the smaller of the quota and the source's exact length.
-    /// The quota type is independent of the size of an individual read.
+    /// remains positive, even empty requests reach the source. If the source
+    /// implements [`ExactLen`] and its length can be compared with the quota,
+    /// a length query reports their minimum.
+    /// The quota type is independent of the size of an individual read. Use a
+    /// typed literal such as `6u8` when the quota type is otherwise unknown.
     pub struct ReadLimit<IO, L = usize, B = L> {
         #[pin]
         io: IO,
@@ -56,14 +67,32 @@ impl<'q, IO, L> ReadLimit<IO, L, &'q mut L> {
 }
 
 impl<IO, L, B> ReadLimit<IO, L, B> {
-    /// Borrow the inner IO and the quota storage.
-    pub const fn get_ref(&self) -> (&IO, &B) {
-        (&self.io, &self.quota)
+    /// Borrow the inner IO.
+    pub const fn get_ref(&self) -> &IO {
+        &self.io
     }
 
-    /// Return the inner IO and the remaining quota or its borrow.
-    pub fn into_parts(self) -> (IO, B) {
-        (self.io, self.quota)
+    /// Borrow the inner IO mutably.
+    pub fn get_mut(&mut self) -> &mut IO {
+        &mut self.io
+    }
+
+    /// Borrow the pinned inner IO.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut IO> {
+        self.project().io
+    }
+
+    /// Borrow the remaining read quota.
+    pub const fn quota(&self) -> &B {
+        &self.quota
+    }
+
+    /// Return the inner IO and the remaining read quota.
+    pub fn into_parts(self) -> ReadLimitParts<IO, B> {
+        ReadLimitParts {
+            io: self.io,
+            quota: self.quota,
+        }
     }
 }
 
@@ -217,6 +246,13 @@ impl<C, M: Min<C, Output = C>, L: Min<C, Output = C>> Min<C> for BothMaxima<M, L
     }
 }
 
+/// Skip up to the smaller of the caller's maximum and the read quota, using
+/// the inner source's count type. At the quota boundary, return EOF without
+/// polling the inner source.
+///
+/// # Panics
+///
+/// Panics if the inner source reports a count greater than the allowed maximum.
 impl<F: Skip, L> Skip for Limited<F, L>
 where
     L: Clone

@@ -16,6 +16,15 @@ use nitori_call::{
 type ReadPoll<E, M> = Poll<Result<Option<ReadSegment<M>>, E>>;
 type ChunkPoll<C, E, M> = Poll<Result<Option<ChunkSegment<C, M>>, E>>;
 
+/// The inner IO and the accumulated metadata returned by [`MergedMetadata::into_parts`].
+#[derive(Debug)]
+pub struct MergedMetadataParts<IO, B> {
+    /// The wrapped IO.
+    pub io: IO,
+    /// The stored value or borrow of the accumulated metadata.
+    pub merged: B,
+}
+
 pin_project_lite::pin_project! {
     /// A source that combines the metadata from successful reads and reports `()`.
     ///
@@ -54,16 +63,32 @@ impl<'m, IO, M> MergedMetadata<IO, M, &'m mut M> {
 }
 
 impl<IO, M, B> MergedMetadata<IO, M, B> {
-    fn io_pin(self: Pin<&mut Self>) -> Pin<&mut IO> {
+    /// Borrow the inner IO.
+    pub const fn get_ref(&self) -> &IO {
+        &self.io
+    }
+
+    /// Borrow the inner IO mutably.
+    pub fn get_mut(&mut self) -> &mut IO {
+        &mut self.io
+    }
+
+    /// Borrow the pinned inner IO.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut IO> {
         self.project().io
     }
-    /// Borrow the inner IO and the accumulated metadata or its borrow.
-    pub const fn get_ref(&self) -> (&IO, &B) {
-        (&self.io, &self.merged)
+
+    /// Borrow the accumulated metadata.
+    pub const fn merged(&self) -> &B {
+        &self.merged
     }
-    /// Return the inner IO and the accumulated metadata or its borrow.
-    pub fn into_parts(self) -> (IO, B) {
-        (self.io, self.merged)
+
+    /// Return the inner IO and the accumulated metadata.
+    pub fn into_parts(self) -> MergedMetadataParts<IO, B> {
+        MergedMetadataParts {
+            io: self.io,
+            merged: self.merged,
+        }
     }
     fn poll_read_with<O: ?Sized, E>(
         self: Pin<&mut Self>,

@@ -22,12 +22,24 @@ pub trait MapIo: Sized {
     type With<U>: MapIo<Io = U>;
     /// Replace the IO object, keeping the rest.
     ///
-    /// Call `f` exactly once with the IO object held by this value.
+    /// Implementations must call `f` exactly once with the held IO and keep
+    /// its result in the returned value. The [`MapIo`] derive follows this
+    /// contract, delegating to `MapIo::map_io` for a nested IO field.
     fn map_io<U>(self, f: impl FnOnce(Self::Io) -> U) -> Self::With<U>;
 }
 
 /// The slot left by [`take_io`] or by a call returning a value that holds IO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Vacant(());
+
+/// The parts returned by [`take_io`].
+#[derive(Debug)]
+pub struct IoParts<V, IO> {
+    /// The value with a [`Vacant`] slot in place of its IO.
+    pub value: V,
+    /// The extracted IO.
+    pub io: IO,
+}
 
 /// `V` with its source taken out.
 struct Detached<V: MapIo>(V::With<Vacant>);
@@ -37,6 +49,10 @@ pin_project_lite::pin_project! {
     ///
     /// This stores the input future directly, including one returned through
     /// a generic associated type.
+    ///
+    /// # Panics
+    ///
+    /// Polling after the future returns [`Poll::Ready`] may panic.
     pub struct MapOk<Fut, M> { #[pin] fut: Fut, map: Option<M> }
 }
 impl<Fut, M> MapOk<Fut, M> {
@@ -53,7 +69,6 @@ impl<Fut: Future<Output = Result<T, E>>, T, U, E, M: FnOnce(T) -> U> Future for 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<U, E>> {
         let this = self.project();
         let value = ready!(this.fut.poll(cx))?;
-        // invariant: polled again only before it completes.
         Poll::Ready(Ok((this.map.take().expect("polled after completion"))(
             value,
         )))
@@ -137,15 +152,19 @@ where
 
 /// Extract the IO and leave a [`Vacant`] slot in the value.
 /// Use [`MapIo::map_io`] to fill the slot again.
-pub fn take_io<T: MapIo>(value: T) -> (T::With<Vacant>, T::Io) {
+///
+/// # Panics
+///
+/// Panics if the [`MapIo::map_io`] implementation returns without calling
+/// its mapping function.
+pub fn take_io<T: MapIo>(value: T) -> IoParts<T::With<Vacant>, T::Io> {
     let mut io = None;
-    let rest = value.map_io(|value| {
-        io = Some(value);
+    let value = value.map_io(|extracted| {
+        io = Some(extracted);
         Vacant(())
     });
-    // invariant: MapIo implementations call the map once.
-    (
-        rest,
-        io.expect("MapIo::map_io must call its mapping function"),
-    )
+    IoParts {
+        value,
+        io: io.expect("MapIo::map_io must call its mapping function"),
+    }
 }

@@ -436,7 +436,7 @@ async fn lend_limited<F: WriteLent<(), Report = (), Error = !>>(
     for _ in 0..rounds {
         lends.push(lend_through(&mut limited, wanted, b"abcdefgh", called).await);
     }
-    (lends, limited.into_parts().1)
+    (lends, limited.into_parts().budget)
 }
 
 #[test]

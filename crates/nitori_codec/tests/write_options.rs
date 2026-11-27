@@ -193,7 +193,7 @@ fn a_decoded_composite_is_written_with_options_mapped_from_its_metadata() {
         },
     );
     sink.sync_encode_unpin(pair).unwrap();
-    let (sink, _) = sink.into_parts();
+    let sink = sink.into_parts().io;
     assert_eq!(sink.segments, [segment(b"a", 0), segment(b"b", 9)]);
 }
 
@@ -229,7 +229,7 @@ fn a_buffered_payload_writes_each_segment_with_options_mapped_from_its_metadata(
     };
     let total = (&mut source, &mut sink).sync_write_payload_unpin();
     assert_eq!((total.count, total.metadata), (3, ZeroRtt(true)));
-    let (sink, _) = sink.into_parts();
+    let sink = sink.into_parts().io;
     assert_eq!(
         sink.segments,
         [segment(b"a", 0), segment(b"b", 9), segment(b"c", 9)]
@@ -249,7 +249,7 @@ async fn tagged<F: Write<Priority, Report = (), Error = !>>(
 fn a_base_value_is_written_with_fixed_options() {
     let mut sink = MappedOptions::new(Prioritized::default(), FixedOptions(Priority(4)));
     sink.sync_encode_unpin(*b"abc").unwrap();
-    let (mut sink, _) = sink.into_parts();
+    let mut sink = sink.into_parts().io;
     sink.sync_tagged_unpin(Priority(6));
     assert_eq!(
         sink.segments,

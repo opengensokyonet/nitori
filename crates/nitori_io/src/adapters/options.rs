@@ -29,6 +29,14 @@ pub trait MapOptions<M> {
     fn map_options<'a>(&'a mut self, options: &'a M) -> &'a Self::Options;
 }
 
+impl<M, P: MapOptions<M> + ?Sized> MapOptions<M> for &mut P {
+    type Options = P::Options;
+
+    fn map_options<'a>(&'a mut self, options: &'a M) -> &'a Self::Options {
+        P::map_options(*self, options)
+    }
+}
+
 /// Every segment gets these options, whatever it is written with.
 ///
 /// Used with [`MappedOptions`] on a sink of [`Write<O>`](Write), it makes a
@@ -42,8 +50,17 @@ impl<M, O> MapOptions<M> for FixedOptions<O> {
     }
 }
 
+/// The inner IO and the options mapping returned by [`MappedOptions::into_parts`].
+#[derive(Debug)]
+pub struct MappedOptionsParts<IO, P> {
+    /// The wrapped IO.
+    pub io: IO,
+    /// The stored value or borrow of the options mapping.
+    pub map: P,
+}
+
 pin_project_lite::pin_project! {
-    /// A sink that writes with the options selected by its owned mapping.
+    /// A sink that writes with the options selected by its mapping.
     ///
     /// A `P: MapOptions<M, Options = O>` adapts a sink of [`Write<O>`](Write)
     /// to one of [`Write<M>`](Write). Use [`FixedOptions`] to give every segment
@@ -60,13 +77,32 @@ impl<IO, P> MappedOptions<IO, P> {
     pub const fn new(io: IO, map: P) -> Self {
         Self { io, map }
     }
-    /// Borrow the inner IO and the mapping.
-    pub const fn get_ref(&self) -> (&IO, &P) {
-        (&self.io, &self.map)
+    /// Borrow the inner IO.
+    pub const fn get_ref(&self) -> &IO {
+        &self.io
     }
-    /// Return the inner IO and the mapping.
-    pub fn into_parts(self) -> (IO, P) {
-        (self.io, self.map)
+
+    /// Borrow the inner IO mutably.
+    pub fn get_mut(&mut self) -> &mut IO {
+        &mut self.io
+    }
+
+    /// Borrow the pinned inner IO.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut IO> {
+        self.project().io
+    }
+
+    /// Borrow the options mapping.
+    pub const fn map(&self) -> &P {
+        &self.map
+    }
+
+    /// Return the inner IO and the options mapping.
+    pub fn into_parts(self) -> MappedOptionsParts<IO, P> {
+        MappedOptionsParts {
+            io: self.io,
+            map: self.map,
+        }
     }
 }
 

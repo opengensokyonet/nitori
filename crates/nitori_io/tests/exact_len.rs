@@ -104,7 +104,7 @@ where
         before,
         after_byte,
         query(&mut src).await,
-        src.into_parts().1,
+        src.into_parts().quota,
     )
 }
 
@@ -169,7 +169,7 @@ where
             .map(|segment| segment.count.get()),
         Some(2)
     );
-    (before, query(&mut inner).await, inner.into_parts().1)
+    (before, query(&mut inner).await, inner.into_parts().quota)
 }
 #[test]
 fn infinite_source_and_wide_quota_account_for_actual_short_reads() {
@@ -258,7 +258,7 @@ fn a_query_waits_for_the_length_and_reports_why_it_cannot_be_known() {
             finish(limited.query_outcome_unpin()),
             (outcome.map(|_| 3u8), 1)
         );
-        assert_eq!(limited.into_parts().1, 3);
+        assert_eq!(limited.into_parts().quota, 3);
 
         let mut chunked = Chunked::new(receiver(), NonZeroUsize::MIN);
         assert_eq!(finish(chunked.query_outcome_unpin()), (outcome, 1));
@@ -376,8 +376,8 @@ where
     let mut large = ReadLimit::new(&mut small, 1u64 << 40);
     large.read_array::<2>().await.unwrap();
     let large_len = query(&mut large).await;
-    assert_eq!(large.into_parts().1, (1u64 << 40) - 2);
-    let small_left = small.into_parts().1;
+    assert_eq!(large.into_parts().quota, (1u64 << 40) - 2);
+    let small_left = small.into_parts().quota;
     (
         initial,
         small_len,
@@ -450,7 +450,9 @@ where
 {
     let mut limited = ReadLimit::new(&mut *io, OpaqueQuota(3));
     limited.read_array::<1>().await.unwrap();
-    (query(&mut limited).await.0, limited.into_parts().1.0)
+    let OpaqueQuota(remaining) = query(&mut limited).await;
+    let OpaqueQuota(quota) = limited.into_parts().quota;
+    (remaining, quota)
 }
 
 #[test]

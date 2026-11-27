@@ -169,8 +169,8 @@ where
     let result = copy_chunks(&mut limited_source, &mut limited_sink, chunk).await;
     (
         result,
-        limited_source.into_parts().1,
-        limited_sink.into_parts().1,
+        limited_source.into_parts().quota,
+        limited_sink.into_parts().budget,
     )
 }
 #[call(sync)]
@@ -194,8 +194,8 @@ where
     let result = copy_into_lent(&mut limited_source, &mut limited_sink, chunk).await;
     (
         result,
-        limited_source.into_parts().1,
-        limited_sink.into_parts().1,
+        limited_source.into_parts().quota,
+        limited_sink.into_parts().budget,
     )
 }
 #[call(sync)]
@@ -219,8 +219,8 @@ where
     let result = copy_buffered(&mut limited_source, &mut limited_sink, buffer).await;
     (
         result,
-        limited_source.into_parts().1,
-        limited_sink.into_parts().1,
+        limited_source.into_parts().quota,
+        limited_sink.into_parts().budget,
     )
 }
 

@@ -2,7 +2,7 @@
 // the call unchanged. `with` lets the wrapper adjust the call via a helper.
 macro_rules! forward {
     (@call pass; $host:ident, $cx:ident, ($($arg:expr),*), $closure:expr) => {
-        ($closure)($host.io_pin(), $cx, $($arg),*)
+        ($closure)($host.get_pin_mut(), $cx, $($arg),*)
     };
     (@call with $h:ident; $host:ident, $cx:ident, ($($arg:expr),*), $closure:expr) => {
         $host.$h($cx, $($arg,)* $closure)

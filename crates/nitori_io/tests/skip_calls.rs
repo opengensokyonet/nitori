@@ -71,7 +71,8 @@ fn skips_to_the_end() {
     assert!(input.is_empty());
     let mut framed = ReadLimit::new(&b"abcdef"[..], 4u8);
     assert!(framed.sync_skip_to_end_unpin().is_ok());
-    assert_eq!(framed.get_ref(), (&&b"ef"[..], &0));
+    assert_eq!(framed.get_ref(), &&b"ef"[..]);
+    assert_eq!(framed.quota(), &0);
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn both_operations_run_inside_an_operation() {
 fn skipping_to_the_end_offers_an_infinite_maximum() {
     let mut input = ReadLimit::new(&b"abc"[..], Infinite);
     assert!(input.sync_skip_to_end_unpin().is_ok());
-    assert!(input.get_ref().0.is_empty());
+    assert!(input.get_ref().is_empty());
 }
 
 /// Reads its bytes, then fails.

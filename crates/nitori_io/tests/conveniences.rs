@@ -64,7 +64,7 @@ async fn read_limited<A: ReceiverAccess<Family: Read>>(
             Err(error) => break Err(error),
         }
     };
-    (limited.into_parts().1, result)
+    (limited.into_parts().quota, result)
 }
 
 #[test]
@@ -145,7 +145,7 @@ async fn write_limited<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Co
 ) {
     let mut limited = WriteLimit::new(&mut *io, budget);
     let result = limited.write_all(payload, ()).await.map(|_| ());
-    (limited.into_parts().1, result)
+    (limited.into_parts().budget, result)
 }
 
 #[test]

@@ -80,7 +80,7 @@ fn a_receiver_and_its_view_share_the_same_write_budget() {
     }
 
     assert!(sink.sync_write_all_unpin(b"bc".as_slice(), ()).is_ok());
-    let (sink, _) = sink.into_parts();
+    let sink = sink.into_parts().io;
     assert_eq!(sink, b"abc");
     assert_eq!(remaining, 0);
 }
@@ -106,7 +106,7 @@ fn nested_write_wrappers_work_with_a_generic_send_receiver() {
             let mut mapped = MappedOptions::new(limited, FixedOptions(()));
             let result = mapped.write_all_unpin(bytes, false).await;
             assert_eq!(result.unwrap_err().completed(), 2);
-            assert_eq!(mapped.into_parts().0.into_parts().1, 0);
+            assert_eq!(*mapped.get_ref().budget(), 0);
         })
     }
 

@@ -37,7 +37,7 @@ type Slot<'a, R> = ReceiverSlot<'a, <R as Receiver>::Family>;
 /// struct Observe;
 /// impl<A: ReceiverAccess> AccessOperation<A> for Observe {
 ///     type Output = ();
-///     async fn run_on(self, _: &mut A) {}
+///     async fn run_on(self, _io: &mut A) {}
 /// }
 ///
 /// let mut receiver = Fixed(PhantomPinned);
@@ -46,8 +46,8 @@ type Slot<'a, R> = ReceiverSlot<'a, <R as Receiver>::Family>;
 pub trait AccessOperation<S, How: AccessMode = OnAccess> {
     /// What the operation gives.
     type Output;
-    /// Run the operation on `source`.
-    fn run_on(self, source: &mut S) -> impl Future<Output = Self::Output>;
+    /// Run the operation on `io`.
+    fn run_on(self, io: &mut S) -> impl Future<Output = Self::Output>;
 }
 
 /// The call that runs an [`AccessOperation`] on a receiver's slot.
@@ -83,7 +83,7 @@ where
     for<'s> Op: AccessOperation<Slot<'s, R>, Output = T>,
 {
     type Output = T;
-    async fn run_on(self, receiver: &mut R) -> T {
-        Pin::new(receiver).execute(OnSlot(self)).await
+    async fn run_on(self, io: &mut R) -> T {
+        Pin::new(io).execute(OnSlot(self)).await
     }
 }

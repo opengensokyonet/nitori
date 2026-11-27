@@ -18,6 +18,7 @@ edition = "2024"
 '''
 dependencies = [
     ("nitori_call", workspace / "crates" / "nitori_call"),
+    ("nitori_codec", workspace / "crates" / "nitori_codec"),
     ("nitori-data-frame-codec-example", root),
     ("nitori_io", workspace / "crates" / "nitori_io"),
 ]
