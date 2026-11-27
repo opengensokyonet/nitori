@@ -31,15 +31,15 @@
 //!
 //! ```compile_fail
 //! # use nitori_call::{Emitter, Operation, ReceiverFamily, ReceiverSlot, Start};
-//! # use std::{convert::Infallible, future::{Ready, ready}};
+//! # use std::future::{Ready, ready};
 //! struct Leak;
 //! impl<F: ReceiverFamily> Operation<F> for Leak {
 //!     type Output = ReceiverSlot<'static, F>;
-//!     type Yield = Infallible;
+//!     type Yield = !;
 //! }
 //! impl<'s, F: ReceiverFamily> Start<'s, ReceiverSlot<'s, F>> for Leak {
 //!     type Fut = Ready<ReceiverSlot<'static, F>>;
-//!     fn start(self, io: ReceiverSlot<'s, F>, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!     fn start(self, io: ReceiverSlot<'s, F>, _: Emitter<'s, !>) -> Self::Fut {
 //!         ready(io)
 //!     }
 //! }
@@ -50,16 +50,16 @@
 //!
 //! ```compile_fail
 //! # use nitori_call::{Call, Direct, Emitter, Operation, ReceiverSlot, Start};
-//! # use std::{convert::Infallible, future::{Ready, ready}};
+//! # use std::future::{Ready, ready};
 //! type F = Direct<Vec<u8>>;
 //! struct Keep<'x>(&'x mut Option<ReceiverSlot<'x, F>>);
 //! impl Operation<F> for Keep<'_> {
 //!     type Output = ();
-//!     type Yield = Infallible;
+//!     type Yield = !;
 //! }
 //! impl<'x> Start<'x, ReceiverSlot<'x, F>> for Keep<'x> {
 //!     type Fut = Ready<()>;
-//!     fn start(self, io: ReceiverSlot<'x, F>, _: Emitter<'x, Infallible>) -> Ready<()> {
+//!     fn start(self, io: ReceiverSlot<'x, F>, _: Emitter<'x, !>) -> Ready<()> {
 //!         *self.0 = Some(io);
 //!         ready(())
 //!     }
@@ -77,15 +77,15 @@
 //! ```should_panic
 //! #![feature(impl_trait_in_assoc_type)]
 //! # use nitori_call::{Call, Direct, DirectView, Emitter, Lend, Operation, ReceiverAccess, ReceiverFamily, Start};
-//! # use std::{convert::Infallible, future::{Future, poll_fn}, pin::{Pin, pin}, task::{Context, Poll, Waker}};
+//! # use std::{future::{Future, poll_fn}, pin::{Pin, pin}, task::{Context, Poll, Waker}};
 //! struct Elsewhere;
 //! impl<F: ReceiverFamily> Operation<F> for Elsewhere {
 //!     type Output = ();
-//!     type Yield = Infallible;
+//!     type Yield = !;
 //! }
 //! impl<'s, A: ReceiverAccess + Send> Start<'s, A> for Elsewhere {
 //!     type Fut = impl Future<Output = ()>;
-//!     fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!     fn start(self, mut io: A, _: Emitter<'s, !>) -> Self::Fut {
 //!         async move {
 //!             poll_fn(|cx| {
 //!                 let waker = cx.waker().clone();
@@ -124,15 +124,15 @@
 //! ```
 //! #![feature(impl_trait_in_assoc_type)]
 //! # use nitori_call::{Call, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start};
-//! # use std::{convert::Infallible, future::{Future, poll_fn}, rc::Rc, task::Poll};
+//! # use std::{future::{Future, poll_fn}, rc::Rc, task::Poll};
 //! struct Touch;
 //! impl<F: ReceiverFamily> Operation<F> for Touch {
 //!     type Output = ();
-//!     type Yield = Infallible;
+//!     type Yield = !;
 //! }
 //! impl<'s, A: ReceiverAccess> Start<'s, A> for Touch {
 //!     type Fut = impl Future<Output = ()>;
-//!     fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!     fn start(self, mut io: A, _: Emitter<'s, !>) -> Self::Fut {
 //!         async move { poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(()))).await }
 //!     }
 //! }
@@ -146,15 +146,15 @@
 //! ```compile_fail
 //! #![feature(impl_trait_in_assoc_type)]
 //! # use nitori_call::{Call, Direct, Emitter, Operation, ReceiverAccess, ReceiverFamily, Start};
-//! # use std::{convert::Infallible, future::{Future, poll_fn}, rc::Rc, task::Poll};
+//! # use std::{future::{Future, poll_fn}, rc::Rc, task::Poll};
 //! struct Hold;
 //! impl<F: ReceiverFamily> Operation<F> for Hold {
 //!     type Output = ();
-//!     type Yield = Infallible;
+//!     type Yield = !;
 //! }
 //! impl<'s, A: ReceiverAccess> Start<'s, A> for Hold {
 //!     type Fut = impl Future<Output = ()>;
-//!     fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+//!     fn start(self, mut io: A, _: Emitter<'s, !>) -> Self::Fut {
 //!         async move {
 //!             let kept = Rc::new(());
 //!             poll_fn(|cx| io.poll_access(cx, |_, _| Poll::Ready(()))).await;
@@ -448,7 +448,7 @@ pub mod __private {
     };
 
     /// An emitter for operations that emit nothing.
-    pub fn detached() -> crate::Emitter<'static, core::convert::Infallible> {
+    pub fn detached() -> crate::Emitter<'static, !> {
         crate::Emitter::detached()
     }
 

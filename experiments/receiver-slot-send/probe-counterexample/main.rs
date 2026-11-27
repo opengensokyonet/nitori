@@ -4,7 +4,7 @@
 #![feature(generic_const_exprs, const_type_name, impl_trait_in_assoc_type)]
 #![allow(incomplete_features)]
 use nitori_call::{Call, Direct, Emitter, Operation, ReceiverAccess, ReceiverSlot, Start};
-use std::{cell::Cell, convert::Infallible, future::Future, pin::Pin, rc::Rc, task::{Context, Poll}};
+use std::{cell::Cell, future::Future, pin::Pin, rc::Rc, task::{Context, Poll}};
 type F = Direct<()>;
 const fn real<A>() -> usize {
     let a = std::any::type_name::<A>().as_bytes();
@@ -45,14 +45,14 @@ impl<C: Choose> Future for Holding<C> {
 struct Op;
 impl Operation<F> for Op {
     type Output = ();
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A: ReceiverAccess<Family = F>> Start<'s, A> for Op
 where
     [(); real::<A>()]: Choose,
 {
     type Fut = Holding<[(); real::<A>()]>;
-    fn start(self, _: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, _: A, _: Emitter<'s, !>) -> Self::Fut {
         Holding(<[(); real::<A>()] as Choose>::make())
     }
 }

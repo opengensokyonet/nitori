@@ -3,7 +3,6 @@
 #![feature(impl_trait_in_assoc_type)]
 use bytes::{BufMut, Bytes, BytesMut};
 use core::{
-    convert::Infallible,
     num::NonZeroUsize,
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -167,7 +166,7 @@ impl Delayed<'_> {
     }
 }
 impl Read for Delayed<'_> {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -341,7 +340,7 @@ impl Skip for Failing {
 struct Overskip;
 nitori_call::family_receiver!(impl [] for Overskip);
 impl Read for Overskip {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
@@ -360,7 +359,7 @@ impl Skip for Overskip {
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
         maximum: M,
-    ) -> Poll<Result<Option<usize>, Infallible>>
+    ) -> Poll<Result<Option<usize>, !>>
     where
         Self: 'v,
     {

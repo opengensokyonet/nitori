@@ -10,7 +10,6 @@ use nitori_call::{
 use std::{
     cell::{Cell, RefCell, RefMut},
     collections::VecDeque,
-    convert::Infallible,
     future::Future,
     future::poll_fn,
     pin::{Pin, pin},
@@ -36,12 +35,12 @@ impl Pipe {
 }
 direct_receiver!(impl [] for Pipe);
 impl Read for Direct<Pipe> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -128,8 +127,8 @@ impl Wake for CallWaker {
     }
 }
 
-type Record = Result<usize, ReadError<Infallible>>;
-type Entry<'a> = Pin<Box<dyn DynCall<Direct<Pipe>, Infallible, Record> + 'a>>;
+type Record = Result<usize, ReadError<!>>;
+type Entry<'a> = Pin<Box<dyn DynCall<Direct<Pipe>, !, Record> + 'a>>;
 
 /// Calls sharing one locked pipe. Each pass polls at most `budget` ready
 /// calls without a view. Only if some ask for one does it take the lock, once,
@@ -237,7 +236,7 @@ impl Future for Executor<'_> {
 
 #[call]
 async fn read_record(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Record {
     let [length] = read_array::<1, _>(io).await?;
@@ -359,7 +358,7 @@ impl Gate {
 
 #[call]
 async fn read_record_after(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     gate: &Gate,
     output: &mut Vec<u8>,
 ) -> Record {

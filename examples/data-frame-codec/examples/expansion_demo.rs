@@ -9,7 +9,6 @@ use nitori_io::{
 };
 use snafu::{ResultExt, Snafu};
 use std::{
-    convert::Infallible,
     future::Future,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
@@ -64,7 +63,7 @@ fn main() {
             #[snafu(display("could not read the {position:?} operand"))]
             Operand {
                 position: OperandPosition,
-                source: ReadBeError<Infallible>,
+                source: ReadBeError<!>,
             },
         }
 

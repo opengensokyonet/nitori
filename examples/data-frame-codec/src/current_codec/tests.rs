@@ -4,7 +4,6 @@ use futures_core::Stream;
 use nitori_call::{Call, CallPoll, Lend, Receiver};
 use nitori_io::calls::WriteAll;
 use std::{
-    convert::Infallible,
     future::Future,
     pin::Pin,
     task::{Context, Poll, Waker},
@@ -81,7 +80,7 @@ struct Source {
     reads: usize,
 }
 impl Read for Source {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -124,7 +123,7 @@ async fn forward_frame<
     A: ReceiverAccess<Family: ReadChunk<Chunk = Bytes, Error = !, Metadata = ()>>,
 >(
     io: &mut A,
-) -> Result<usize, CodecError<Infallible>> {
+) -> Result<usize, CodecError<!>> {
     let mut frame = pin!(io.read_data_frame(NonZeroUsize::new(3).unwrap()));
     while let Some(event) = frame.as_mut().next().await {
         match event {

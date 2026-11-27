@@ -9,7 +9,6 @@ use nitori_call::{
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
-    convert::Infallible,
     future::{Future, poll_fn},
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -20,13 +19,13 @@ use std::{
 use support::*;
 
 type Memory<'a> = Direct<&'a [u8]>;
-type Record = Result<usize, ReadError<Infallible>>;
-type Pair = Result<[u8; 2], ReadError<Infallible>>;
-type Boxed<'a, F, R> = Pin<Box<dyn DynCall<F, Infallible, R> + 'a>>;
+type Record = Result<usize, ReadError<!>>;
+type Pair = Result<[u8; 2], ReadError<!>>;
+type Boxed<'a, F, R> = Pin<Box<dyn DynCall<F, !, R> + 'a>>;
 
 #[call]
 async fn read_record(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Record {
     let [length] = read_array::<1, _>(io).await?;
@@ -66,7 +65,7 @@ fn read_record_from_memory() {
 }
 
 #[call]
-async fn read_limited_word(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
+async fn read_limited_word(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> Pair {
     let [length] = read_array::<1, _>(io).await?;
     let mut remaining = usize::from(length);
     read_array::<2, _>(&mut BoundedRead(io, &mut remaining)).await
@@ -175,7 +174,7 @@ impl<'a> Receiver for Counted<'a> {
 }
 
 #[call]
-async fn read_pair(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
+async fn read_pair(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> Pair {
     let [first] = read_array::<1, _>(io).await?;
     let [second] = read_array::<1, _>(io).await?;
     Ok([first, second])
@@ -212,11 +211,11 @@ fn an_executor_lends_one_view_to_several_calls_in_one_poll() {
 struct ReadChunks {
     total: usize,
 }
-impl<F: Read<Error = Infallible>> Operation<F> for ReadChunks {
+impl<F: Read<Error = !>> Operation<F> for ReadChunks {
     type Output = Record;
     type Yield = Vec<u8>;
 }
-impl<'s, A: ReceiverAccess<Family: Read<Error = Infallible>>> Start<'s, A> for ReadChunks {
+impl<'s, A: ReceiverAccess<Family: Read<Error = !>>> Start<'s, A> for ReadChunks {
     type Fut = impl Future<Output = Record>;
     fn start(self, mut io: A, mut emitter: Emitter<'s, Vec<u8>>) -> Self::Fut {
         async move {
@@ -296,7 +295,7 @@ fn a_call_switches_from_its_items_to_its_final_value() {
 
 #[call]
 async fn sum_child_chunks(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
 ) -> (usize, Record) {
     // A child with its own item type, started on the parent's access and
     // observed as a stream.
@@ -324,7 +323,7 @@ fn a_parent_observes_the_events_of_a_child() {
 }
 
 #[call]
-async fn await_child(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Record {
+async fn await_child(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> Record {
     // Awaited, a child discards its items.
     Child::new(ReadChunks { total: 3 }, io).await
 }
@@ -357,7 +356,7 @@ impl<A: ReceiverAccess> Drop for AccessOnDrop<'_, A> {
 
 #[call]
 async fn access_when_dropped(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     pending: &Cell<bool>,
 ) {
     let _guard = AccessOnDrop { io, pending };
@@ -375,7 +374,7 @@ fn an_access_outside_a_poll_has_no_view() {
 }
 
 #[call]
-async fn panic_after_read(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) {
+async fn panic_after_read(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) {
     let _ = read_array::<1, _>(io).await;
     panic!("operation failed");
 }
@@ -404,7 +403,7 @@ fn assert_sync<T: Sync>(_: &T) {}
 /// Counts bytes until the end of input through a borrow of its own local,
 /// written before and after each wait.
 #[call]
-async fn count_bytes(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> usize {
+async fn count_bytes(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> usize {
     let mut count = 0;
     let counter = &mut count;
     while read_array::<1, _>(io).await.is_ok() {
@@ -460,7 +459,7 @@ impl<'s, A: ReceiverAccess> Start<'s, A> for Countdown {
 /// each event.
 #[call]
 async fn observe_child(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
 ) -> Vec<(bool, (usize, Option<usize>))> {
     let mut child = pin!(Child::new(Countdown(2), &mut *io));
     let observe = |child: &Child<_, _>| (FusedStream::is_terminated(child), child.size_hint());
@@ -485,7 +484,7 @@ fn a_child_reports_when_it_has_terminated() {
 
 #[test]
 fn a_call_over_a_generic_family_is_send() {
-    fn build<F: Read<Error = Infallible>>() {
+    fn build<F: Read<Error = !>>() {
         let mut output = Vec::new();
         assert_send(&Call::<F, _>::new(ReadRecord::new(&mut output)));
         // Compositions and child streams derive from the slot, so they do not count.
@@ -501,12 +500,12 @@ fn a_call_over_a_generic_family_is_send() {
 struct Shared(Rc<RefCell<VecDeque<u8>>>);
 direct_receiver!(impl [] for Shared);
 impl Read for Direct<Shared> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -583,7 +582,7 @@ fn compositions_and_child_streams_ask_for_a_view_through_their_parent() {
 
 #[call]
 async fn read_record_in_branch(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Record {
     only_when_woken(read_record(io, output)).await
@@ -729,7 +728,7 @@ impl Gate {
 
 /// Each branch waits for its gate, then reads one byte.
 #[call]
-async fn read_after_gates<A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+async fn read_after_gates<A: ReceiverAccess<Family: Read<Error = !>>>(
     io: &mut A,
     gates: &[Gate],
 ) -> Vec<u8> {
@@ -823,7 +822,7 @@ impl<F: Future> Future for Substitute<F> {
 
 #[call]
 async fn read_record_substituted(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Record {
     Substitute(read_record(io, output)).await
@@ -888,7 +887,7 @@ impl<F: Future> Future for SubstituteAcrossThreads<F> {
 
 #[call]
 async fn read_record_substituted_across_threads(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Record {
     SubstituteAcrossThreads(read_record(io, output)).await
@@ -929,7 +928,7 @@ fn a_wake_from_another_thread_while_branches_are_woken_is_dropped() {
 }
 
 #[call]
-async fn read_release_read(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
+async fn read_release_read(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> Pair {
     let [first] = read_array::<1, _>(io).await?;
     io.release_view().await;
     let [second] = read_array::<1, _>(io).await?;
@@ -998,7 +997,7 @@ fn a_released_view_is_asked_for_again() {
 
 #[call]
 async fn read_release_read_in_branch(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
 ) -> Pair {
     only_when_woken(read_release_read(io)).await
 }
@@ -1064,11 +1063,11 @@ fn shared_length(view: nitori_call::Access<'_, '_, Direct<Shared>>) -> usize {
 struct MeasureElsewhere;
 impl Operation<Direct<Shared>> for MeasureElsewhere {
     type Output = (bool, usize);
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A: ReceiverAccess<Family = Direct<Shared>> + Send> Start<'s, A> for MeasureElsewhere {
     type Fut = impl Future<Output = (bool, usize)>;
-    fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, mut io: A, _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let rejected = poll_fn(|cx| {
                 let waker = cx.waker().clone();
@@ -1107,11 +1106,11 @@ fn a_view_is_used_only_on_the_thread_polling_its_call() {
 struct AskElsewhere;
 impl Operation<Direct<Shared>> for AskElsewhere {
     type Output = usize;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A: ReceiverAccess<Family = Direct<Shared>> + Send> Start<'s, A> for AskElsewhere {
     type Fut = impl Future<Output = usize>;
-    fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, mut io: A, _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let mut asked = false;
             poll_fn(|cx| {
@@ -1152,7 +1151,7 @@ impl<F: ReceiverFamily> Operation<F> for AskWhileEmitting {
     type Output = u8;
     type Yield = u8;
 }
-impl<'s, A: ReceiverAccess<Family: Read<Error = Infallible>>> Start<'s, A> for AskWhileEmitting {
+impl<'s, A: ReceiverAccess<Family: Read<Error = !>>> Start<'s, A> for AskWhileEmitting {
     type Fut = impl Future<Output = u8>;
     fn start(self, mut io: A, mut emitter: Emitter<'s, u8>) -> Self::Fut {
         async move {

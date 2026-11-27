@@ -8,7 +8,6 @@ use nitori_call::{
 use std::{
     cell::Cell,
     collections::VecDeque,
-    convert::Infallible,
     future::{Future, pending, poll_fn},
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -714,11 +713,11 @@ fn several_accesses_have_their_views_only_in_a_poll() {
 struct Elsewhere;
 impl Operation<Direct<Total>> for Elsewhere {
     type Output = String;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s> Start<'s, LentSlot<'s, Direct<Total>>> for Elsewhere {
     type Fut = impl Future<Output = String>;
-    fn start(self, mut io: LentSlot<'s, Direct<Total>>, _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, mut io: LentSlot<'s, Direct<Total>>, _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let panic = thread::scope(|scope| scope.spawn(|| io.try_with(|_| ())).join());
             let panic = panic.expect_err("a view used on another thread");
@@ -845,7 +844,7 @@ async fn plain_add<F: Counter>(io: &mut impl ReceiverAccess<Family = F>, by: u32
 struct UseProjectedCounter;
 impl Operation<(Direct<Total>, Direct<Total>)> for UseProjectedCounter {
     type Output = u32;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)>
     for UseProjectedCounter
@@ -854,7 +853,7 @@ impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)>
     fn start(
         self,
         (mut io, mut other): (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>),
-        _: Emitter<'s, Infallible>,
+        _: Emitter<'s, !>,
     ) -> Self::Fut {
         async move {
             assert_eq!(format!("{io:?}"), "LentSlot { .. }");
@@ -892,7 +891,7 @@ struct Nested;
 type NestedFamilies = ((Direct<Total>, Direct<Items>), Direct<Total>);
 impl Operation<NestedFamilies> for Nested {
     type Output = u32;
-    type Yield = Infallible;
+    type Yield = !;
 }
 type NestedSlots<'s> = (
     (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Items>>),
@@ -903,7 +902,7 @@ impl<'s> Start<'s, NestedSlots<'s>> for Nested {
     fn start(
         self,
         ((mut first, mut items), mut last): NestedSlots<'s>,
-        _: Emitter<'s, Infallible>,
+        _: Emitter<'s, !>,
     ) -> Self::Fut {
         async move {
             let item = items.next().await;

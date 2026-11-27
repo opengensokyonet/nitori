@@ -192,7 +192,7 @@ struct Delayed<'data> {
 }
 nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
-    type Error = std::convert::Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,

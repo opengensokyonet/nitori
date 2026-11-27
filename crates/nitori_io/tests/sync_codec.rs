@@ -70,7 +70,7 @@ struct Delayed<'a> {
     waiting: bool,
 }
 impl Read for Delayed<'_> {
-    type Error = std::convert::Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'visit, Output: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,

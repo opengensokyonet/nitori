@@ -12,7 +12,6 @@ use nitori_call::{
 use std::{
     cell::Cell,
     collections::VecDeque,
-    convert::Infallible,
     future::{Future, poll_fn},
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -43,12 +42,12 @@ impl ReceiverFamily for Locked {
     type ReceiverView<'v> = PipeGuard<'v>;
 }
 impl Read for Locked {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut PipeGuard<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -92,11 +91,11 @@ impl<'p> CallExecutor for Reader<'p> {
     }
 }
 
-type Record = Result<usize, ReadError<Infallible>>;
+type Record = Result<usize, ReadError<!>>;
 
 #[call]
 async fn read_record(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Record {
     let [length] = read_array::<1, _>(io).await?;
@@ -187,7 +186,7 @@ impl Gate {
 
 #[call]
 async fn read_record_after(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     gate: &Gate,
     output: &mut Vec<u8>,
 ) -> Record {
@@ -222,9 +221,9 @@ fn waiting_for_something_else_acquires_nothing() {
 /// needs no resource.
 #[call]
 async fn read_record_counted(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     gate: &Gate,
-) -> Result<Vec<u8>, ReadError<Infallible>> {
+) -> Result<Vec<u8>, ReadError<!>> {
     let mut record = vec![0];
     let output = &mut record;
     output.clear();
@@ -262,7 +261,7 @@ fn shared_references_to_running_executions_leave_them_intact() {
 
 /// Records as items until an empty one, then how many there were.
 #[call(yields = Vec<u8>)]
-async fn read_records(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> usize {
+async fn read_records(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> usize {
     let mut count = 0;
     loop {
         let mut record = Vec::new();
@@ -306,9 +305,7 @@ fn an_executor_delivers_items_as_a_stream_and_releases_the_lock_between_them() {
 /// Reads the records as a stream inside the operation, so the records ready
 /// in one poll share one acquisition.
 #[call]
-async fn collect_records(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
-) -> Vec<Vec<u8>> {
+async fn collect_records(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> Vec<Vec<u8>> {
     let mut records = pin!(io.read_records());
     let mut collected = Vec::new();
     while let Some(ControlFlow::Continue(record)) = records.as_mut().next().await {
@@ -357,7 +354,7 @@ fn poll_pipe(
     pipe: &mut Pipe,
     cx: &mut Context<'_>,
     destination: &mut (impl BufMut + ?Sized),
-) -> Poll<Result<usize, Infallible>> {
+) -> Poll<Result<usize, !>> {
     if pipe.data.is_empty() && destination.has_remaining_mut() {
         pipe.reader = Some(cx.waker().clone());
         return Poll::Pending;
@@ -371,9 +368,7 @@ fn poll_pipe(
 
 /// Copies a record from the pipe to the log, with one access for both.
 #[call]
-async fn copy_record(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible> + Log>,
-) -> Record {
+async fn copy_record(io: &mut impl ReceiverAccess<Family: Read<Error = !> + Log>) -> Record {
     let mut record = Vec::new();
     let length = read_record(io, &mut record).await?;
     append_log(io, &record).await;
@@ -388,12 +383,12 @@ impl ReceiverFamily for PipeAndLog {
     type ReceiverView<'v> = BothGuards<'v>;
 }
 impl Read for PipeAndLog {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut BothGuards<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -452,7 +447,7 @@ async fn write_log(io: &mut impl ReceiverAccess<Family: Log>, bytes: &[u8]) {
 /// Copies a record from the pipe to a log that it acquires separately.
 #[call]
 async fn copy_record_to(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     log: &Mutex<Vec<u8>>,
 ) -> Record {
     let mut record = Vec::new();
@@ -488,7 +483,7 @@ fn a_second_resource_is_driven_inside_the_operation() {
 
 /// Reads one byte, using the resource only on polls while `wanted` is set.
 #[call]
-async fn read_when_wanted<A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+async fn read_when_wanted<A: ReceiverAccess<Family: Read<Error = !>>>(
     io: &mut A,
     wanted: &Cell<bool>,
 ) -> u8 {
@@ -559,9 +554,9 @@ fn a_pending_acquisition_advanced_while_unneeded_completes_later() {
 /// Reads a byte, computes without needing the pipe, then reads another.
 #[call]
 async fn read_compute_read(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     compute: &dyn Fn(),
-) -> Result<[u8; 2], ReadError<Infallible>> {
+) -> Result<[u8; 2], ReadError<!>> {
     let [first] = read_array::<1, _>(io).await?;
     io.release_view().await;
     compute();
@@ -573,9 +568,9 @@ async fn read_compute_read(
 /// polls it with a waker of its own.
 #[call]
 async fn read_compute_read_in_branch(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     compute: &dyn Fn(),
-) -> Result<[u8; 2], ReadError<Infallible>> {
+) -> Result<[u8; 2], ReadError<!>> {
     only_when_woken(read_compute_read(io, compute)).await
 }
 

@@ -343,7 +343,7 @@ pub(crate) fn expand(
     let receivers = quote!((#(#families,)*));
     let yield_tokens = match &yield_type {
         Some(item) => quote!(#item),
-        None => quote!(::core::convert::Infallible),
+        None => quote!(!),
     };
     let emitter_argument = yield_type.as_ref().map(|_| quote!(&mut __emitter));
     let doc = format!("The `{function}` operation.");

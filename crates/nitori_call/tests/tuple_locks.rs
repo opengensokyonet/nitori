@@ -11,7 +11,6 @@ use nitori_call::{
 use nitori_io::prelude::*;
 use std::{
     cell::Cell,
-    convert::Infallible,
     future::{Future, poll_fn},
     pin::pin,
 };
@@ -23,7 +22,7 @@ struct WriteFirstThenSecond<'a> {
 }
 impl<A: Receivers, B: Receivers> Operation<(A, B)> for WriteFirstThenSecond<'_> {
     type Output = ();
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A, B> Start<'s, (A, B)> for WriteFirstThenSecond<'_>
 where
@@ -31,7 +30,7 @@ where
     B: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
-    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let mut first = pin!(a.write_all(&b"a"[..], ()));
             let mut second = pin!(b.write_all(&b"b"[..], ()));

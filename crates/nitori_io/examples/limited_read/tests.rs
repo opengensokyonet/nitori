@@ -2,7 +2,6 @@ use super::*;
 use bytes::BufMut;
 use nitori_call::{Call, CallPoll, Direct, Lend, Receiver, family_receiver};
 use std::{
-    convert::Infallible,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
@@ -13,7 +12,7 @@ struct Delayed<'a> {
 }
 family_receiver!(impl ['a] for Delayed<'a>);
 impl Read for Delayed<'_> {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -41,7 +40,7 @@ impl Read for Delayed<'_> {
 fn poll<'data>(
     call: Pin<&mut Call<Delayed<'data>, ReadRecord>>,
     host: &mut Delayed<'data>,
-) -> CallPoll<Result<[u8; 2], ReadRecordError<Infallible>>> {
+) -> CallPoll<Result<[u8; 2], ReadRecordError<!>>> {
     call.poll_return_with(
         Some(Lend::Fixed(pin!(Pin::new(host).view()))),
         &mut Context::from_waker(Waker::noop()),

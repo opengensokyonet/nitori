@@ -9,7 +9,6 @@ use nitori_call::{
 use std::{
     cell::RefCell,
     collections::VecDeque,
-    convert::Infallible,
     future::{Future, poll_fn},
     pin::{Pin, pin},
     rc::Rc,
@@ -29,15 +28,15 @@ fn assert_send<T: Send>(_: &T) {}
 struct AddBytes;
 impl<A: Receivers, B: Receivers> Operation<(A, B)> for AddBytes {
     type Output = u16;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A, B> Start<'s, (A, B)> for AddBytes
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>>,
-    B: ReceiverAccess<Family: Read<Error = Infallible>>,
+    A: ReceiverAccess<Family: Read<Error = !>>,
+    B: ReceiverAccess<Family: Read<Error = !>>,
 {
     type Fut = impl Future<Output = u16>;
-    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let [x] = read_array::<1, _>(&mut a).await.unwrap();
             let [y] = read_array::<1, _>(&mut b).await.unwrap();
@@ -80,12 +79,12 @@ fn each_slot_asks_for_its_own_view() {
 struct Local(Rc<RefCell<VecDeque<u8>>>);
 direct_receiver!(impl [] for Local);
 impl Read for Direct<Local> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: bytes::BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -142,15 +141,15 @@ fn a_call_over_a_resource_that_is_not_send_moves_between_threads() {
 struct AskTogether;
 impl<A: Receivers, B: Receivers> Operation<(A, B)> for AskTogether {
     type Output = u16;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A, B> Start<'s, (A, B)> for AskTogether
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>> + Send,
-    B: ReceiverAccess<Family: Read<Error = Infallible>> + Send,
+    A: ReceiverAccess<Family: Read<Error = !>> + Send,
+    B: ReceiverAccess<Family: Read<Error = !>> + Send,
 {
     type Fut = impl Future<Output = u16>;
-    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let mut asked = false;
             poll_fn(|cx| {
@@ -209,14 +208,14 @@ fn slots_on_different_threads_ask_at_the_same_time() {
 struct ReadInBranches(Arc<[AtomicUsize; 3]>);
 impl<A: Receivers, B: Receivers, C: Receivers> Operation<(A, B, C)> for ReadInBranches {
     type Output = u16;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A> Start<'s, (A, A, A)> for ReadInBranches
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>> + 's,
+    A: ReceiverAccess<Family: Read<Error = !>> + 's,
 {
     type Fut = impl Future<Output = u16>;
-    fn start(self, (a, b, c): (A, A, A), _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, (a, b, c): (A, A, A), _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let mut branches = FuturesUnordered::new();
             for (index, mut io) in [a, b, c].into_iter().enumerate() {
@@ -303,15 +302,15 @@ fn a_view_wakes_only_the_branches_waiting_for_its_slot() {
 struct ReleaseFirst;
 impl<A: Receivers, B: Receivers> Operation<(A, B)> for ReleaseFirst {
     type Output = u16;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A, B> Start<'s, (A, B)> for ReleaseFirst
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>>,
-    B: ReceiverAccess<Family: Read<Error = Infallible>>,
+    A: ReceiverAccess<Family: Read<Error = !>>,
+    B: ReceiverAccess<Family: Read<Error = !>>,
 {
     type Fut = impl Future<Output = u16>;
-    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let [x] = read_array::<1, _>(&mut a).await.unwrap();
             a.release_view().await;
@@ -364,15 +363,15 @@ fn each_slot_offers_its_own_view_back() {
 struct AddTwice;
 impl<A: Receivers, B: Receivers> Operation<(A, B)> for AddTwice {
     type Output = u16;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A, B> Start<'s, (A, B)> for AddTwice
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>>,
-    B: ReceiverAccess<Family: Read<Error = Infallible>>,
+    A: ReceiverAccess<Family: Read<Error = !>>,
+    B: ReceiverAccess<Family: Read<Error = !>>,
 {
     type Fut = impl Future<Output = u16>;
-    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, (mut a, mut b): (A, B), _: Emitter<'s, !>) -> Self::Fut {
         async move {
             let first = Child::new(AddBytes, (&mut a, &mut b)).await;
             first + Child::new(AddBytes, (&mut a, &mut b)).await
@@ -382,7 +381,7 @@ where
 
 #[test]
 fn a_child_runs_over_several_accesses() {
-    fn run<F: Read<Error = Infallible>>(mut first: impl Receiver<Family = F> + Unpin) -> u16 {
+    fn run<F: Read<Error = !>>(mut first: impl Receiver<Family = F> + Unpin) -> u16 {
         let mut second = b"\x10\x20".as_slice();
         let mut call = pin!(Call::<(F, Memory), _>::new(AddTwice));
         assert_send(&*call);

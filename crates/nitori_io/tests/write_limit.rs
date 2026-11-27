@@ -1,7 +1,6 @@
 //! A write limit checks the count its parent reports, as a read limit does.
 use bytes::{Buf, BufMut};
 use core::{
-    convert::Infallible,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
@@ -15,7 +14,7 @@ use nitori_io::{
 struct Overcounting;
 nitori_call::family_receiver!(impl [] for Overcounting);
 impl Write<()> for Overcounting {
-    type Error = Infallible;
+    type Error = !;
     type Report = ();
     fn poll_write<'v, I: Buf + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,

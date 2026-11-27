@@ -7,7 +7,6 @@ use nitori_call::{
 };
 use std::{
     collections::VecDeque,
-    convert::Infallible,
     future::{Future, poll_fn},
     marker::PhantomData,
     pin::{Pin, pin},
@@ -26,12 +25,12 @@ pub trait Read: ReceiverFamily {
         Self: 'visit;
 }
 impl Read for Direct<&[u8]> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -60,12 +59,12 @@ impl Feed {
 }
 direct_receiver!(impl [] for Feed);
 impl Read for Direct<Feed> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {

@@ -3,7 +3,6 @@
 #![feature(impl_trait_in_assoc_type)]
 use bytes::{BufMut, Bytes};
 use core::{
-    convert::Infallible,
     num::NonZeroUsize,
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -31,7 +30,7 @@ struct Chunks {
 }
 nitori_call::family_receiver!(impl [] for Chunks);
 impl Read for Chunks {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -205,7 +204,7 @@ struct Delayed<'data> {
 }
 nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,

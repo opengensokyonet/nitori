@@ -12,7 +12,7 @@ use nitori_call::{CallExecutor, ReceiverAccess, call};
 use nitori_io::{Read, calls::{ReadBeError, ReadBeExt as _}};
 use snafu::{ResultExt, Snafu};
 use std::{
-    convert::Infallible, future::Future, pin::{Pin, pin},
+    future::Future, pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
 
@@ -162,7 +162,7 @@ impl ReadPair<> where  {
 impl<F: ::nitori_call::ReceiverFamily + Read<Metadata = ()>>
     ::nitori_call::Operation<F> for ReadPair<> where  {
     type Output = Result<u16, ReadPairError<F::Error>>;
-    type Yield = ::core::convert::Infallible;
+    type Yield = !;
 }
 impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read<Metadata = ()>>
     ::nitori_call::Start<'__s, __A> for ReadPair<> where
@@ -175,8 +175,7 @@ impl<'__s, __A, F: ::nitori_call::ReceiverFamily + Read<Metadata = ()>>
         impl ::core::future::Future<Output =
         <Self as ::nitori_call::Operation<F>>::Output>;
     #[allow(unused_mut, unused_variables)]
-    fn start(self, __io: __A,
-        __emitter: ::nitori_call::Emitter<'__s, ::core::convert::Infallible>)
+    fn start(self, __io: __A, __emitter: ::nitori_call::Emitter<'__s, !>)
         -> Self::Fut {
         let Self { .. } = self;
         async move
@@ -263,7 +262,7 @@ fn main() {
                 #[snafu(display("could not read the {position:?} operand"))]
                 Operand {
                     position: OperandPosition,
-                    source: ReadBeError<Infallible>,
+                    source: ReadBeError<!>,
                 },
             }
             #[automatically_derived]
@@ -313,10 +312,10 @@ fn main() {
             }
             impl<__T0> ::snafu::IntoError<SumError<>> for OperandSnafu<__T0>
                 where __T0: ::core::convert::Into<OperandPosition> {
-                type Source = ReadBeError<Infallible>;
+                type Source = ReadBeError<!>;
                 #[track_caller]
                 fn into_error(self, error: Self::Source) -> SumError<> {
-                    let error: ReadBeError<Infallible> = (|v| v)(error);
+                    let error: ReadBeError<!> = (|v| v)(error);
                     SumError::Operand {
                         source: error,
                         position: ::core::convert::Into::into(self.position),
@@ -385,7 +384,7 @@ fn main() {
                 Read<Error = !, Metadata = ()>> ::nitori_call::Operation<__F>
                 for Sum<> where  {
                 type Output = Result<u16, SumError>;
-                type Yield = ::core::convert::Infallible;
+                type Yield = !;
             }
             impl<'__s, __A> ::nitori_call::Start<'__s, __A> for Sum<> where
                 __A: ::nitori_call::ReceiverAccess,
@@ -399,9 +398,7 @@ fn main() {
                     ::nitori_call::ReceiverAccess>::Family>>::Output>;
                 #[allow(unused_mut, unused_variables)]
                 fn start(self, __io: __A,
-                    __emitter:
-                        ::nitori_call::Emitter<'__s, ::core::convert::Infallible>)
-                    -> Self::Fut {
+                    __emitter: ::nitori_call::Emitter<'__s, !>) -> Self::Fut {
                     let Self { .. } = self;
                     async move
                         {

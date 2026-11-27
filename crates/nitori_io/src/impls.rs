@@ -6,7 +6,6 @@ use crate::{
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::{
-    convert::Infallible,
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
@@ -45,7 +44,7 @@ fn write_segment(count: usize) -> Option<WriteSegment<()>> {
 macro_rules! memory_read {
     ($($ty:ty),* $(,)?) => {$ (
         impl Read for Direct<$ty> {
-            type Error = Infallible;
+            type Error = !;
             type Metadata = ();
             fn poll_read<'visit, O: BufMut + ?Sized>(host: Pin<&mut Self::ReceiverView<'visit>>, _: &mut Context<'_>, out: &mut O) -> Poll<Result<Option<ReadSegment<()>>, Self::Error>>  where Self: 'visit {
  let this = host.get_pin_mut();
@@ -155,7 +154,7 @@ impl<T: AsRef<[u8]> + Unpin> crate::AtEnd for Direct<Cursor<T>> {
 }
 #[cfg(feature = "std")]
 impl<T: AsRef<[u8]> + Unpin> Read for Direct<Cursor<T>> {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'visit, O: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,

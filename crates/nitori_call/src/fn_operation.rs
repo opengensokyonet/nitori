@@ -1,6 +1,6 @@
 //! Operations written as async closures.
 use crate::{Emitter, Operation, Receivers, Start};
-use core::{convert::Infallible, fmt, marker::PhantomData, ops::AsyncFnOnce};
+use core::{fmt, marker::PhantomData, ops::AsyncFnOnce};
 
 /// An operation that runs an async closure over the slots of `R`; see
 /// [`fn_operation`].
@@ -83,7 +83,7 @@ where
     C: for<'s> AsyncFnOnce<(R::Slots<'s>,), Output = T>,
 {
     type Output = T;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, R, C, T> Start<'s, R::Slots<'s>> for FnOperation<R, C>
 where
@@ -91,7 +91,7 @@ where
     C: for<'x> AsyncFnOnce<(R::Slots<'x>,), Output = T>,
 {
     type Fut = <C as AsyncFnOnce<(R::Slots<'s>,)>>::CallOnceFuture;
-    fn start(self, slots: R::Slots<'s>, _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, slots: R::Slots<'s>, _: Emitter<'s, !>) -> Self::Fut {
         self.closure.async_call_once((slots,))
     }
 }

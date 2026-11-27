@@ -8,7 +8,6 @@ use nitori_call::{
 };
 use std::{
     collections::VecDeque,
-    convert::Infallible,
     future::poll_fn,
     marker::PhantomData,
     ops::ControlFlow,
@@ -30,12 +29,12 @@ pub trait Read: ReceiverFamily {
         Self: 'visit;
 }
 impl Read for Direct<&[u8]> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         _: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -54,12 +53,12 @@ struct Feed {
 }
 direct_receiver!(impl [] for Feed);
 impl Read for Direct<Feed> {
-    type Error = Infallible;
+    type Error = !;
     fn poll_read<'visit, Output: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
         destination: &mut Output,
-    ) -> Poll<Result<usize, Infallible>>
+    ) -> Poll<Result<usize, !>>
     where
         Self: 'visit,
     {
@@ -83,7 +82,7 @@ pub struct Incomplete {
 
 #[call(sync)]
 async fn read_array<const LENGTH: usize>(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
 ) -> Result<[u8; LENGTH], Incomplete> {
     let mut array = [0; LENGTH];
     let mut filled = 0;
@@ -101,7 +100,7 @@ async fn read_array<const LENGTH: usize>(
 #[call(sync)]
 async fn read_exact<A>(io: &mut A, output: &mut Vec<u8>, length: usize) -> Result<(), Incomplete>
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>>,
+    A: ReceiverAccess<Family: Read<Error = !>>,
 {
     let mut completed = 0;
     while completed < length {
@@ -116,7 +115,7 @@ where
 
 #[call(sync)]
 async fn read_record(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     output: &mut Vec<u8>,
 ) -> Result<usize, Incomplete> {
     // Generated methods for derived operations, with turbofish on the method.
@@ -250,7 +249,7 @@ impl<F: Read> Read for Limited<F> {
 
 #[call(sync)]
 async fn read_limited_word(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
 ) -> Result<[u8; 2], Incomplete> {
     let [length] = io.read_array::<1>().await?;
     let mut remaining = usize::from(length);
@@ -272,7 +271,7 @@ fn assert_send<T: Send>(_: &T) {}
 
 #[test]
 fn a_call_of_a_generated_operation_over_a_generic_family_is_send() {
-    fn build<F: Read<Error = Infallible>>(output: &mut Vec<u8>) {
+    fn build<F: Read<Error = !>>(output: &mut Vec<u8>) {
         assert_send(&Call::<F, _>::new(ReadRecord::new(output)));
         assert_send(&Call::<F, _>::new(ReadLimitedWord::new()));
     }
@@ -281,7 +280,7 @@ fn a_call_of_a_generated_operation_over_a_generic_family_is_send() {
 
 /// The future of a derived operation is nameable through `Start`.
 type RecordFuture<'a, A> = <ReadRecord<'a> as Start<'static, &'a mut A>>::Fut;
-fn record_future<'a, A: ReceiverAccess<Family: Read<Error = Infallible>>>(
+fn record_future<'a, A: ReceiverAccess<Family: Read<Error = !>>>(
     io: &'a mut A,
     output: &'a mut Vec<u8>,
 ) -> RecordFuture<'a, A> {
@@ -370,10 +369,7 @@ fn the_attribute_chooses_the_module() {
 /// An operation that emits: each `yield` is an item, the return value is the
 /// final value.
 #[call(sync, yields = Vec<u8>)]
-async fn read_chunks(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
-    size: usize,
-) -> usize {
+async fn read_chunks(io: &mut impl ReceiverAccess<Family: Read<Error = !>>, size: usize) -> usize {
     let mut total = 0;
     loop {
         let mut chunk = Vec::new();
@@ -390,7 +386,7 @@ async fn read_chunks(
 #[call(yields = Vec<u8>)]
 async fn read_framed_chunks<A>(io: &mut A) -> Result<usize, Incomplete>
 where
-    A: ReceiverAccess<Family: Read<Error = Infallible>>,
+    A: ReceiverAccess<Family: Read<Error = !>>,
 {
     let [size] = io.read_array::<1>().await?;
     yield vec![size];
@@ -482,7 +478,7 @@ fn a_host_runs_an_operation_without_items_as_a_stream() {
 
 #[test]
 fn calls_of_emitting_operations_are_send() {
-    fn build<F: Read<Error = Infallible>>() {
+    fn build<F: Read<Error = !>>() {
         assert_send(&Call::<F, _>::new(ReadChunks::new(1)));
         assert_send(&Call::<F, _>::new(ReadFramedChunks::new()));
     }
@@ -491,9 +487,7 @@ fn calls_of_emitting_operations_are_send() {
 
 /// `yield` in closures and nested items keeps its own meaning.
 #[call(yields = u8)]
-async fn yield_outside_closures(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
-) -> u8 {
+async fn yield_outside_closures(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> u8 {
     fn helper() -> u8 {
         7
     }
@@ -622,7 +616,7 @@ fn family_predicates_without_parameters_apply_to_the_family() {
 fn a_one_off_operation_is_a_local_function() {
     // Generated items stay local to the block, as a closure would.
     #[call]
-    async fn first_byte(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> u8 {
+    async fn first_byte(io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> u8 {
         let [byte] = io.read_array::<1>().await.unwrap();
         byte
     }
@@ -638,7 +632,7 @@ fn a_one_off_operation_is_a_local_function() {
 /// A lifetime used only in bounds is still a parameter of the operation.
 #[call(sync)]
 async fn measured<'a, 'b: 'a, T: AsRef<[u8]> + 'a>(
-    _io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    _io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     data: &'b T,
 ) -> usize {
     data.as_ref().len()
@@ -654,7 +648,7 @@ fn lifetimes_in_bounds_stay_on_the_operation() {
 /// Arguments written as patterns are destructured by the function.
 #[call(sync)]
 async fn span(
-    _io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    _io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
     (start, end): (u8, u8),
     _: &str,
 ) -> u8 {
@@ -675,13 +669,13 @@ fn arguments_may_be_patterns() {
 
 /// Returns another generated operation, to be run later.
 #[call(sync)]
-async fn plan(_io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> ReadArray<1> {
+async fn plan(_io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> ReadArray<1> {
     ReadArray::new()
 }
 
 #[call(sync)]
 async fn plan_and_run(
-    io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
+    io: &mut impl ReceiverAccess<Family: Read<Error = !>>,
 ) -> Result<[u8; 1], Incomplete> {
     let next = io.plan().await;
     nitori_call::Child::new(next, &mut *io).await
@@ -696,9 +690,7 @@ mod opaque {
     }
     /// An operation whose final value has an opaque type defined elsewhere.
     #[call(sync)]
-    pub async fn opaque_value(
-        _io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
-    ) -> Value {
+    pub async fn opaque_value(_io: &mut impl ReceiverAccess<Family: Read<Error = !>>) -> Value {
         value()
     }
 }

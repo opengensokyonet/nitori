@@ -7,7 +7,6 @@ use nitori_call::{
 };
 use std::{
     cell::Cell,
-    convert::Infallible,
     future::{Future, pending},
     ops::ControlFlow,
     pin::{Pin, pin},
@@ -80,7 +79,7 @@ macro_rules! largest_tuple {
         struct StepHalves;
         impl<R: Receivers> Operation<R> for StepHalves {
             type Output = u32;
-            type Yield = Infallible;
+            type Yield = !;
         }
         #[allow(non_camel_case_types)]
         impl<'s, $($first,)+ $($second,)+> Start<'s, (($($first,)+), ($($second,)+))> for StepHalves
@@ -92,7 +91,7 @@ macro_rules! largest_tuple {
             fn start(
                 self,
                 accesses: (($($first,)+), ($($second,)+)),
-                _: Emitter<'s, Infallible>,
+                _: Emitter<'s, !>,
             ) -> Self::Fut {
                 async move {
                     accesses.with(|(first, second)| {
@@ -209,7 +208,7 @@ macro_rules! beyond_a_tuple {
         struct StepNested;
         impl<R: Receivers> Operation<R> for StepNested {
             type Output = u32;
-            type Yield = Infallible;
+            type Yield = !;
         }
         #[allow(non_camel_case_types)]
         impl<'s, $x, $($y,)+ $($z,)+ $($rest,)+>
@@ -224,7 +223,7 @@ macro_rules! beyond_a_tuple {
             fn start(
                 self,
                 accesses: ($x, ($($y,)+ ($($z,)+)), $($rest,)+),
-                _: Emitter<'s, Infallible>,
+                _: Emitter<'s, !>,
             ) -> Self::Fut {
                 async move {
                     accesses.with(|(mut $x, group, $(mut $rest,)+)| {
@@ -375,7 +374,7 @@ struct SayFarewell {
 type Three = (Direct<Total>, (Direct<Total>, Direct<Total>));
 impl<R: Receivers> Operation<R> for SayFarewell {
     type Output = ();
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, A, B> Start<'s, (A, (B, B))> for SayFarewell
 where
@@ -386,7 +385,7 @@ where
     fn start(
         self,
         (mut first, (mut second, mut third)): (A, (B, B)),
-        _: Emitter<'s, Infallible>,
+        _: Emitter<'s, !>,
     ) -> Self::Fut {
         async move {
             let farewell = Farewell {

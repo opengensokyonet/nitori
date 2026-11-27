@@ -308,7 +308,7 @@ impl<A: nitori_call::Receivers, B: nitori_call::Receivers> nitori_call::Operatio
     for WriteBoth<'_>
 {
     type Output = ();
-    type Yield = std::convert::Infallible;
+    type Yield = !;
 }
 impl<'s, 'a, A, B> nitori_call::Start<'s, (A, B)> for WriteBoth<'a>
 where
@@ -316,11 +316,7 @@ where
     B: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
-    fn start(
-        self,
-        (mut a, mut b): (A, B),
-        _: nitori_call::Emitter<'s, std::convert::Infallible>,
-    ) -> Self::Fut {
+    fn start(self, (mut a, mut b): (A, B), _: nitori_call::Emitter<'s, !>) -> Self::Fut {
         async move {
             let _ = a.write_all(self.first, ()).await;
             (self.between)();
@@ -380,7 +376,7 @@ impl ReceiverFamily for Ledger {
     type ReceiverView<'v> = std::cell::RefMut<'v, Vec<u8>>;
 }
 impl Write<()> for Ledger {
-    type Error = std::convert::Infallible;
+    type Error = !;
     type Report = ();
     fn poll_write<'visit, I: Buf + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -438,7 +434,7 @@ impl<A: nitori_call::Receivers, B: nitori_call::Receivers, C: nitori_call::Recei
     nitori_call::Operation<(A, B, C)> for WriteThree
 {
     type Output = ();
-    type Yield = std::convert::Infallible;
+    type Yield = !;
 }
 impl<'s, A, B, C> nitori_call::Start<'s, (A, B, C)> for WriteThree
 where
@@ -447,11 +443,7 @@ where
     C: ReceiverAccess<Family: Write<(), Report: nitori_io::Combine>>,
 {
     type Fut = impl Future<Output = ()>;
-    fn start(
-        self,
-        (mut a, mut b, mut c): (A, B, C),
-        _: nitori_call::Emitter<'s, std::convert::Infallible>,
-    ) -> Self::Fut {
+    fn start(self, (mut a, mut b, mut c): (A, B, C), _: nitori_call::Emitter<'s, !>) -> Self::Fut {
         async move {
             let _ = c.write_all(&b"c"[..], ()).await;
             let _ = a.write_all(&b"a"[..], ()).await;

@@ -7,7 +7,6 @@ use crate::{
 use alloc::{sync::Arc, task::Wake, vec::Vec};
 use core::{
     cell::{Cell, OnceCell, UnsafeCell},
-    convert::Infallible,
     fmt,
     future::Future,
     marker::{PhantomData, PhantomPinned},
@@ -26,7 +25,7 @@ use futures_util::task::AtomicWaker;
 pub trait Operation<F: Receivers> {
     /// The final value.
     type Output;
-    /// Intermediate items; `Infallible` for operations that emit none.
+    /// Intermediate items; `!` for operations that emit none.
     type Yield;
 }
 
@@ -129,7 +128,7 @@ impl<Y> Emitter<'_, Y> {
         emit::Emit::new(self, item)
     }
 }
-impl Emitter<'_, Infallible> {
+impl Emitter<'_, !> {
     /// An emitter for operations that emit nothing; it has no cell.
     pub(crate) fn detached() -> Self {
         Self {

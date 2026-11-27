@@ -6,7 +6,6 @@ use nitori_call::{
 };
 use nitori_io::calls::{WriteAllError, WriteAllHostExt as _};
 use nitori_io::{PollReadExt as _, Read, ReadChunk};
-use std::convert::Infallible;
 use std::{
     cell::{Cell, RefCell},
     future::{Future, poll_fn},
@@ -46,7 +45,7 @@ impl Memory {
     }
 }
 impl Read for Memory {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -103,7 +102,7 @@ struct PinnedMemory {
     _pin: PhantomPinned,
 }
 impl Read for PinnedMemory {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'visit, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'visit>>,
@@ -320,11 +319,11 @@ fn helper_preserves_lifetimes_const_arguments_and_target_errors() {
 struct Identity;
 impl<T: Copy> Operation<Direct<T>> for Identity {
     type Output = T;
-    type Yield = Infallible;
+    type Yield = !;
 }
 impl<'s, T: Copy, A: ReceiverAccess<Family = Direct<T>>> Start<'s, A> for Identity {
     type Fut = impl Future<Output = T>;
-    fn start(self, mut io: A, _: Emitter<'s, Infallible>) -> Self::Fut {
+    fn start(self, mut io: A, _: Emitter<'s, !>) -> Self::Fut {
         async move {
             poll_fn(|cx| {
                 io.poll_access(cx, |access, _| Poll::Ready(*access.into_pin().get_mut().0))

@@ -3,7 +3,6 @@ use nitori_io::{PollReadExt as _, PollWriteExt as _};
 use nitori_io::{Read, ReadChunk, Write, adapters::Chunked, bridge::Std};
 use std::{
     collections::VecDeque,
-    convert::Infallible,
     io::{self, Cursor},
     num::NonZeroUsize,
     pin::Pin,
@@ -40,7 +39,7 @@ fn segment_len(segment: impl Segment) -> usize {
 }
 fn check_reader<T: nitori_call::Receiver + Unpin>(mut source: T)
 where
-    T::Family: Read<Error = Infallible>,
+    T::Family: Read<Error = !>,
 {
     let mut first = [0; 1];
     let mut second = [0; 2];
@@ -92,7 +91,7 @@ fn memory_readers_and_forwarding_share_cursors() {
 }
 fn check_chunks<T: nitori_call::Receiver + Unpin>(mut source: T)
 where
-    T::Family: ReadChunk<Error = Infallible>,
+    T::Family: ReadChunk<Error = !>,
 {
     let mut first = [0; 1];
     ready(Pin::new(&mut source).poll_read(&mut cx(), &mut first.as_mut_slice()));

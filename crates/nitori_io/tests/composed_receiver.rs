@@ -3,7 +3,6 @@
 #![feature(impl_trait_in_assoc_type)]
 use bytes::BufMut;
 use core::{
-    convert::Infallible,
     ops::ControlFlow,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
@@ -66,7 +65,7 @@ struct Delayed<'data> {
 }
 nitori_call::family_receiver!(impl ['data] for Delayed<'data>);
 impl Read for Delayed<'_> {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, B: BufMut + ?Sized>(
         host: Pin<&mut Self::ReceiverView<'v>>,

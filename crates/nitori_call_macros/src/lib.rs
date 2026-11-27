@@ -406,7 +406,7 @@ impl Operation {
         let output = self.substitute(self.output.clone(), &family, Place::Inside);
         let yield_type = match &self.yield_type {
             Some(item) => self.substitute(item.clone(), &family, Place::Inside),
-            None => parse_quote!(::core::convert::Infallible),
+            None => parse_quote!(!),
         };
         let operation = self.name.to_string();
         let doc = format!("The `{operation}` operation.");
@@ -835,7 +835,7 @@ fn primitive(
             fn start(
                 self,
                 __io: __A,
-                _: #runtime::Emitter<'__s, ::core::convert::Infallible>,
+                _: #runtime::Emitter<'__s, !>,
             ) -> Self::Fut {
                 #struct_name { __access: __io, #(#names: self.#names,)* #marker_init }
             }
@@ -1085,7 +1085,7 @@ fn expand_call(mut item: ItemFn, options: Options) -> Result<Tokens> {
             operation.substitute(item.clone(), &start_family, Place::Inside),
             quote!(&mut __emitter),
         ),
-        None => (parse_quote!(::core::convert::Infallible), Tokens::new()),
+        None => (parse_quote!(!), Tokens::new()),
     };
     definition.extend(quote! {
         impl<'__s, #parameters __A, #family_impl_parameter> #runtime::Start<'__s, __A> for #struct_name<#arguments>

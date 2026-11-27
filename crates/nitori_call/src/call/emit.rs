@@ -49,7 +49,7 @@ impl<'a, 's, Y> Emit<'a, 's, Y> {
 /// The cell must outlive `'c`, and an item of the emitter must exist.
 unsafe fn cell<'c, Y>(emitter: &Emitter<'_, Y>) -> &'c ItemCell<Y> {
     // SAFETY: the caller guarantees the lifetime; only an emitter of
-    // `Infallible` items has no cell, and no item of it exists.
+    // `!` items has no cell, and no item of it exists.
     unsafe { &*emitter.cell }
 }
 

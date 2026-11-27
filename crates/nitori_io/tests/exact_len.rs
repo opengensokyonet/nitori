@@ -1,7 +1,6 @@
 #![feature(impl_trait_in_assoc_type)]
 use bytes::{BufMut, Bytes, BytesMut};
 use core::{
-    convert::Infallible,
     future::Future,
     num::NonZeroUsize,
     pin::{Pin, pin},
@@ -143,7 +142,7 @@ impl ExactLen for Endless {
     }
 }
 impl Read for Endless {
-    type Error = Infallible;
+    type Error = !;
     type Metadata = ();
     fn poll_read<'v, O: BufMut + ?Sized>(
         _: Pin<&mut Self::ReceiverView<'v>>,
