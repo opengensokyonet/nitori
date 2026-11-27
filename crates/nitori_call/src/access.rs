@@ -280,12 +280,17 @@ pub trait AccessPlan<'a>: PlanSealed {
     fn visit<V: ViewVisitor<Self::Family>>(self, visitor: V) -> V::Output;
     #[doc(hidden)]
     fn release(self) -> ReleasePoint<'a>;
+    #[doc(hidden)]
+    fn track(self, event: crate::tracking::ValueEvent);
 }
 
 /// Provide an access by issuing a framework plan for the current view.
 ///
 /// A wrapper can forward the plan of its stored access, or use
 /// [`project_access`](crate::project_access) to expose an adapted view.
+/// Both forms carry any existing value trackers. Use
+/// [`track_values`](crate::track_values) to attach a tracker for the values
+/// decoded or encoded through the returned plan.
 /// The framework implements [`ReceiverAccess`] for every implementation.
 ///
 /// ```
@@ -375,6 +380,9 @@ impl<'a, A: RawAccess> AccessPlan<'a> for RawPlan<'a, A> {
     fn release(self) -> ReleasePoint<'a> {
         self.0.raw_release()
     }
+
+    /// A built-in access tracks nothing.
+    fn track(self, _: crate::tracking::ValueEvent) {}
 }
 
 impl<F: ReceiverFamily> ProvideAccess for ReceiverSlot<'_, F> {

@@ -473,6 +473,18 @@ the view is at hand (`AtHand`) or lent on demand (`OnPoll`). The framework
 gives `LentAccess` to types that provide `AtHand` plans. A wrapper can
 expose its adapted access while keeping its parent and state private.
 
+A wrapper can implement `TrackValues` on its state and return
+`track_values(plan, &mut tracker)` from `ProvideAccess::access_plan`.
+`nitori_codec` reports the start and end of each decoded or encoded value
+through that plan. A successful value finishes. An error or a dropped
+in-progress future abandons the value. A composite value's fields report
+their own events within its start and end. Each callback defaults to doing
+nothing.
+
+The attached tracker hears each event before the trackers on the existing
+plan. Forwarding or projecting the plan, including through a mutable borrow
+of the access, carries the attached trackers with it.
+
 Hand-written leaf operations call `poll_access`, which lends the current view
 to a callback:
 

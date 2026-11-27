@@ -174,4 +174,9 @@ impl<'a, A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> AccessPlan<'a>
     fn release(self) -> ReleasePoint<'a> {
         self.parent.release_point()
     }
+
+    /// The parent tracks the values of its projection.
+    fn track(self, event: crate::tracking::ValueEvent) {
+        crate::tracking::report(self.parent, event);
+    }
 }

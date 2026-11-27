@@ -196,6 +196,8 @@ mod lent;
 pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;
 pub use compose::{ProjectionState, ViewProjection, project_access};
+mod tracking;
+pub use tracking::{TrackValues, track_values};
 mod receivers;
 pub use receivers::{Accesses, Receivers};
 mod call;
@@ -448,6 +450,16 @@ pub mod __private {
     /// An emitter for operations that emit nothing.
     pub fn detached() -> crate::Emitter<'static, core::convert::Infallible> {
         crate::Emitter::detached()
+    }
+
+    #[doc(hidden)]
+    pub use crate::tracking::ValueEvent;
+
+    /// Report `event` to the value trackers of `access`
+    /// ([`TrackValues`](crate::TrackValues)); `nitori_codec` reports each value
+    /// it decodes or encodes.
+    pub fn report_value<A: crate::ReceiverAccess + ?Sized>(access: &mut A, event: ValueEvent) {
+        crate::tracking::report(access, event)
     }
 
     /// Complete a future that must not wait.
