@@ -80,6 +80,22 @@ impl Segmented {
     }
 }
 family_receiver!(impl [] for Segmented);
+impl AtEnd for Segmented {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        Poll::Ready(Ok(this
+            .segments
+            .front()
+            .is_none_or(|(bytes, _)| bytes.is_empty())))
+    }
+}
 impl Read for Segmented {
     type Error = !;
     type Metadata = Early;
@@ -238,6 +254,25 @@ impl Failing {
     }
 }
 family_receiver!(impl [] for Failing);
+#[derive(Debug, PartialEq, Eq)]
+struct RemainderFailed;
+
+impl AtEnd for Failing {
+    type RemainderError = RemainderFailed;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, RemainderFailed>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        if this.given >= this.fail_after {
+            return Poll::Ready(Err(RemainderFailed));
+        }
+        Poll::Ready(Ok(this.data.is_empty()))
+    }
+}
 impl Read for Failing {
     type Error = &'static str;
     type Metadata = ();
@@ -468,6 +503,18 @@ struct Waiting {
     waits: Rc<Cell<usize>>,
 }
 family_receiver!(impl [] for Waiting);
+impl AtEnd for Waiting {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(host.get_pin_mut().data.is_empty()))
+    }
+}
 impl Read for Waiting {
     type Error = !;
     type Metadata = ();
@@ -660,10 +707,25 @@ fn copy_into_lent_into_a_small_slice_reports_zero_progress_with_what_fit() {
     let error = hosts.sync_copy_into_lent_unpin(nz(4)).unwrap_err();
     assert_eq!(error.completed(), 3);
     assert!(matches!(error, CopyIntoLentError::WriteZero { .. }));
-    // The sink lent nothing once it was full, so one byte was read to tell
-    // the end from zero progress and dropped; the rest is in the source.
-    assert_eq!(hosts.0, &b"ef"[..]);
+    assert_eq!(hosts.0.sync_read_array_unpin::<3>().unwrap().value, *b"def");
     assert_eq!(storage, *b"abc");
+}
+
+#[test]
+fn copy_into_lent_reports_a_failed_end_query_after_filling_the_sink() {
+    let mut storage = [0; 4];
+    let mut hosts = (Failing::new(b"abcdef", 4), &mut storage[..]);
+    let error = hosts.sync_copy_into_lent_unpin(nz(8)).unwrap_err();
+    assert_eq!(error.completed(), 4);
+    assert!(matches!(
+        error,
+        CopyIntoLentError::AtEnd {
+            source: RemainderFailed,
+            completed: 4
+        }
+    ));
+    assert_eq!(hosts.0.polls.get(), 2);
+    assert_eq!(storage, *b"abcd");
 }
 
 #[test]
@@ -825,7 +887,7 @@ async fn lent_exactly<R, W>(
     length: usize,
 ) -> u64
 where
-    R: Read<Metadata = (), Error = !>,
+    R: Read<Metadata = (), Error = !> + AtEnd<RemainderError = !>,
     W: WriteLent<(), Report = (), Error = !>,
 {
     let mut limited = ReadLimit::new(&mut *source, length);

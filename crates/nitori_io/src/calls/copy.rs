@@ -4,18 +4,18 @@
 //! Choose by what the two sides implement: [`copy_chunks`] when the source
 //! hands out owned chunks ([`ReadChunk`](crate::ReadChunk)),
 //! [`copy_into_lent`] when the sink lends its storage
-//! ([`WriteLent`](crate::WriteLent)), and [`copy_buffered`], through a
-//! buffer of the caller's, when the two sides only [`Read`](crate::Read) and
-//! [`Write`](crate::Write). To copy exactly `n` bytes, wrap the source in
+//! ([`WriteLent`](crate::WriteLent)) and the source supports [`AtEnd`],
+//! and [`copy_buffered`], through a buffer of the caller's, when the two
+//! sides only [`Read`](crate::Read) and [`Write`](crate::Write). To copy exactly `n` bytes, wrap the source in
 //! [`ReadLimit`](crate::adapters::ReadLimit) and compare the
 //! copied count with `n`.
 // The generated operations name both families' associated types through
 // their accesses.
 #![allow(clippy::type_complexity)]
 use crate::{
-    ChunkSegment, Combine, Filled, LentOutcome, LentSegment, Read as ReadHost,
-    ReadChunk as ChunkHost, ReadChunkExt as _, ReadExt as _, ReadSegment, Write as WriteHost,
-    WriteExt as _, WriteLent, WriteSegment,
+    AtEnd, AtEndExt as _, ChunkSegment, Combine, Filled, LentOutcome, LentSegment,
+    Read as ReadHost, ReadChunk as ChunkHost, ReadChunkExt as _, ReadExt as _, ReadSegment,
+    Write as WriteHost, WriteExt as _, WriteLent, WriteSegment,
     error::{self, InsufficientCapacityError, WriteZeroError},
 };
 use bytes::Buf;
@@ -190,13 +190,15 @@ enum LentStep<M, Rp, Re, We> {
 /// between. The fill gives the sink the metadata of the segment it read as
 /// its write options; a copy of it is merged into the total.
 ///
-/// Each poll asks the sink to lend, then reads into the lent buffer in the
-/// same poll. A source that has to wait gives the loan up, so the sink keeps
-/// nothing and the source consumes nothing: dropping the operation loses no
-/// byte. When the sink accepts no byte, one byte is read from the source to
-/// tell its end from zero progress: at the end the copy succeeds, as the
-/// other copies do, and otherwise that byte is lost with the zero-progress
-/// error.
+/// To transfer bytes, the copy asks the sink to lend and reads into the
+/// buffer in the same poll. If the read has to wait, it gives up the loan
+/// without consuming or keeping any bytes. Dropping the copy during this
+/// wait loses no bytes.
+///
+/// When the sink lends no storage, [`AtEnd`] checks the source without
+/// consuming bytes. Normal EOF completes the copy, an available byte
+/// gives a zero-progress error, and a failed query returns
+/// [`CopyIntoLentError::AtEnd`].
 /// The sink counts what it keeps, so a source that reports bytes it did not
 /// put into the lent buffer is zero progress.
 #[call(sync)]
@@ -204,9 +206,12 @@ pub async fn copy_into_lent<R, W>(
     source: &mut impl ReceiverAccess<Family = R>,
     sink: &mut impl ReceiverAccess<Family = W>,
     chunk_maximum: NonZeroUsize,
-) -> Result<CopyTotal<R::Metadata, W::Report>, CopyIntoLentError<R::Error, W::Error>>
+) -> Result<
+    CopyTotal<R::Metadata, W::Report>,
+    CopyIntoLentError<R::Error, W::Error, <R as AtEnd>::RemainderError>,
+>
 where
-    R: ReadHost,
+    R: ReadHost + AtEnd,
     <R as ReadHost>::Metadata: Combine + Clone,
     W: WriteLent<R::Metadata>,
     <W as WriteHost<R::Metadata>>::Report: Combine,
@@ -284,21 +289,15 @@ where
             LentStep::WriteFailed(source) => {
                 return Err(copy_into_lent_error::WriteSnafu { completed }.into_error(source));
             }
-            LentStep::Full => {
-                // The sink is asked first, so the source may be at its end.
-                let mut probe = [0; 1];
-                match source.read(&mut &mut probe[..]).await {
-                    Ok(None) => break,
-                    Ok(Some(_)) => {
-                        return Err(error::WriteZeroSnafu { completed }.build().into());
-                    }
-                    Err(source) => {
-                        return Err(
-                            copy_into_lent_error::ReadSnafu { completed }.into_error(source)
-                        );
-                    }
+            LentStep::Full => match source.at_end().await {
+                Ok(true) => break,
+                Ok(false) => {
+                    return Err(error::WriteZeroSnafu { completed }.build().into());
                 }
-            }
+                Err(source) => {
+                    return Err(copy_into_lent_error::AtEndSnafu { completed }.into_error(source));
+                }
+            },
         }
     }
     Ok(CopyTotal {
@@ -312,23 +311,29 @@ where
 /// copied before it.
 #[derive(Debug, Snafu)]
 #[snafu(module(copy_into_lent_error), visibility(pub(crate)))]
-pub enum CopyIntoLentError<R, W> {
+pub enum CopyIntoLentError<R, W, E> {
     /// The source failed.
     #[snafu(display("read failed after {completed} bytes were copied"))]
     Read { source: R, completed: u64 },
     /// The sink failed.
     #[snafu(display("write failed after {completed} bytes were copied"))]
     Write { source: W, completed: u64 },
-    /// The sink accepted no byte, it lent nothing, while the source had more.
+    /// The source could not tell whether it had reached EOF.
+    #[snafu(display("end-of-source query failed after {completed} bytes were copied"))]
+    AtEnd { source: E, completed: u64 },
+    /// The sink lent nothing while a byte was available, or kept nothing
+    /// from a fill that reported bytes.
     #[snafu(transparent)]
     WriteZero { source: WriteZeroError<u64> },
 }
 
-impl<R, W> CopyIntoLentError<R, W> {
+impl<R, W, E> CopyIntoLentError<R, W, E> {
     /// Bytes copied before the failure.
     pub fn completed(&self) -> u64 {
         match self {
-            Self::Read { completed, .. } | Self::Write { completed, .. } => *completed,
+            Self::Read { completed, .. }
+            | Self::Write { completed, .. }
+            | Self::AtEnd { completed, .. } => *completed,
             Self::WriteZero { source } => source.completed,
         }
     }

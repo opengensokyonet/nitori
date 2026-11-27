@@ -258,7 +258,9 @@ pairing of capabilities, as the copies of `nitori_io::calls` pair them:
   (`ReadChunk`) and the sink accepts bytes (`Write`); shared chunks such as
   `Bytes` reach the sink without being copied.
 - `Fill { source, chunk_maximum }`: the sink lends its storage
-  (`WriteLent`) and the source reads into it (`Read`).
+  (`WriteLent`) and the source reads into it (`Read`). When the sink
+  lends no storage, the source checks for EOF without consuming bytes
+  (`AtEnd`).
 - `Buffered { source, buffer }`: both only read and accept bytes, through
   the caller's buffer; an empty buffer fails.
 

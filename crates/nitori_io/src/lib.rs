@@ -32,6 +32,28 @@ pub mod helpers;
 pub mod prelude;
 mod split;
 
+/// Tell whether this source layer has reached normal EOF at its cursor.
+///
+/// The query takes no bytes. It can answer once the next byte is available
+/// or the source has ended. An answer of `true` means a read into a nonempty
+/// buffer at this cursor would report normal EOF. An answer of `false`
+/// means a byte is available. A source can answer even while its exact
+/// remaining length is unknown, such as a QUIC stream before the peer sends FIN.
+#[nitori_call::capability]
+pub trait AtEnd: nitori_call::ReceiverFamily {
+    /// Why the source cannot tell what is left of it. A source that always
+    /// knows uses `!`.
+    type RemainderError;
+    /// Wait until the next byte is available or the source has reached EOF.
+    /// Register the waker before returning `Pending`.
+    fn poll_at_end<'visit>(
+        source: Pin<&mut Self::ReceiverView<'visit>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, Self::RemainderError>>
+    where
+        Self: 'visit;
+}
+
 /// Report the exact remaining byte count of this source layer at its cursor.
 ///
 /// A query consumes nothing. It is `Pending` while the length is not known
@@ -43,20 +65,18 @@ mod split;
 ///
 /// The count describes reading to normal EOF without an independent change
 /// such as seeking or appending data. A subsequent IO failure is still
-/// possible. Length queries do not require [`Read`] or [`ReadChunk`].
+/// possible. This capability extends [`AtEnd`] and shares its error type.
+/// Length queries do not require [`Read`] or [`ReadChunk`].
 #[nitori_call::capability]
-pub trait ExactLen: nitori_call::ReceiverFamily {
+pub trait ExactLen: AtEnd {
     /// This source's representation of its exact remaining byte length.
     type Length;
-    /// Why the length cannot be known; `!` for a source that always knows
-    /// it.
-    type LengthError;
     /// Return the byte length from the current cursor to normal EOF.
     /// Register the waker before returning `Pending`.
     fn poll_remaining_len<'visit>(
         source: Pin<&mut Self::ReceiverView<'visit>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Self::Length, Self::LengthError>>
+    ) -> Poll<Result<Self::Length, <Self as AtEnd>::RemainderError>>
     where
         Self: 'visit;
 }

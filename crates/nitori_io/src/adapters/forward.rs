@@ -58,14 +58,28 @@ macro_rules! forward {
             }
         }
     };
+    (AtEnd for [$($g:tt)*] $fam:ty, inner $F:ty, $how:ident $($h:ident)? $(, where [$($w:tt)*])?) => {
+        impl<$($g)*> $crate::AtEnd for $fam $(where $($w)*)? {
+            type RemainderError = <$F as $crate::AtEnd>::RemainderError;
+            fn poll_at_end<'v>(
+                host: ::core::pin::Pin<&mut Self::ReceiverView<'v>>,
+                cx: &mut ::core::task::Context<'_>,
+            ) -> ::core::task::Poll<Result<bool, Self::RemainderError>>
+            where
+                Self: 'v,
+            {
+                forward!(@call $how $($h)?; host, cx, (),
+                    |io, cx| <$F as $crate::AtEnd>::poll_at_end(io, cx))
+            }
+        }
+    };
     (ExactLen for [$($g:tt)*] $fam:ty, inner $F:ty, $how:ident $($h:ident)? $(, where [$($w:tt)*])?) => {
         impl<$($g)*> $crate::ExactLen for $fam $(where $($w)*)? {
             type Length = <$F as $crate::ExactLen>::Length;
-            type LengthError = <$F as $crate::ExactLen>::LengthError;
             fn poll_remaining_len<'v>(
                 host: ::core::pin::Pin<&mut Self::ReceiverView<'v>>,
                 cx: &mut ::core::task::Context<'_>,
-            ) -> ::core::task::Poll<Result<Self::Length, Self::LengthError>>
+            ) -> ::core::task::Poll<Result<Self::Length, Self::RemainderError>>
             where
                 Self: 'v,
             {

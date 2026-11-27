@@ -1,5 +1,5 @@
 //! Combine the metadata of successful reads.
-use crate::{ChunkSegment, Combine, ExactLen, Read, ReadChunk, ReadSegment, Skip};
+use crate::{AtEnd, ChunkSegment, Combine, ExactLen, Read, ReadChunk, ReadSegment, Skip};
 use core::{
     borrow::BorrowMut,
     fmt,
@@ -29,7 +29,7 @@ pin_project_lite::pin_project! {
     /// A source that combines the metadata from successful reads and reports `()`.
     ///
     /// Read and chunk metadata are combined in order with [`Combine`]. Skips
-    /// and length queries pass through without updating the accumulated metadata.
+    /// and remainder queries pass through without updating the accumulated metadata.
     /// The accumulated metadata persists between calls on a wrapped receiver.
     pub struct MergedMetadata<IO, M, B = M> {
         #[pin]
@@ -198,4 +198,5 @@ impl<A: ReceiverAccess, M, B: BorrowMut<M>> ProvideAccess for MergedMetadata<A, 
 forward!(Read for [F: Read<Metadata = M>, M: Combine] Merging<F, M>, inner F, Metadata = (), with poll_read_with);
 forward!(ReadChunk for [F: ReadChunk<Metadata = M>, M: Combine] Merging<F, M>, inner F, with poll_read_chunk_with);
 forward!(Skip for [F: Skip<Metadata = M>, M: Combine] Merging<F, M>, inner F, pass);
+forward!(AtEnd for [F: AtEnd, M] Merging<F, M>, inner F, pass);
 forward!(ExactLen for [F: ExactLen, M] Merging<F, M>, inner F, pass);

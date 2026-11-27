@@ -14,7 +14,7 @@ use nitori_codec::{
     prelude::*,
 };
 use nitori_io::{
-    Combine, ExactLen, Read, ReadChunk, ReadSegment, Write, WriteLent,
+    AtEnd, Combine, ExactLen, Read, ReadChunk, ReadSegment, Write, WriteLent,
     adapters::{FixedOptions, MappedOptions, ReadLimit},
     calls::{CopyBufferedError, CopyTotal},
 };
@@ -48,7 +48,7 @@ async fn write_fill<F, G>(
     sink: &mut impl ReceiverAccess<Family = G>,
 ) -> CopyTotal<F::Metadata, ()>
 where
-    F: Read<Metadata: Clone + Combine, Error = !>,
+    F: Read<Metadata: Clone + Combine, Error = !> + AtEnd<RemainderError = !>,
     G: WriteLent<F::Metadata, Report = (), Error = !>,
 {
     sink.encode(Fill {
@@ -96,7 +96,7 @@ async fn write_bounded<F, G>(
     sink: &mut impl ReceiverAccess<Family = G>,
 ) -> u64
 where
-    F: ReadChunk<Metadata = (), Error = !> + ExactLen<Length = usize, LengthError = !>,
+    F: ReadChunk<Metadata = (), Error = !> + ExactLen<Length = usize, RemainderError = !>,
     G: Write<(), Report = (), Error = !>,
 {
     let mut payload = Chunks {
@@ -146,6 +146,19 @@ struct Received {
     read: usize,
 }
 nitori_call::family_receiver!(impl [] for Received);
+impl AtEnd for Received {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        Poll::Ready(Ok(this.read == this.data.len()))
+    }
+}
 impl Read for Received {
     type Error = !;
     type Metadata = ZeroRtt;
@@ -197,9 +210,20 @@ fn writing_a_source_returns_the_merged_metadata_of_what_it_read() {
 /// A source whose length is wider than 64 bits.
 struct Huge;
 nitori_call::family_receiver!(impl [] for Huge);
+impl AtEnd for Huge {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        _: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(false))
+    }
+}
 impl ExactLen for Huge {
     type Length = u128;
-    type LengthError = !;
     fn poll_remaining_len<'v>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
@@ -216,9 +240,20 @@ struct Reset;
 #[derive(Debug, PartialEq, Eq)]
 struct Reason;
 nitori_call::family_receiver!(impl [] for Reset);
+impl AtEnd for Reset {
+    type RemainderError = Reason;
+    fn poll_at_end<'v>(
+        _: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, Reason>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Err(Reason))
+    }
+}
 impl ExactLen for Reset {
     type Length = u64;
-    type LengthError = Reason;
     fn poll_remaining_len<'v>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
@@ -233,7 +268,7 @@ impl ExactLen for Reset {
 #[call]
 async fn chunks_len<F: ExactLen>(
     source: &mut impl ReceiverAccess<Family = F>,
-) -> Result<u64, SourceLengthError<F::LengthError>>
+) -> Result<u64, SourceLengthError<<F as AtEnd>::RemainderError>>
 where
     u64: TryFrom<<F as ExactLen>::Length>,
 {
@@ -248,7 +283,7 @@ where
 #[call]
 async fn fill_len<F: ExactLen>(
     source: &mut impl ReceiverAccess<Family = F>,
-) -> Result<u64, SourceLengthError<F::LengthError>>
+) -> Result<u64, SourceLengthError<<F as AtEnd>::RemainderError>>
 where
     u64: TryFrom<<F as ExactLen>::Length>,
 {
@@ -276,9 +311,20 @@ struct Later {
     polls: usize,
 }
 nitori_call::family_receiver!(impl [] for Later);
+impl AtEnd for Later {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Self::poll_remaining_len(host, cx).map(|result| result.map(|len| len == 0))
+    }
+}
 impl ExactLen for Later {
     type Length = usize;
-    type LengthError = !;
     fn poll_remaining_len<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
@@ -297,7 +343,7 @@ impl ExactLen for Later {
 }
 
 #[call]
-async fn buffered_len<F: ExactLen<Length = usize, LengthError = !>>(
+async fn buffered_len<F: ExactLen<Length = usize, RemainderError = !>>(
     source: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<u64, SourceLengthError<!>> {
     Buffered {

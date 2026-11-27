@@ -1,5 +1,5 @@
-//! Byte budgets shared by reads, chunk reads, skips, and length queries.
-use crate::{ChunkSegment, ExactLen, Min, Read, ReadChunk, ReadSegment, Skip};
+//! Byte budgets shared by reads, chunk reads, skips, and remainder queries.
+use crate::{AtEnd, ChunkSegment, ExactLen, Min, Read, ReadChunk, ReadSegment, Skip};
 use bytes::{Buf, BufMut, buf::Limit};
 use core::{
     borrow::BorrowMut,
@@ -31,9 +31,10 @@ pin_project_lite::pin_project! {
     /// A source that lets reads and skips consume up to a byte quota.
     ///
     /// A zero quota answers EOF without polling the source. While the quota
-    /// remains positive, even empty requests reach the source. If the source
-    /// implements [`ExactLen`] and its length can be compared with the quota,
-    /// a length query reports their minimum.
+    /// remains positive, even empty read requests reach the source. An
+    /// [`AtEnd`] query answers EOF at zero and reaches the source otherwise.
+    /// If the source implements [`ExactLen`] and its length can be compared
+    /// with the quota, a length query reports their minimum.
     /// The quota type is independent of the size of an individual read. Use a
     /// typed literal such as `6u8` when the quota type is otherwise unknown.
     pub struct ReadLimit<IO, L = usize, B = L> {
@@ -214,17 +215,34 @@ forward!(Read for [F: Read, L] Limited<F, L>, inner F, Metadata = F::Metadata, w
 forward!(ReadChunk for [F: ReadChunk, L] Limited<F, L>, inner F, with poll_read_chunk_with,
     where [L: Clone + Min<usize, Output = usize> + SubAssign<<usize as Min<L>>::Output>, usize: Min<L>]);
 
-impl<F: ExactLen, L: Clone> ExactLen for Limited<F, L>
+impl<F: AtEnd, L: Clone + Min<usize, Output = usize>> AtEnd for Limited<F, L> {
+    type RemainderError = F::RemainderError;
+
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, Self::RemainderError>>
+    where
+        Self: 'v,
+    {
+        let view = host.project();
+        if Min::min((**view.quota).clone(), usize::MAX) == 0 {
+            return Poll::Ready(Ok(true));
+        }
+        F::poll_at_end(view.io, cx)
+    }
+}
+
+impl<F: ExactLen, L: Clone + Min<usize, Output = usize>> ExactLen for Limited<F, L>
 where
     F::Length: Min<L>,
 {
     type Length = <F::Length as Min<L>>::Output;
-    type LengthError = F::LengthError;
 
     fn poll_remaining_len<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Self::Length, Self::LengthError>>
+    ) -> Poll<Result<Self::Length, Self::RemainderError>>
     where
         Self: 'v,
     {

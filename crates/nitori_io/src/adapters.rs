@@ -140,16 +140,31 @@ where
         <T::Family as Skip>::poll_skip(core::pin::pin!(inner.view()), cx, maximum)
     }
 }
+impl<T: Receiver> crate::AtEnd for Direct<Chunked<T>>
+where
+    T::Family: crate::AtEnd,
+{
+    type RemainderError = <T::Family as crate::AtEnd>::RemainderError;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, Self::RemainderError>>
+    where
+        Self: 'v,
+    {
+        let inner = host.get_pin_mut().project().inner;
+        <T::Family as crate::AtEnd>::poll_at_end(core::pin::pin!(inner.view()), cx)
+    }
+}
 impl<T: Receiver> crate::ExactLen for Direct<Chunked<T>>
 where
     T::Family: crate::ExactLen,
 {
     type Length = <T::Family as crate::ExactLen>::Length;
-    type LengthError = <T::Family as crate::ExactLen>::LengthError;
     fn poll_remaining_len<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Self::Length, Self::LengthError>>
+    ) -> Poll<Result<Self::Length, Self::RemainderError>>
     where
         Self: 'v,
     {
@@ -280,14 +295,27 @@ impl<F: Skip> Skip for Lent<F> {
             .with(|parent| F::poll_skip(parent.into_pin(), cx, maximum))
     }
 }
+/// The end of the lent view.
+impl<F: crate::AtEnd> crate::AtEnd for Lent<F> {
+    type RemainderError = F::RemainderError;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, F::RemainderError>>
+    where
+        Self: 'v,
+    {
+        host.get_mut()
+            .with(|parent| F::poll_at_end(parent.into_pin(), cx))
+    }
+}
 /// The exact length of the lent view.
 impl<F: crate::ExactLen> crate::ExactLen for Lent<F> {
     type Length = F::Length;
-    type LengthError = F::LengthError;
     fn poll_remaining_len<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<F::Length, F::LengthError>>
+    ) -> Poll<Result<F::Length, F::RemainderError>>
     where
         Self: 'v,
     {

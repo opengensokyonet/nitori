@@ -104,6 +104,18 @@ impl Waiting {
     }
 }
 family_receiver!(impl [] for Waiting);
+impl AtEnd for Waiting {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(host.get_pin_mut().data.is_empty()))
+    }
+}
 impl Read for Waiting {
     type Error = !;
     type Metadata = ();

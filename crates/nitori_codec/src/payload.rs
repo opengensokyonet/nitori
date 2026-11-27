@@ -5,7 +5,8 @@
 //! Wrap the source to choose how its bytes reach the sink: [`Chunks`] when
 //! the source hands out owned chunks ([`ReadChunk`]) and the sink accepts
 //! bytes ([`Write`]), [`Fill`] when the sink lends its storage
-//! ([`WriteLent`]) to a source that reads into it ([`Read`]), and
+//! ([`WriteLent`]) to a source that reads into it ([`Read`]) and can
+//! answer whether it has reached EOF ([`AtEnd`]), and
 //! [`Buffered`], through a buffer of the caller's, when both only read and
 //! accept bytes. A bare source is not a value: which of the three it would
 //! take cannot be told from it, and a crate that keeps a source in a type of
@@ -26,7 +27,7 @@ use crate::{EncodeInto, EncodedLen};
 use core::num::NonZeroUsize;
 use nitori_call::ReceiverAccess;
 use nitori_io::{
-    Combine, ExactLen, ExactLenExt as _, Read, ReadChunk, Write, WriteLent,
+    AtEnd, Combine, ExactLen, ExactLenExt as _, Read, ReadChunk, Write, WriteLent,
     calls::{
         CopyBufferedError, CopyChunksError, CopyIntoLentError, CopyTotal, copy_buffered,
         copy_chunks, copy_into_lent,
@@ -49,6 +50,8 @@ pub struct Chunks<A> {
 /// A source written out by reading it into storage the sink lends
 /// ([`WriteLent`]), at most `chunk_maximum` bytes for each loan: a source
 /// that reads into a buffer ([`Read`]) without an intermediate copy.
+/// If the sink fills up, the source reports whether it has reached EOF
+/// ([`AtEnd`]) without consuming bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct Fill<A> {
     /// The source.
@@ -83,13 +86,17 @@ where
 
 impl<A, S, M> EncodeInto<S> for Fill<A>
 where
-    A: ReceiverAccess<Family: Read<Metadata = M>>,
+    A: ReceiverAccess<Family: Read<Metadata = M> + AtEnd>,
     M: Combine + Clone,
     S: ReceiverAccess<Family: WriteLent<M>>,
     <S::Family as Write<M>>::Report: Combine,
 {
     type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
-    type Error = CopyIntoLentError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
+    type Error = CopyIntoLentError<
+        <A::Family as Read>::Error,
+        <S::Family as Write<M>>::Error,
+        <A::Family as AtEnd>::RemainderError,
+    >;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
         copy_into_lent(&mut self.source, &mut sink, self.chunk_maximum).await
     }
@@ -125,7 +132,7 @@ pub enum SourceLengthError<E> {
 /// The exact remaining length of `source`, as the length of its encoding.
 async fn source_len<A>(
     source: &mut A,
-) -> Result<u64, SourceLengthError<<A::Family as ExactLen>::LengthError>>
+) -> Result<u64, SourceLengthError<<A::Family as AtEnd>::RemainderError>>
 where
     A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
@@ -144,7 +151,7 @@ where
     A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
-    type LengthError = SourceLengthError<<A::Family as ExactLen>::LengthError>;
+    type LengthError = SourceLengthError<<A::Family as AtEnd>::RemainderError>;
     async fn encoded_len(&mut self) -> Result<u64, Self::LengthError> {
         source_len(&mut self.source).await
     }
@@ -154,7 +161,7 @@ where
     A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
-    type LengthError = SourceLengthError<<A::Family as ExactLen>::LengthError>;
+    type LengthError = SourceLengthError<<A::Family as AtEnd>::RemainderError>;
     async fn encoded_len(&mut self) -> Result<u64, Self::LengthError> {
         source_len(&mut self.source).await
     }
@@ -164,7 +171,7 @@ where
     A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
-    type LengthError = SourceLengthError<<A::Family as ExactLen>::LengthError>;
+    type LengthError = SourceLengthError<<A::Family as AtEnd>::RemainderError>;
     async fn encoded_len(&mut self) -> Result<u64, Self::LengthError> {
         source_len(&mut self.source).await
     }

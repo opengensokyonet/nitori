@@ -1,5 +1,5 @@
 //! Skipping by reading and discarding bytes or chunks.
-use crate::{ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
+use crate::{AtEnd, ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
 use bytes::Buf;
 use core::{
     fmt,
@@ -21,7 +21,7 @@ const SCRATCH_LEN: usize = 8192;
 /// Use `ReadSkip<()>` for `S` to skip by reading or `ReadChunkSkip<()>`
 /// to skip by dropping chunks. The IO parameter of the marker is `()`.
 ///
-/// Both forward [`Read`], [`ReadChunk`], [`ExactLen`], [`Write`] and
+/// Both forward [`Read`], [`ReadChunk`], [`AtEnd`], [`ExactLen`], [`Write`] and
 /// [`WriteLent`] when `F` supports them.
 pub struct Skippable<F, S>(PhantomData<fn(F) -> F>, PhantomData<S>);
 
@@ -102,6 +102,7 @@ macro_rules! skip_wrapper {
         }
         forward!(Read for [F: Read] Skippable<F, $W<()>>, inner F, Metadata = <F as Read>::Metadata, pass);
         forward!(ReadChunk for [F: ReadChunk] Skippable<F, $W<()>>, inner F, pass);
+        forward!(AtEnd for [F: AtEnd] Skippable<F, $W<()>>, inner F, pass);
         forward!(ExactLen for [F: ExactLen] Skippable<F, $W<()>>, inner F, pass);
         forward!(Write<O> for [F: Write<O>, O] Skippable<F, $W<()>>, inner F, options O, pass);
         forward!(WriteLent<O> for [F: WriteLent<O>, O] Skippable<F, $W<()>>, inner F, pass);

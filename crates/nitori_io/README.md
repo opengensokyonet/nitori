@@ -10,7 +10,9 @@ Each method accepts a pinned `Self::ReceiverView<'visit>` for any valid visit li
 errors and chunks are stable associated types independent of that visit.
 `Read` fills any `BufMut`; `ReadChunk: Read` additionally returns owned `Buf`
 chunks from the same cursor, and `Skip: Read` advances that cursor without
-delivering the bytes (see [Skipping](#skipping)). `Write<O>` accepts any `Buf`
+delivering the bytes (see [Skipping](#skipping)). `AtEnd` and `ExactLen`
+query the source cursor without consuming bytes (see [Source end](#source-end)
+and [Exact remaining length](#exact-remaining-length)). `Write<O>` accepts any `Buf`
 and writes it with the write options `O`, `()` for a sink that takes none;
 `WriteLent<O>: Write<O>` lends the sink's own storage to be filled in place (see
 [Lending storage](#lending-storage)). Reads report their bytes in segments with
@@ -206,9 +208,17 @@ assert_eq!(chunk, &b"hel"[..]);
 assert_eq!(io.into_inner().into_inner().position(), 3);
 ```
 
+## Source end
+
+A family implementing `AtEnd` can tell whether the source has reached
+normal EOF at its current cursor. The query takes no bytes and waits until
+the next byte is available or the source has ended. A QUIC stream can
+answer before the peer sends FIN, while its exact remaining length is
+still unknown. Inside an operation, `at_end()` awaits `poll_at_end`.
+
 ## Exact remaining length
 
-A family implementing `ExactLen` can report the exact byte length from its
+`ExactLen` extends `AtEnd` and reports the exact byte length from the
 current cursor to normal EOF without reading. Its associated `Length` is
 chosen by the source. Memory readers report `usize`. A source that never
 reaches normal EOF may report the zero-sized `Infinite`. A subsequent IO
@@ -217,8 +227,9 @@ the capabilities they provide.
 
 The query is `poll_remaining_len`, which can wait: a received stream knows
 its final size only once the peer sends it. It fails with the source's
-`LengthError` when the length cannot be known, such as after a reset;
-memory sources report `!`. Inside an operation, `remaining_len()` awaits it.
+`RemainderError` when the length cannot be known, such as after a reset.
+Both queries share this error type, which is `!` for memory sources.
+Inside an operation, `remaining_len()` awaits the length query.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
@@ -228,7 +239,7 @@ use nitori_io::{adapters::ReadLimit, prelude::*};
 #[call(sync)]
 async fn bounded_len<F: ExactLen<Length = usize>>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<u8, F::LengthError> {
+) -> Result<u8, <F as AtEnd>::RemainderError> {
     ReadLimit::new(io, 4u8).remaining_len().await
 }
 let mut input = &b"abc"[..];
@@ -238,9 +249,9 @@ assert_eq!(input, b"abc");
 
 Slices, `Bytes`, `BytesMut`, `VecDeque<u8>`, and the standard-library
 `Cursor` over byte arrays, slices, vectors, boxed slices, `Bytes`, or
-`BytesMut` support the query. Seeking a cursor past its end gives zero.
-`Chunked` forwards its inner source's exact length, with its `Length` and
-`LengthError`.
+`BytesMut` support both queries. A cursor positioned past its end reports
+EOF and zero remaining bytes. `Chunked` forwards both queries to its inner
+source.
 
 ## Byte budgets
 
@@ -660,11 +671,13 @@ what the two implement, with no specialization:
 - `calls::copy_chunks(source, sink, chunk_maximum)` takes chunks from a
   `ReadChunk` source and writes each completely; owned chunks such as `Bytes`
   can reach the sink without a copy.
-- `calls::copy_into_lent(source, sink, chunk_maximum)` reads from a `Read`
-  source straight into the storage a `WriteLent` sink lends, in the same
-  poll. A source that has to wait gives the loan up, so cancellation loses
-  nothing. When the sink accepts no byte, one byte is read to tell the
-  source's end, which succeeds, from zero progress.
+- `calls::copy_into_lent(source, sink, chunk_maximum)` reads from a source
+  with `Read` and `AtEnd` straight into the storage a `WriteLent` sink lends,
+  in the same poll. A source that has to wait gives the loan up, so
+  cancellation during the wait loses nothing. When the sink lends no
+  storage, the copy checks for EOF without consuming bytes. It succeeds
+  at EOF, reports zero progress if a byte is available, or returns
+  `CopyIntoLentError::AtEnd` if the query fails.
 - `calls::copy_buffered(source, sink, buffer)` reads into a buffer of the
   caller's and writes it out, for a source and a sink with only `Read` and
   `Write`. An empty buffer is an `InsufficientCapacityError` before any IO.

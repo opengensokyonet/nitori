@@ -102,9 +102,20 @@ impl Skip for Received {
         Poll::Ready(Ok((count > 0).then_some(count)))
     }
 }
+impl AtEnd for Received {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(host.get_pin_mut().data.is_empty()))
+    }
+}
 impl ExactLen for Received {
     type Length = usize;
-    type LengthError = !;
     fn poll_remaining_len<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
@@ -158,7 +169,7 @@ async fn chunks_skip_and_length<F>(
 where
     F: ReadChunk<Metadata = ZeroRtt, Chunk = Bytes>
         + Skip<Count = usize>
-        + ExactLen<Length = usize, LengthError = !>,
+        + ExactLen<Length = usize, RemainderError = !>,
     <F as Read>::Error: core::fmt::Debug,
 {
     let mut merging = MergedMetadata::new(&mut *io, Default::default());

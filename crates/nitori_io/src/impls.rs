@@ -366,9 +366,20 @@ impl WriteLent<()> for Direct<&mut [u8]> {
 
 macro_rules! memory_len {
     ($($ty:ty),* $(,)?) => {$(
+        impl crate::AtEnd for Direct<$ty> {
+            type RemainderError = !;
+
+            fn poll_at_end<'v>(
+                host: Pin<&mut Self::ReceiverView<'v>>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<bool, !>>
+            where Self: 'v {
+                Poll::Ready(Ok(!host.get_pin_mut().has_remaining()))
+            }
+        }
+
         impl crate::ExactLen for Direct<$ty> {
             type Length = usize;
-            type LengthError = !;
 
             fn poll_remaining_len<'v>(
                 host: Pin<&mut Self::ReceiverView<'v>>,
@@ -390,9 +401,23 @@ mod cursor_length {
     // Cursor::remaining consults AsRef on each call. Implement the length
     // promise for byte storage whose AsRef exposes a stable length.
     #[allow(private_bounds)]
+    impl<T: StableBytes + Unpin> crate::AtEnd for Direct<Cursor<T>> {
+        type RemainderError = !;
+
+        fn poll_at_end<'v>(
+            host: Pin<&mut Self::ReceiverView<'v>>,
+            _: &mut Context<'_>,
+        ) -> Poll<Result<bool, !>>
+        where
+            Self: 'v,
+        {
+            Poll::Ready(Ok(!host.get_pin_mut().has_remaining()))
+        }
+    }
+
+    #[allow(private_bounds)]
     impl<T: StableBytes + Unpin> crate::ExactLen for Direct<Cursor<T>> {
         type Length = usize;
-        type LengthError = !;
         fn poll_remaining_len<'v>(
             host: Pin<&mut Self::ReceiverView<'v>>,
             _: &mut Context<'_>,

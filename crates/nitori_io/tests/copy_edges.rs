@@ -2,7 +2,7 @@
 // The generated operations name both families' associated types.
 #![allow(clippy::type_complexity)]
 //! The edges of the three copies: a sink that is exactly full, a budget that
-//! ends mid-copy, what is lost to the probe of a full sink, a source that
+//! ends mid-copy, what a full lending sink leaves in the source, a source that
 //! reports bytes it did not put, reports that merge through a write budget,
 //! and a sink composed with a skip state.
 use bytes::{Buf, BufMut, Bytes};
@@ -114,6 +114,19 @@ struct Liar {
     lies: usize,
 }
 family_receiver!(impl [] for Liar);
+impl AtEnd for Liar {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        Poll::Ready(Ok(this.honest.is_empty() && this.lies == 0))
+    }
+}
 impl Read for Liar {
     type Error = !;
     type Metadata = ();
@@ -181,12 +194,12 @@ async fn lent_with<R, W>(
     writes: usize,
     chunk: NonZeroUsize,
 ) -> (
-    Result<CopyTotal<(), <W as Write<()>>::Report>, CopyIntoLentError<!, !>>,
+    Result<CopyTotal<(), <W as Write<()>>::Report>, CopyIntoLentError<!, !, !>>,
     usize,
     usize,
 )
 where
-    R: Read<Metadata = (), Error = !>,
+    R: Read<Metadata = (), Error = !> + AtEnd<RemainderError = !>,
     W: WriteLent<(), Error = !, Report: Combine>,
 {
     let mut limited_source = ReadLimit::new(&mut *source, reads);
@@ -344,8 +357,7 @@ fn a_read_limit_ends_a_copy_into_a_slice_exactly_when_it_is_full() {
         );
         assert_eq!(run.written, DATA[..5]);
         assert_eq!(run.reads_left, 0);
-        // Bytes beyond the limit stay in the source; the probe of the full
-        // slice reads at the limit, which answers EOF without reading.
+        // The read limit reports EOF and leaves bytes beyond the quota in the source.
         assert_eq!(run.source_left, DATA.len() - 5);
     }
 }
@@ -389,19 +401,17 @@ fn a_source_longer_than_the_slice_is_zero_progress_with_what_fit() {
         assert_eq!(run.ended, Ended::WriteZero { completed: 5 });
         assert_eq!(run.written, DATA[..5]);
     }
-    // The lending copy read one byte from the source to tell its end from
-    // zero progress, and that byte is gone: 8 - 5 - 1.
-    assert_eq!(lent.source_left, 2);
+    assert_eq!(lent.source_left, 3);
 }
 
 #[test]
-fn a_full_slice_and_a_source_with_one_more_byte_lose_exactly_that_byte() {
+fn a_full_lending_slice_leaves_the_last_byte_in_the_source() {
     let [chunks, lent, buffered] = runs_into_slice(&DATA[..4], 3, usize::MAX, usize::MAX);
     for run in [&chunks, &lent, &buffered] {
         assert_eq!(run.ended, Ended::WriteZero { completed: 3 });
         assert_eq!(run.written, DATA[..3]);
     }
-    assert_eq!(lent.source_left, 0);
+    assert_eq!(lent.source_left, 1);
 }
 
 // A budget that ends in the middle of the copy.
@@ -416,9 +426,7 @@ fn a_write_limit_that_ends_mid_copy_reports_zero_progress_with_the_count_so_far(
         assert_eq!(run.written, DATA[..5]);
         assert_eq!(run.writes_left, 0);
     }
-    // The lending copy asked the sink before reading: it read 5 bytes into
-    // the loans, then one byte as the probe.
-    assert_eq!(lent.source_left, DATA.len() - 5 - 1);
+    assert_eq!(lent.source_left, DATA.len() - 5);
 }
 
 #[test]
@@ -527,9 +535,9 @@ async fn lent_into_skippable<R, W>(
     source: &mut impl ReceiverAccess<Family = R>,
     sink: &mut impl ReceiverAccess<Family = W>,
     budget: usize,
-) -> Result<u64, CopyIntoLentError<!, !>>
+) -> Result<u64, CopyIntoLentError<!, !, !>>
 where
-    R: Read<Metadata = (), Error = !>,
+    R: Read<Metadata = (), Error = !> + AtEnd<RemainderError = !>,
     W: WriteLent<(), Report = (), Error = !>,
 {
     let mut limited = WriteLimit::new(&mut *sink, budget);

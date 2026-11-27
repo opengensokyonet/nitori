@@ -3,10 +3,10 @@
 //!
 //! The extension traits are imported anonymously, so their methods are
 //! available without their names entering scope.
-pub use crate::{ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
+pub use crate::{AtEnd, ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
 
 pub use crate::{
-    ExactLenExt as _, PollReadExt as _, PollWriteExt as _, ReadChunkExt as _,
+    AtEndExt as _, ExactLenExt as _, PollReadExt as _, PollWriteExt as _, ReadChunkExt as _,
     ReadChunkHostExt as _, ReadExt as _, ReadHostExt as _, SkipExt as _, SkipHostExt as _,
     WriteExt as _, WriteHostExt as _,
 };

@@ -118,9 +118,20 @@ fn length_tracks_both_read_paths_and_distinguishes_early_eof_from_budget() {
 
 struct Endless;
 nitori_call::family_receiver!(impl [] for Endless);
+impl AtEnd for Endless {
+    type RemainderError = !;
+    fn poll_at_end<'v>(
+        _: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(false))
+    }
+}
 impl ExactLen for Endless {
     type Length = Infinite;
-    type LengthError = !;
     fn poll_remaining_len<'v>(
         _: Pin<&mut Self::ReceiverView<'v>>,
         _: &mut Context<'_>,
@@ -157,6 +168,7 @@ where
     <F as Read>::Error: core::fmt::Debug,
 {
     let mut outer = ReadLimit::new(&mut *io, Infinite);
+    assert!(matches!(outer.at_end().await, Ok(false)));
     let _: Infinite = query(&mut outer).await;
     let mut inner = ReadLimit::new(&mut outer, u128::MAX);
     let before = query(&mut inner).await;
@@ -192,9 +204,20 @@ struct Received {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Reset;
 nitori_call::family_receiver!(impl [] for Received);
+impl AtEnd for Received {
+    type RemainderError = Reset;
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, Reset>>
+    where
+        Self: 'v,
+    {
+        Self::poll_remaining_len(host, cx).map(|result| result.map(|len| len == 0))
+    }
+}
 impl ExactLen for Received {
     type Length = usize;
-    type LengthError = Reset;
     fn poll_remaining_len<'v>(
         host: Pin<&mut Self::ReceiverView<'v>>,
         cx: &mut Context<'_>,
@@ -243,7 +266,7 @@ fn finish<Q: Future>(query: Q) -> (Q::Output, usize) {
 #[call]
 async fn query_outcome<F: ExactLen>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> Result<F::Length, F::LengthError> {
+) -> Result<F::Length, <F as AtEnd>::RemainderError> {
     io.remaining_len().await
 }
 
