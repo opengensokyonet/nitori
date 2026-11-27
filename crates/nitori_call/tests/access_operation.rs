@@ -1,9 +1,7 @@
 //! Record operations over either a receiver or a call slot.
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use futures_util::StreamExt as _;
-use nitori_call::{
-    AccessMode, AccessOperation, ComposedReceiver, Receiver, ReceiverAccess, call, family_receiver,
-};
+use nitori_call::{AccessMode, AccessOperation, Receiver, ReceiverAccess, call, family_receiver};
 use nitori_io::{Read, adapters::ReadLimit, prelude::*};
 use std::{
     future::Future,
@@ -32,7 +30,7 @@ struct RecordStream<I> {
 }
 
 struct RecordState {
-    payload: ReadLimit<usize>,
+    payload: usize,
     length: u8,
     phase: Phase,
 }
@@ -75,7 +73,7 @@ impl<A: ReceiverAccess<Family: Read>> AccessOperation<A> for NextRecord<'_> {
             Phase::Interrupted => return Err(NextError::Interrupted),
             Phase::InRecord => {}
         }
-        drain(&mut io.compose(&mut state.payload))
+        drain(&mut ReadLimit::borrowing(&mut *io, &mut state.payload))
             .await
             .map_err(NextError::Read)?;
         state.phase = Phase::Interrupted;
@@ -85,7 +83,7 @@ impl<A: ReceiverAccess<Family: Read>> AccessOperation<A> for NextRecord<'_> {
                 Ok(false)
             }
             Some(length) => {
-                state.payload = ReadLimit(usize::from(length));
+                state.payload = usize::from(length);
                 state.length = length;
                 state.phase = Phase::InRecord;
                 Ok(true)
@@ -94,7 +92,7 @@ impl<A: ReceiverAccess<Family: Read>> AccessOperation<A> for NextRecord<'_> {
     }
 }
 
-struct ReadPayload<'a, const N: usize>(&'a mut ReadLimit<usize>);
+struct ReadPayload<'a, const N: usize>(&'a mut usize);
 
 impl<A, const N: usize> AccessOperation<A> for ReadPayload<'_, N>
 where
@@ -103,7 +101,7 @@ where
     type Output = Option<[u8; N]>;
 
     async fn run_on(self, io: &mut A) -> Self::Output {
-        io.compose(self.0)
+        ReadLimit::borrowing(io, self.0)
             .read_array::<N>()
             .await
             .ok()
@@ -119,7 +117,7 @@ impl<I> RecordStream<I> {
         Ok(ReadHead.run_on(&mut io).await?.map(|length| Self {
             io,
             state: RecordState {
-                payload: ReadLimit(usize::from(length)),
+                payload: usize::from(length),
                 length,
                 phase: Phase::InRecord,
             },
@@ -305,7 +303,7 @@ fn a_skip_dropped_midway_is_resumed() {
         }
     }
     assert_eq!(stream.state.phase, Phase::InRecord);
-    assert_eq!(stream.state.payload.0, 1);
+    assert_eq!(stream.state.payload, 1);
     assert!(block(stream.next_record()).unwrap());
     assert_eq!(block(stream.read_word()), Some(8));
     assert_eq!(stream.state.length, 3);
@@ -458,7 +456,7 @@ fn a_release_point_completes_at_once_with_a_fixed_view() {
 fn items_of_an_operation_on_the_current_record() {
     let mut stream = block(RecordStream::read(INPUT)).unwrap().unwrap();
     assert!(block(stream.next_record()).unwrap());
-    let mut receiver = ComposedReceiver::new(&mut stream.io, &mut stream.state.payload);
+    let mut receiver = ReadLimit::borrowing(&mut stream.io, &mut stream.state.payload);
     let mut operation = pin!(receiver.bytes_unpin());
     let mut items = Vec::new();
     let count = block(async {
@@ -476,15 +474,15 @@ fn items_of_an_operation_on_the_current_record() {
 async fn check_nested_limits<F: Read<Metadata = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) {
-    let mut outer = io.compose(ReadLimit(5usize));
+    let mut outer = ReadLimit::new(&mut *io, 5usize);
     {
-        let mut inner = outer.compose(ReadLimit(2usize));
+        let mut inner = ReadLimit::new(&mut outer, 2usize);
         assert_eq!(inner.read_array::<2>().await.unwrap().value, [2, 0]);
         assert!(inner.read_array::<1>().await.is_err());
     }
     assert_eq!(outer.read_array::<3>().await.unwrap().value, [7, 3, 0]);
     assert!(outer.read_array::<1>().await.is_err());
-    assert_eq!(outer.into_state().0, 0);
+    assert_eq!(outer.into_parts().1, 0);
     assert_eq!(io.read_array::<1>().await.unwrap().value, [8]);
 }
 

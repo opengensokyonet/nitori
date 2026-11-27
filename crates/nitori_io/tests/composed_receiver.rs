@@ -8,7 +8,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use nitori_call::{Call, CallPoll, ComposedReceiver, Lend, Receiver, ReceiverAccess, call};
+use nitori_call::{Call, CallPoll, Lend, Receiver, ReceiverAccess, call};
 use nitori_io::{
     adapters::{Limited, ReadLimit},
     calls::ReadArrayError,
@@ -28,34 +28,34 @@ async fn read_two<F: Read<Metadata: nitori_io::Combine>>(
 async fn read_two_within_one<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> (Result<[u8; 2], ReadArrayError<F::Error>>, usize) {
-    let mut limited = io.compose(ReadLimit(1usize));
+    let mut limited = ReadLimit::new(&mut *io, 1usize);
     let result = limited.read_array::<2>().await.map(|read| read.value);
-    (result, limited.into_state().0)
+    (result, limited.into_parts().1)
 }
 
 #[test]
 fn the_budget_outlives_each_call() {
-    let mut framed = ComposedReceiver::new(&b"abcdef"[..], ReadLimit(3usize));
+    let mut framed = ReadLimit::new(&b"abcdef"[..], 3usize);
     assert_eq!(framed.sync_read_two_unpin().unwrap(), *b"ab");
-    assert_eq!(framed.get_ref().1, &ReadLimit(1));
+    assert_eq!(framed.get_ref().1, &1);
     // One byte is left in the budget: the next read of two stops after it.
     let error = framed.sync_read_two_unpin().unwrap_err();
     assert_eq!(error.completed(), 1);
-    assert_eq!(framed.get_ref().1, &ReadLimit(0));
+    assert_eq!(framed.get_ref().1, &0);
     let (rest, _) = framed.into_parts();
     assert_eq!(rest, b"def");
 }
 
 #[test]
 fn a_call_composes_again_within_the_budget() {
-    let mut framed = ComposedReceiver::new(&b"abcdef"[..], ReadLimit(4usize));
+    let mut framed = ReadLimit::new(&b"abcdef"[..], 4usize);
     let (result, inner) = framed.sync_read_two_within_one_unpin();
     assert_eq!(result.unwrap_err().completed(), 1);
     assert_eq!(inner, 0);
     // The byte read through the inner budget is counted by the outer one.
-    assert_eq!(framed.get_ref().1, &ReadLimit(3));
+    assert_eq!(framed.get_ref().1, &3);
     assert_eq!(framed.sync_read_two_unpin().unwrap(), *b"bc");
-    assert_eq!(framed.get_ref(), (&&b"def"[..], &ReadLimit(1)));
+    assert_eq!(framed.get_ref(), (&&b"def"[..], &1));
 }
 
 /// A source that delivers one byte on every second poll.
@@ -91,16 +91,14 @@ impl Read for Delayed<'_> {
 
 #[test]
 fn a_cancelled_call_leaves_the_source_and_the_budget_in_step() {
-    let mut framed = ComposedReceiver::new(
+    let mut framed = ReadLimit::new(
         Delayed {
             bytes: b"abcdef",
             waiting: false,
         },
-        ReadLimit(4usize),
+        4usize,
     );
-    let mut call = Box::pin(Call::<Limited<Delayed<'_>, ReadLimit>, _>::new(
-        ReadTwo::new(),
-    ));
+    let mut call = Box::pin(Call::<Limited<Delayed<'_>, usize>, _>::new(ReadTwo::new()));
     let mut cx = Context::from_waker(Waker::noop());
     // The second poll reads the first byte, then waits for the second.
     for _ in 0..2 {
@@ -113,11 +111,9 @@ fn a_cancelled_call_leaves_the_source_and_the_budget_in_step() {
     drop(call);
     let (source, budget) = framed.get_ref();
     assert_eq!(source.bytes, b"bcdef");
-    assert_eq!(budget, &ReadLimit(3));
+    assert_eq!(budget, &3);
     // A new call goes on from there.
-    let mut call = pin!(Call::<Limited<Delayed<'_>, ReadLimit>, _>::new(
-        ReadTwo::new()
-    ));
+    let mut call = pin!(Call::<Limited<Delayed<'_>, usize>, _>::new(ReadTwo::new()));
     let read = loop {
         let poll = call.as_mut().poll_with(
             Some(Lend::Fixed(pin!(Pin::new(&mut framed).view()))),
@@ -130,7 +126,7 @@ fn a_cancelled_call_leaves_the_source_and_the_budget_in_step() {
         }
     };
     assert_eq!(read.unwrap(), *b"bc");
-    assert_eq!(framed.get_ref().1, &ReadLimit(1));
+    assert_eq!(framed.get_ref().1, &1);
 }
 
 fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {

@@ -18,11 +18,10 @@
 //!
 //! As in the copies, the bytes are written with the metadata they were read
 //! with as their write options: the sink takes the source's metadata
-//! type, `()` for a source without metadata. Compose
-//! [`MappedOptions`](nitori_io::adapters::MappedOptions), with a
+//! type, `()` for a source without metadata. Wrap a sink that takes other
+//! options in [`MappedOptions`](nitori_io::adapters::MappedOptions) with a
 //! [`MapOptions`](nitori_io::adapters::MapOptions) mapping or
-//! [`FixedOptions`](nitori_io::adapters::FixedOptions), on a sink that takes
-//! other options.
+//! [`FixedOptions`](nitori_io::adapters::FixedOptions).
 use crate::{EncodeInto, EncodedLen};
 use core::num::NonZeroUsize;
 use nitori_call::ReceiverAccess;

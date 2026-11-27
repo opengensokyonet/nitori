@@ -8,7 +8,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AccessPlan, Composed, Lent, ProvideAccess, ReceiverAccess, call};
+use nitori_call::{AccessPlan, Lent, ProvideAccess, ReceiverAccess, call};
 use nitori_codec::{payload::Chunks, prelude::*};
 use nitori_io::{
     Combine, ExactLen, Read, ReadChunk, ReadSegment, Value, Write,
@@ -90,10 +90,10 @@ fn a_base_value_is_read_with_the_metadata_of_its_bytes() {
 /// The payload of a frame decoded in stages: the source it is read from and
 /// what is left of it.
 struct Payload<S> {
-    io: Composed<S, ReadLimit<u64>>,
+    io: ReadLimit<S, u64>,
 }
 impl<S: ReceiverAccess<Family: Read>> ProvideAccess for Payload<S> {
-    type AccessFamily = Limited<Lent<S::Family>, ReadLimit<u64>>;
+    type AccessFamily = Limited<Lent<S::Family>, u64>;
     type Lentness = <S as ProvideAccess>::Lentness;
     fn access_plan<'a>(
         &'a mut self,
@@ -126,7 +126,7 @@ where
             kind,
             length,
             payload: Payload {
-                io: Composed::new(io, ReadLimit(u64::from(left))),
+                io: ReadLimit::new(io, u64::from(left)),
             },
         })
     }

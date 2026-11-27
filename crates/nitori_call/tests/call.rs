@@ -3,8 +3,8 @@ mod support;
 
 use futures_core::{FusedStream, Stream};
 use nitori_call::{
-    Call, CallPoll, Child, Compose, Direct, DirectView, DynCall, Emitter, Lend, Lent, Operation,
-    Receiver, ReceiverAccess, ReceiverFamily, Start, ViewLoan, call, direct_receiver,
+    Call, CallPoll, Child, Direct, DirectView, DynCall, Emitter, Lend, Operation, Receiver,
+    ReceiverAccess, ReceiverFamily, Start, call, direct_receiver,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -69,7 +69,8 @@ fn read_record_from_memory() {
 #[call]
 async fn read_limited_word(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
     let [length] = read_array::<1, _>(io).await?;
-    read_array::<2, _>(&mut io.compose(ReadLimit(length.into()))).await
+    let mut remaining = usize::from(length);
+    read_array::<2, _>(&mut BoundedRead(io, &mut remaining)).await
 }
 
 #[test]
@@ -91,29 +92,18 @@ fn composition_keeps_a_child_inside_its_record() {
 
 /// Composition state that must stay pinned while composed.
 struct PinnedLimit {
-    limit: ReadLimit,
+    limit: usize,
     _pinned: PhantomPinned,
 }
-impl<F: ReceiverFamily> Compose<Lent<F>> for PinnedLimit {
-    type Family = Limited<F>;
-    fn compose<'s>(self: Pin<&'s mut Self>, parent: ViewLoan<'s, F>) -> LimitedView<'s, F>
-    where
-        Lent<F>: 's,
-        Self::Family: 's,
-    {
-        // SAFETY: the limit is never moved out of the pinned state.
-        let limit = unsafe { self.map_unchecked_mut(|state| &mut state.limit) };
-        Pin::new(limit.get_mut()).compose(parent)
-    }
-}
-
 #[call]
 async fn read_pinned_word(io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>) -> Pair {
     let state = pin!(PinnedLimit {
-        limit: ReadLimit(1),
+        limit: 1,
         _pinned: PhantomPinned,
     });
-    read_array::<2, _>(&mut io.compose(state)).await
+    // SAFETY: the quota is borrowed in place while the state stays pinned.
+    let quota = unsafe { state.map_unchecked_mut(|state| &mut state.limit) }.get_mut();
+    read_array::<2, _>(&mut BoundedRead(io, quota)).await
 }
 
 #[test]

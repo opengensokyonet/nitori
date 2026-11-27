@@ -388,7 +388,7 @@ async fn segments_limited<F: Read<Metadata = Early, Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     budget: usize,
 ) -> Vec<Option<(usize, Early)>> {
-    let mut limited = io.compose(ReadLimit(budget));
+    let mut limited = ReadLimit::new(&mut *io, budget);
     let mut seen = Vec::new();
     loop {
         let mut buffer = [0; 16];
@@ -508,7 +508,7 @@ async fn write_limited<F: Write<(), Report = Writes, Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     budget: usize,
 ) -> LimitedWrites {
-    let mut limited = io.compose(WriteLimit(budget));
+    let mut limited = WriteLimit::new(&mut *io, budget);
     let mut seen = Vec::new();
     let mut input = &b"abcde"[..];
     for _ in 0..3 {

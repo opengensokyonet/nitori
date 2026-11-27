@@ -26,7 +26,7 @@ async fn read_record<F: Read<Metadata: nitori_io::Combine>, A: ReceiverAccess<Fa
     io: &mut A,
 ) -> Result<[u8; 2], ReadRecordError<F::Error>> {
     let [length] = io.read_array::<1>().await.context(LengthSnafu)?.value;
-    io.compose(ReadLimit(usize::from(length)))
+    ReadLimit::new(&mut *io, usize::from(length))
         .read_word()
         .await
         .context(WordSnafu)

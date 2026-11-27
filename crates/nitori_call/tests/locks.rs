@@ -2,8 +2,8 @@
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use bytes::Buf;
 use nitori_call::{
-    AcquisitionState, Compose, Guarded, Lent, Lock, LockAcquisition, Locked, ReceiverAccess,
-    ReceiverFamily, ViewLoan, call, drive_composed,
+    AcquisitionState, Guarded, Lent, Lock, LockAcquisition, Locked, ProjectionState,
+    ReceiverAccess, ReceiverFamily, ViewLoan, ViewProjection, call, drive_composed,
 };
 use nitori_io::{calls::WriteAllError, prelude::*};
 use std::{
@@ -113,21 +113,22 @@ struct Connection {
 }
 /// Composes the connection's guard into one stream's view; a stream that
 /// was removed is a closed view, which its capability reports.
-struct StreamOf(u32);
+struct StreamOfProjection;
 struct Stream;
 struct StreamView<'v>(Option<&'v mut Vec<u8>>);
 impl ReceiverFamily for Stream {
     type ReceiverView<'v> = StreamView<'v>;
 }
-impl<L: Lock<Value = Connection>> Compose<Lent<Locked<L>>> for StreamOf {
+impl<L: Lock<Value = Connection>> ViewProjection<Lent<Locked<L>>> for StreamOfProjection {
+    type State = u32;
     type Family = Stream;
-    fn compose<'s>(self: Pin<&'s mut Self>, guard: ViewLoan<'s, Locked<L>>) -> StreamView<'s>
+    fn project<'s>(guard: ViewLoan<'s, Locked<L>>, id: &'s mut u32) -> StreamView<'s>
     where
         Lent<Locked<L>>: 's,
+        Stream: 's,
     {
-        let id = self.0;
         let connection = guard.project(|access| Pin::new(&mut **access.into_pin().get_mut()));
-        StreamView(connection.get_mut().streams.get_mut(&id))
+        StreamView(connection.get_mut().streams.get_mut(id))
     }
 }
 #[derive(Debug, PartialEq)]
@@ -159,7 +160,7 @@ impl Write<()> for Stream {
 }
 
 #[test]
-fn a_composition_reaches_one_part_of_the_locked_value() {
+fn a_projection_reaches_one_part_of_the_locked_value() {
     let connection = std::sync::Mutex::new(Connection {
         streams: HashMap::from([(1, Vec::new()), (2, Vec::new())]),
     });
@@ -167,7 +168,7 @@ fn a_composition_reaches_one_part_of_the_locked_value() {
     let write = |id, message: &'static [u8]| {
         let mut write = pin!(drive_composed(
             LockAcquisition::new(&connection),
-            StreamOf(id),
+            ProjectionState::<StreamOfProjection, _>::new(id),
             WriteWhenOpen::new(&open, message),
         ));
         match poll_once(write.as_mut()) {
@@ -559,4 +560,52 @@ fn a_call_over_two_receivers_emits_and_calls_another() {
 
 fn written(count: usize) -> Option<nitori_io::WriteSegment<()>> {
     core::num::NonZeroUsize::new(count).map(|count| nitori_io::WriteSegment { count, report: () })
+}
+
+#[test]
+fn a_projection_and_a_guard_in_a_tuple() {
+    let connection = std::sync::Mutex::new(Connection {
+        streams: HashMap::from([(1, Vec::new())]),
+    });
+    let second = std::sync::Mutex::new(Vec::new());
+    let between = || {
+        assert!(
+            second.try_lock().is_ok(),
+            "the second lock is not taken yet"
+        )
+    };
+    let mut write = pin!(drive_composed(
+        (
+            LockAcquisition::new(&connection),
+            LockAcquisition::new(&second)
+        ),
+        (ProjectionState::<StreamOfProjection, _>::new(1), Guarded),
+        WriteBoth {
+            first: b"a",
+            second: b"b",
+            between: &between,
+        },
+    ));
+    assert!(poll_once(write.as_mut()).is_ready());
+    assert_eq!(connection.lock().unwrap().streams[&1], b"a");
+    assert_eq!(*second.lock().unwrap(), b"b");
+}
+
+#[test]
+fn projected_executions_can_be_awaited_in_tasks() {
+    let connection = std::sync::Mutex::new(Connection {
+        streams: HashMap::from([(1, Vec::new())]),
+    });
+    let source = std::sync::Mutex::new(std::collections::VecDeque::from(b"x".to_vec()));
+    assert_send_task(async {
+        drive_composed(
+            (
+                LockAcquisition::new(&source),
+                LockAcquisition::new(&connection),
+            ),
+            (Guarded, ProjectionState::<StreamOfProjection, _>::new(1)),
+            CopyBytes::new(1),
+        )
+        .await
+    });
 }

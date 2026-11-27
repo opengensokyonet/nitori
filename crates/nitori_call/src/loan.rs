@@ -170,9 +170,8 @@ impl<'scope, F: ReceiverFamily + 'scope> ViewLoan<'scope, F> {
 
 /// The family whose views are [`ViewLoan`]s of the views of `F`.
 ///
-/// Composition state composes on it where the parent view is borrowed for one
-/// access, as in [`ReceiverAccess::compose`](crate::ReceiverAccess::compose)
-/// and [`drive_composed`](crate::drive_composed). A capability of `F` is
+/// [`project_access`](crate::project_access) and [`drive_composed`](crate::drive_composed)
+/// use this family to project a borrow of the parent view. A capability of `F` is
 /// a capability of `Lent<F>` only where it is implemented for it, usually by
 /// forwarding through [`ViewLoan::with`]; `nitori_io` does so for its own.
 pub struct Lent<F>(PhantomData<fn(F) -> F>);

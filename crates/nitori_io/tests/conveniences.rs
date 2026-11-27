@@ -55,7 +55,7 @@ async fn read_limited<A: ReceiverAccess<Family: Read>>(
     budget: usize,
     output: &mut Vec<u8>,
 ) -> (usize, Result<usize, <A::Family as Read>::Error>) {
-    let mut limited = io.compose(ReadLimit(budget));
+    let mut limited = ReadLimit::new(&mut *io, budget);
     let mut total = 0;
     let result = loop {
         match limited.read(&mut *output).await {
@@ -64,7 +64,7 @@ async fn read_limited<A: ReceiverAccess<Family: Read>>(
             Err(error) => break Err(error),
         }
     };
-    (limited.into_state().0, result)
+    (limited.into_parts().1, result)
 }
 
 #[test]
@@ -101,7 +101,7 @@ async fn chunks_limited<A: ReceiverAccess<Family: ReadChunk<Chunk = Bytes>>>(
     budget: usize,
     length: usize,
 ) -> Result<(), ReadChunksExactError<<A::Family as Read>::Error>> {
-    let mut limited = io.compose(ReadLimit(budget));
+    let mut limited = ReadLimit::new(&mut *io, budget);
     let mut chunks = pin!(limited.read_chunks_exact(length, NonZeroUsize::new(4).unwrap()));
     loop {
         match chunks.as_mut().step().await {
@@ -143,9 +143,9 @@ async fn write_limited<A: ReceiverAccess<Family: Write<(), Report: nitori_io::Co
     usize,
     Result<(), WriteAllError<<A::Family as Write<()>>::Error>>,
 ) {
-    let mut limited = io.compose(WriteLimit(budget));
+    let mut limited = WriteLimit::new(&mut *io, budget);
     let result = limited.write_all(payload, ()).await.map(|_| ());
-    (limited.into_state().0, result)
+    (limited.into_parts().1, result)
 }
 
 #[test]

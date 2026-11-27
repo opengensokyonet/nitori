@@ -2,8 +2,9 @@
 use bytes::BufMut;
 use futures_core::Stream;
 use nitori_call::{
-    Call, CallPoll, Compose, Direct, Lend, Lent, Receiver, ReceiverAccess, ReceiverFamily,
-    ReceiverSlot, Start, ViewLoan, call, capability, direct_receiver,
+    AccessPlan, Call, CallPoll, Direct, Lend, Lent, ProvideAccess, Receiver, ReceiverAccess,
+    ReceiverFamily, ReceiverSlot, Start, ViewLoan, ViewProjection, call, capability,
+    direct_receiver, project_access,
 };
 use std::{
     collections::VecDeque,
@@ -190,7 +191,19 @@ fn a_primitive_operation_is_a_root_and_names_its_future() {
 }
 
 /// A byte budget owned by the operation.
-struct ReadLimit(usize);
+struct BoundedRead<'a, A>(pub A, pub &'a mut usize);
+struct LimitView;
+
+impl<A: ReceiverAccess> ProvideAccess for BoundedRead<'_, A> {
+    type AccessFamily = Limited<A::Family>;
+    type Lentness = A::Lentness;
+
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        project_access::<_, LimitView>(&mut self.0, self.1)
+    }
+}
 struct Limited<F>(PhantomData<fn(F) -> F>);
 struct LimitedView<'v, F: ReceiverFamily> {
     inner: ViewLoan<'v, F>,
@@ -202,17 +215,15 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
     where
         Self: 'v;
 }
-impl<F: ReceiverFamily> Compose<Lent<F>> for ReadLimit {
+impl<F: ReceiverFamily> ViewProjection<Lent<F>> for LimitView {
     type Family = Limited<F>;
-    fn compose<'v>(self: Pin<&'v mut Self>, inner: ViewLoan<'v, F>) -> LimitedView<'v, F>
+    type State = usize;
+    fn project<'v>(inner: ViewLoan<'v, F>, remaining: &'v mut usize) -> LimitedView<'v, F>
     where
         Lent<F>: 'v,
         Self::Family: 'v,
     {
-        LimitedView {
-            inner,
-            remaining: &mut self.get_mut().0,
-        }
+        LimitedView { inner, remaining }
     }
 }
 impl<F: Read> Read for Limited<F> {
@@ -242,7 +253,8 @@ async fn read_limited_word(
     io: &mut impl ReceiverAccess<Family: Read<Error = Infallible>>,
 ) -> Result<[u8; 2], Incomplete> {
     let [length] = io.read_array::<1>().await?;
-    io.compose(ReadLimit(length.into())).read_array::<2>().await
+    let mut remaining = usize::from(length);
+    BoundedRead(io, &mut remaining).read_array::<2>().await
 }
 
 #[test]

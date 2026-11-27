@@ -10,7 +10,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AccessPlan, Composed, ProvideAccess, ReceiverAccess, call};
+use nitori_call::{AccessPlan, ProvideAccess, ReceiverAccess, call};
 use nitori_codec::prelude::*;
 use nitori_io::{
     Combine, Read, ReadSegment, Value, Write, WriteSegment,
@@ -85,10 +85,10 @@ where
 /// A type that keeps the source and how much of it is left, as a payload
 /// decoded in stages does.
 struct Payload<S> {
-    io: Composed<S, ReadLimit<u64>>,
+    io: ReadLimit<S, u64>,
 }
 impl<S: ReceiverAccess<Family: Read>> ProvideAccess for Payload<S> {
-    type AccessFamily = Limited<nitori_call::Lent<S::Family>, ReadLimit<u64>>;
+    type AccessFamily = Limited<nitori_call::Lent<S::Family>, u64>;
     type Lentness = <S as ProvideAccess>::Lentness;
     fn access_plan<'a>(
         &'a mut self,
@@ -117,7 +117,7 @@ where
     I: ReceiverAccess<Family: Read<Metadata = M>>,
 {
     let mut payload = Payload {
-        io: Composed::new(&mut *io, ReadLimit(3)),
+        io: ReadLimit::new(&mut *io, 3u64),
     };
     let pair = Pair::decode_from(&mut payload).await.ok()?;
     let last = Value::<[u8; 1], M>::decode_from(&mut payload).await.ok()?;

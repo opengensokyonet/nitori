@@ -815,7 +815,7 @@ where
     R: ReadChunk<Metadata = (), Error = !>,
     W: Write<(), Report = (), Error = !>,
 {
-    let mut limited = source.compose(ReadLimit(length));
+    let mut limited = ReadLimit::new(&mut *source, length);
     copy_chunks(&mut limited, sink, nz(4)).await.unwrap().count
 }
 #[call(sync)]
@@ -828,7 +828,7 @@ where
     R: Read<Metadata = (), Error = !>,
     W: WriteLent<(), Report = (), Error = !>,
 {
-    let mut limited = source.compose(ReadLimit(length));
+    let mut limited = ReadLimit::new(&mut *source, length);
     copy_into_lent(&mut limited, sink, nz(4))
         .await
         .unwrap()
@@ -844,7 +844,7 @@ where
     R: Read<Metadata = (), Error = !>,
     W: Write<(), Report = (), Error = !>,
 {
-    let mut limited = source.compose(ReadLimit(length));
+    let mut limited = ReadLimit::new(&mut *source, length);
     let mut buffer = [0; 4];
     copy_buffered(&mut limited, sink, &mut buffer)
         .await

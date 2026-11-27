@@ -47,8 +47,35 @@ where
 #[cfg(feature = "tokio-sync")]
 mod tokio_sync {
     use super::*;
+    use nitori_call::{
+        Direct, DirectView, Lent, Lock, Locked, ProjectionState, ViewLoan, ViewProjection,
+    };
+    use std::pin::Pin;
     use support::poll_once;
     use tokio::sync::Mutex;
+
+    // Select one sink in a locked pair.
+    struct SinkAt;
+
+    impl<L: Lock<Value = [Vec<u8>; 2]>> ViewProjection<Lent<Locked<L>>> for SinkAt {
+        type State = bool;
+        type Family = Direct<Vec<u8>>;
+
+        fn project<'v>(
+            guard: ViewLoan<'v, Locked<L>>,
+            second: &'v mut bool,
+        ) -> DirectView<'v, Vec<u8>>
+        where
+            Lent<Locked<L>>: 'v,
+            Self::Family: 'v,
+        {
+            DirectView(
+                guard.project(|access| {
+                    Pin::new(&mut access.into_pin().get_mut()[usize::from(*second)])
+                }),
+            )
+        }
+    }
 
     #[test]
     fn a_lock_granted_while_another_slot_waits_is_released() {
@@ -76,12 +103,12 @@ mod tokio_sync {
 
     #[test]
     fn a_lock_granted_by_the_poll_that_completes_is_released() {
-        let (m0, m1) = (Mutex::new(Vec::new()), Mutex::new(Vec::new()));
+        let (m0, m1) = (Mutex::new(Vec::new()), Mutex::new([Vec::new(), Vec::new()]));
         let (hold0, hold1) = (m0.try_lock().unwrap(), m1.try_lock().unwrap());
         let first = Cell::new(true);
         let mut write = pin!(drive_composed(
             (LockAcquisition::new(&m0), LockAcquisition::new(&m1)),
-            (Guarded, Guarded),
+            (Guarded, ProjectionState::<SinkAt, _>::new(true)),
             WriteFirstThenSecond { first: &first },
         ));
         assert!(poll_once(write.as_mut()).is_pending());
@@ -90,6 +117,7 @@ mod tokio_sync {
         drop(hold1);
         assert!(poll_once(write.as_mut()).is_ready());
         assert!(m0.try_lock().is_ok(), "held after the operation completed");
+        assert_eq!(*m1.try_lock().unwrap(), [Vec::new(), b"b".to_vec()]);
     }
 }
 

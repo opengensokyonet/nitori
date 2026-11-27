@@ -113,7 +113,7 @@ A source's reads carry metadata, such as whether the bytes arrived in
   metadata.
 - `nitori_io::Value<V, M>` decodes `V` from a source with
   metadata `M` and holds `{ value, metadata }`, the merged metadata of the
-  bytes `V` read. `V` reads through a `nitori_io::adapters::MergingSource`,
+  bytes `V` read. `V` reads through a `nitori_io::adapters::MergedMetadata`,
   which reports no metadata to it.
 - A composite value decodes each part through that part's own decoding and
   reads no bytes itself. It takes the metadata type as a parameter `M`,
@@ -185,23 +185,23 @@ same structure as metadata:
 
 - A base value writes with the options `()`, into sinks of `Write<()>`.
 - `Value<V, O>` encodes `V` into a sink of `Write<O>` with `metadata` as the
-  options of every byte `V` writes. `V` writes through the sink composed
-  with `nitori_io::adapters::MappedOptions(FixedOptions(metadata))`, which
-  takes any options, `()` included, and gives the sink these.
+  options of every byte `V` writes. A sink wrapped with
+  `nitori_io::adapters::MappedOptions::new(sink, FixedOptions(metadata))`
+  accepts any options from `V` and passes the fixed options to the sink.
 - A composite value takes the options type as its parameter `O` and
   encodes into sinks of `Write<O>`, each base field a `Value<Field, O>`, so
   the bytes of each field are written with that field's options.
 
 A value decoded from a source with metadata `M` holds `M` where it would
 hold options. Written into a sink that takes other options, or none,
-the sink is composed with `nitori_io::adapters::MappedOptions`, whose
+wrap the sink in `nitori_io::adapters::MappedOptions`, whose
 mapping, a `MapOptions`, lends the sink's options for each segment's, or
 `FixedOptions` for one set for every segment. The encoded length
 of a `Value` is its value's.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{ComposedReceiver, ReceiverAccess};
+use nitori_call::ReceiverAccess;
 use nitori_codec::prelude::*;
 use nitori_io::{
     Combine, Value, Write,
@@ -236,7 +236,7 @@ let header = Header {
     length: Value { value: [0, 5], metadata: Priority(3) },
 };
 // A vector takes no options: give it `()` for every segment.
-let mut output = ComposedReceiver::new(Vec::new(), MappedOptions(FixedOptions(())));
+let mut output = MappedOptions::new(Vec::new(), FixedOptions(()));
 output.sync_encode_unpin(header).unwrap();
 assert_eq!(output.into_parts().0, b"\x01\x00\x05");
 ```
@@ -263,8 +263,8 @@ pairing of capabilities, as the copies of `nitori_io::calls` pair them:
 
 Each copies until the source ends, writing every segment with the metadata
 it was read with as its write options, so the sink takes the source's
-metadata type, `()` for a source without; compose `MappedOptions`, with a
-`MapOptions` mapping or `FixedOptions`, on a sink that takes other options. Each returns the
+metadata type, `()` for a source without metadata. Wrap a sink that takes
+other options in `MappedOptions` with a `MapOptions` mapping or `FixedOptions`. Each returns the
 copy's total: the count,
 the merged metadata of what it read and the merged report of what the sink
 accepted. Bound the source to the bytes it is to contribute, such as with
@@ -306,7 +306,7 @@ where
     G: Write<(), Report = (), Error = !>,
 {
     output.encode(Chunks {
-        source: source.compose(ReadLimit(7u8)),
+        source: ReadLimit::new(source, 7u8),
         chunk_maximum: NonZeroUsize::new(4).unwrap(),
     }).await.unwrap().count
 }

@@ -9,7 +9,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use nitori_call::{Call, CallPoll, ComposedReceiver, Lend, Receiver, ReceiverAccess, call};
+use nitori_call::{Call, CallPoll, Lend, Receiver, ReceiverAccess, call};
 use nitori_io::{
     Infinite, Min,
     adapters::{Chunked, Limited, ReadLimit},
@@ -74,19 +74,19 @@ fn chunked_skips_on_its_inner_source_between_chunks() {
 
 #[test]
 fn a_budget_bounds_skips_and_reports_eof_at_its_boundary() {
-    let mut framed = ComposedReceiver::new(&b"abcdef"[..], ReadLimit(4u8));
+    let mut framed = ReadLimit::new(&b"abcdef"[..], 4u8);
     assert_eq!(framed.sync_skip_unpin(Infinite), Ok(Some(4usize)));
-    assert_eq!(framed.get_ref(), (&&b"ef"[..], &ReadLimit(0)));
+    assert_eq!(framed.get_ref(), (&&b"ef"[..], &0));
     assert_eq!(framed.sync_skip_unpin(Infinite), Ok(None));
     assert_eq!(framed.get_ref().0, &&b"ef"[..]);
 }
 
 #[test]
 fn budgets_and_maxima_of_other_widths_meet_a_usize_count() {
-    let mut framed = ComposedReceiver::new(&b"abcdef"[..], ReadLimit(u64::MAX));
+    let mut framed = ReadLimit::new(&b"abcdef"[..], u64::MAX);
     assert_eq!(framed.sync_skip_unpin(2u8), Ok(Some(2usize)));
-    assert_eq!(framed.get_ref().1, &ReadLimit(u64::MAX - 2));
-    let mut framed = ComposedReceiver::new(&b"abcdef"[..], ReadLimit(Infinite));
+    assert_eq!(framed.get_ref().1, &(u64::MAX - 2));
+    let mut framed = ReadLimit::new(&b"abcdef"[..], Infinite);
     assert_eq!(framed.sync_skip_unpin(5u128), Ok(Some(5usize)));
     assert_eq!(framed.sync_skip_unpin(5u128), Ok(Some(1)));
     assert_eq!(framed.sync_skip_unpin(5u128), Ok(None));
@@ -94,18 +94,18 @@ fn budgets_and_maxima_of_other_widths_meet_a_usize_count() {
 
 #[test]
 fn the_boundary_answers_without_polling_the_parent() {
-    let mut framed = ComposedReceiver::new(Failing, ReadLimit(0usize));
+    let mut framed = ReadLimit::new(Failing, 0usize);
     assert_eq!(framed.sync_skip_unpin(Infinite), Ok(None));
     // Within the budget, even an empty request reaches the parent.
-    let mut framed = ComposedReceiver::new(Failing, ReadLimit(1usize));
+    let mut framed = ReadLimit::new(Failing, 1usize);
     assert_eq!(framed.sync_skip_unpin(0usize), Err(Broken));
 }
 
 #[test]
 fn a_zero_maximum_at_a_zero_budget_answers_none_without_polling_the_parent() {
-    let mut framed = ComposedReceiver::new(Failing, ReadLimit(0usize));
+    let mut framed = ReadLimit::new(Failing, 0usize);
     assert_eq!(framed.sync_skip_unpin(0usize), Ok(None));
-    assert_eq!(framed.get_ref().1, &ReadLimit(0));
+    assert_eq!(framed.get_ref().1, &0);
 }
 
 #[test]
@@ -130,9 +130,9 @@ where
     u8: Min<<F as Skip>::Count, Output = <F as Skip>::Count>,
     <F as Skip>::Count: Min<u8, Output = u8> + Clone + PartialOrd,
 {
-    let mut limited = io.compose(ReadLimit(budget));
+    let mut limited = ReadLimit::new(&mut *io, budget);
     let result = limited.skip(maximum).await;
-    (result, limited.into_state().0)
+    (result, limited.into_parts().1)
 }
 
 #[test]
@@ -217,16 +217,14 @@ async fn skip_all<F: Skip<Count = usize>>(
 
 #[test]
 fn a_cancelled_skip_leaves_the_source_and_the_budget_in_step() {
-    let mut framed = ComposedReceiver::new(
+    let mut framed = ReadLimit::new(
         Delayed {
             bytes: b"abcdef",
             waiting: false,
         },
-        ReadLimit(5usize),
+        5usize,
     );
-    let mut call = Box::pin(Call::<Limited<Delayed<'_>, ReadLimit>, _>::new(
-        SkipAll::new(4),
-    ));
+    let mut call = Box::pin(Call::<Limited<Delayed<'_>, usize>, _>::new(SkipAll::new(4)));
     let mut cx = Context::from_waker(Waker::noop());
     // The second poll skips the first byte, then waits for the second.
     for _ in 0..2 {
@@ -239,10 +237,8 @@ fn a_cancelled_skip_leaves_the_source_and_the_budget_in_step() {
     drop(call);
     let (source, budget) = framed.get_ref();
     assert_eq!(source.bytes, b"bcdef");
-    assert_eq!(budget, &ReadLimit(4));
-    let mut call = pin!(Call::<Limited<Delayed<'_>, ReadLimit>, _>::new(
-        SkipAll::new(4)
-    ));
+    assert_eq!(budget, &4);
+    let mut call = pin!(Call::<Limited<Delayed<'_>, usize>, _>::new(SkipAll::new(4)));
     let result = loop {
         let poll = call.as_mut().poll_with(
             Some(Lend::Fixed(pin!(Pin::new(&mut framed).view()))),
@@ -256,13 +252,13 @@ fn a_cancelled_skip_leaves_the_source_and_the_budget_in_step() {
     };
     assert_eq!(result, Ok(()));
     let (source, budget) = framed.get_ref();
-    assert_eq!((source.bytes, budget), (&b"f"[..], &ReadLimit(0)));
+    assert_eq!((source.bytes, budget), (&b"f"[..], &0));
 }
 
 #[test]
 fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
-    type Framed<'data> = Limited<nitori_call::Direct<Chunked<Delayed<'data>>>, ReadLimit>;
-    let mut framed = ComposedReceiver::new(
+    type Framed<'data> = Limited<nitori_call::Direct<Chunked<Delayed<'data>>>, usize>;
+    let mut framed = ReadLimit::new(
         Chunked::new(
             Delayed {
                 bytes: b"abcdef",
@@ -270,7 +266,7 @@ fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
             },
             NonZeroUsize::MIN,
         ),
-        ReadLimit(5usize),
+        5usize,
     );
     let mut call = Box::pin(Call::<Framed<'_>, _>::new(SkipAll::new(4)));
     let mut cx = Context::from_waker(Waker::noop());
@@ -285,7 +281,7 @@ fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
     drop(call);
     let (chunked, budget) = framed.get_ref();
     assert_eq!(chunked.get_ref().bytes, b"bcdef");
-    assert_eq!(budget, &ReadLimit(4));
+    assert_eq!(budget, &4);
     let mut call = pin!(Call::<Framed<'_>, _>::new(SkipAll::new(4)));
     let result = loop {
         let poll = call.as_mut().poll_with(
@@ -300,10 +296,7 @@ fn a_cancelled_skip_through_chunked_leaves_the_source_and_the_budget_in_step() {
     };
     assert_eq!(result, Ok(()));
     let (chunked, budget) = framed.get_ref();
-    assert_eq!(
-        (chunked.get_ref().bytes, budget),
-        (&b"f"[..], &ReadLimit(0))
-    );
+    assert_eq!((chunked.get_ref().bytes, budget), (&b"f"[..], &0));
 }
 
 /// Every capability fails.
@@ -373,7 +366,7 @@ impl Skip for Overskip {
 #[test]
 #[should_panic = "skip exceeded the requested maximum"]
 fn a_parent_skipping_past_the_budget_panics() {
-    let mut framed = ComposedReceiver::new(Overskip, ReadLimit(2usize));
+    let mut framed = ReadLimit::new(Overskip, 2usize);
     let _ = framed.sync_skip_unpin(Infinite);
 }
 

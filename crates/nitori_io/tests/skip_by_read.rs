@@ -9,9 +9,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use nitori_call::{
-    Call, CallPoll, Composed, ComposedReceiver, Lend, Receiver, ReceiverAccess, call,
-};
+use nitori_call::{Call, CallPoll, Lend, Receiver, ReceiverAccess, call};
 use nitori_io::{
     Infinite,
     adapters::{Chunked, Limited, ReadChunkSkip, ReadLimit, ReadSkip, Skippable},
@@ -72,7 +70,7 @@ impl ReadChunk for Chunks {
 
 #[test]
 fn reading_skips_on_a_receiver_and_forwards_the_reads() {
-    let mut io = ComposedReceiver::new(reader(b"abcdefgh"), ReadSkip);
+    let mut io = ReadSkip::new(reader(b"abcdefgh"));
     assert_eq!(io.sync_skip_unpin(2u8).unwrap(), Some(2usize));
     let mut out = [0; 2];
     assert_eq!(
@@ -84,12 +82,12 @@ fn reading_skips_on_a_receiver_and_forwards_the_reads() {
     assert_eq!(&out, b"cd");
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), Some(4));
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), None);
-    assert_eq!(io.into_parts().0.into_inner().position(), 8);
+    assert_eq!(io.into_inner().into_inner().position(), 8);
 }
 
 #[test]
 fn reading_skips_at_most_its_scratch_storage_in_one_poll() {
-    let mut io = ComposedReceiver::new(reader(&[7; 20_000]), ReadSkip);
+    let mut io = ReadSkip::new(reader(&[7; 20_000]));
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), Some(8192usize));
     assert_eq!(io.sync_skip_unpin(u64::MAX).unwrap(), Some(8192));
     assert_eq!(
@@ -102,32 +100,26 @@ fn reading_skips_at_most_its_scratch_storage_in_one_poll() {
 #[test]
 fn a_zero_maximum_reaches_the_parent_as_an_empty_request() {
     // An empty read cannot tell EOF, so reading reports no progress.
-    let mut io = ComposedReceiver::new(reader(b""), ReadSkip);
+    let mut io = ReadSkip::new(reader(b""));
     assert_eq!(io.sync_skip_unpin(0u8).unwrap(), Some(0usize));
-    let mut io = ComposedReceiver::new(Failing, ReadSkip);
+    let mut io = ReadSkip::new(Failing);
     assert_eq!(io.sync_skip_unpin(0u8), Err(Broken));
-    let mut io = ComposedReceiver::new(Failing, ReadChunkSkip);
+    let mut io = ReadChunkSkip::new(Failing);
     assert_eq!(io.sync_skip_unpin(0u8), Err(Broken));
-    let mut io = ComposedReceiver::new(
-        Chunks {
-            bytes: b"ab".to_vec(),
-            chunk_requests: 0,
-        },
-        ReadChunkSkip,
-    );
+    let mut io = ReadChunkSkip::new(Chunks {
+        bytes: b"ab".to_vec(),
+        chunk_requests: 0,
+    });
     assert_eq!(io.sync_skip_unpin(0u8), Ok(Some(0usize)));
-    assert_eq!(io.get_ref().0.chunk_requests, 0);
+    assert_eq!(io.get_ref().chunk_requests, 0);
 }
 
 #[test]
 fn chunks_skip_by_dropping_one_bounded_chunk_per_poll() {
-    let mut io = ComposedReceiver::new(
-        Chunks {
-            bytes: b"abcdef".to_vec(),
-            chunk_requests: 0,
-        },
-        ReadChunkSkip,
-    );
+    let mut io = ReadChunkSkip::new(Chunks {
+        bytes: b"abcdef".to_vec(),
+        chunk_requests: 0,
+    });
     assert_eq!(io.sync_skip_unpin(2u8), Ok(Some(2usize)));
     let chunk = io
         .sync_read_chunk_unpin(NonZeroUsize::MIN)
@@ -136,13 +128,13 @@ fn chunks_skip_by_dropping_one_bounded_chunk_per_poll() {
     assert_eq!(chunk.as_deref(), Some(&b"c"[..]));
     assert_eq!(io.sync_skip_unpin(Infinite), Ok(Some(3)));
     assert_eq!(io.sync_skip_unpin(u128::MAX), Ok(None));
-    assert_eq!(io.get_ref().0.chunk_requests, 4);
+    assert_eq!(io.get_ref().chunk_requests, 4);
 }
 
 #[test]
 fn a_copying_chunk_adapter_can_skip_by_chunks() {
     let chunked = Chunked::new(reader(b"abcdef"), NonZeroUsize::new(4).unwrap());
-    let mut io = ComposedReceiver::new(chunked, ReadChunkSkip);
+    let mut io = ReadChunkSkip::new(chunked);
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), Some(4usize));
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), Some(2));
     assert_eq!(io.sync_skip_unpin(Infinite).unwrap(), None);
@@ -150,10 +142,10 @@ fn a_copying_chunk_adapter_can_skip_by_chunks() {
 
 #[test]
 fn the_composed_family_forwards_the_exact_length() {
-    let mut io = ComposedReceiver::new(&b"abc"[..], ReadSkip);
+    let mut io = ReadSkip::new(&b"abc"[..]);
     let view = pin!(Pin::new(&mut io).view());
     assert_eq!(
-        <Skippable<nitori_call::Direct<&[u8]>, ReadSkip> as ExactLen>::poll_remaining_len(
+        <Skippable<nitori_call::Direct<&[u8]>, ReadSkip<()>> as ExactLen>::poll_remaining_len(
             view,
             &mut Context::from_waker(Waker::noop()),
         ),
@@ -163,9 +155,9 @@ fn the_composed_family_forwards_the_exact_length() {
 
 #[test]
 fn the_composed_family_forwards_writes() {
-    let mut io = ComposedReceiver::new(Cursor::new(Vec::new()), ReadSkip);
+    let mut io = ReadSkip::new(Cursor::new(Vec::new()));
     io.sync_write_be_unpin(0x0102_u16, ()).unwrap();
-    assert_eq!(io.into_parts().0.into_inner(), [1, 2]);
+    assert_eq!(io.into_inner().into_inner(), [1, 2]);
 }
 
 /// Skips `length` bytes by reading, with the state composed on the access.
@@ -174,7 +166,7 @@ async fn skip_by_reading<F: Read>(
     io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
 ) -> Result<(), SkipExactError<F::Error, usize>> {
-    io.compose(ReadSkip).skip_exact(length).await
+    ReadSkip::new(&mut *io).skip_exact(length).await
 }
 
 /// Skips `length` bytes by chunks, with the state composed on the access,
@@ -184,7 +176,11 @@ async fn skip_by_chunks_then_read<F: ReadChunk<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
     length: usize,
 ) -> Result<[u8; 1], nitori_io::calls::ReadArrayError<F::Error>> {
-    if io.compose(ReadChunkSkip).skip_exact(length).await.is_err() {
+    if ReadChunkSkip::new(&mut *io)
+        .skip_exact(length)
+        .await
+        .is_err()
+    {
         panic!("the source holds enough bytes");
     }
     io.read_array::<1>().await.map(|read| read.value)
@@ -260,19 +256,16 @@ impl ReadChunk for Delayed<'_> {
     }
 }
 
-type Framed<'data> = Limited<Skippable<Delayed<'data>, ReadSkip>, ReadLimit>;
+type Framed<'data> = Limited<Skippable<Delayed<'data>, ReadSkip<()>>, usize>;
 
 #[test]
 fn a_cancelled_skip_by_reading_leaves_a_budget_above_it_in_step() {
-    let mut framed = ComposedReceiver::new(
-        ComposedReceiver::new(
-            Delayed {
-                bytes: b"abcdef",
-                waiting: false,
-            },
-            ReadSkip,
-        ),
-        ReadLimit(5usize),
+    let mut framed = ReadLimit::new(
+        ReadSkip::new(Delayed {
+            bytes: b"abcdef",
+            waiting: false,
+        }),
+        5usize,
     );
     let mut call = Box::pin(Call::<Framed<'_>, _>::new(SkipExact::new(4)));
     let mut cx = Context::from_waker(Waker::noop());
@@ -286,8 +279,8 @@ fn a_cancelled_skip_by_reading_leaves_a_budget_above_it_in_step() {
     }
     drop(call);
     let (inner, budget) = framed.get_ref();
-    assert_eq!(inner.get_ref().0.bytes, b"bcdef");
-    assert_eq!(budget, &ReadLimit(4));
+    assert_eq!(inner.get_ref().bytes, b"bcdef");
+    assert_eq!(budget, &4);
     let mut call = pin!(Call::<Framed<'_>, _>::new(SkipExact::new(4)));
     let result = loop {
         let poll = call.as_mut().poll_with(
@@ -302,25 +295,19 @@ fn a_cancelled_skip_by_reading_leaves_a_budget_above_it_in_step() {
     };
     assert!(result.is_ok());
     let (inner, budget) = framed.get_ref();
-    assert_eq!(
-        (inner.get_ref().0.bytes, budget),
-        (&b"f"[..], &ReadLimit(0))
-    );
+    assert_eq!((inner.get_ref().bytes, budget), (&b"f"[..], &0));
 }
 
-type ChunkFramed<'data> = Limited<Skippable<Delayed<'data>, ReadChunkSkip>, ReadLimit>;
+type ChunkFramed<'data> = Limited<Skippable<Delayed<'data>, ReadChunkSkip<()>>, usize>;
 
 #[test]
 fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
-    let mut framed = ComposedReceiver::new(
-        ComposedReceiver::new(
-            Delayed {
-                bytes: b"abcdef",
-                waiting: false,
-            },
-            ReadChunkSkip,
-        ),
-        ReadLimit(5usize),
+    let mut framed = ReadLimit::new(
+        ReadChunkSkip::new(Delayed {
+            bytes: b"abcdef",
+            waiting: false,
+        }),
+        5usize,
     );
     let mut call = Box::pin(Call::<ChunkFramed<'_>, _>::new(SkipExact::new(4)));
     let mut cx = Context::from_waker(Waker::noop());
@@ -334,8 +321,8 @@ fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
     }
     drop(call);
     let (inner, budget) = framed.get_ref();
-    assert_eq!(inner.get_ref().0.bytes, b"bcdef");
-    assert_eq!(budget, &ReadLimit(4));
+    assert_eq!(inner.get_ref().bytes, b"bcdef");
+    assert_eq!(budget, &4);
     let mut call = pin!(Call::<ChunkFramed<'_>, _>::new(SkipExact::new(4)));
     let result = loop {
         let poll = call.as_mut().poll_with(
@@ -350,10 +337,7 @@ fn a_cancelled_skip_by_chunks_leaves_a_budget_above_it_in_step() {
     };
     assert!(result.is_ok());
     let (inner, budget) = framed.get_ref();
-    assert_eq!(
-        (inner.get_ref().0.bytes, budget),
-        (&b"f"[..], &ReadLimit(0))
-    );
+    assert_eq!((inner.get_ref().bytes, budget), (&b"f"[..], &0));
 }
 
 /// Skips by reading on an access composed by value in a budget of five,
@@ -368,11 +352,11 @@ async fn skip_by_reading_on_composed<F: Read<Metadata: nitori_io::Combine>>(
     Result<[u8; 1], nitori_io::calls::ReadArrayError<F::Error>>,
     usize,
 ) {
-    let mut budget = Composed::new(io, ReadLimit(5usize));
-    let mut skipping = budget.compose(ReadSkip);
+    let mut budget = ReadLimit::new(io, 5usize);
+    let mut skipping = ReadSkip::new(&mut budget);
     let skipped = skipping.skip_exact(length).await;
     let read = skipping.read_array::<1>().await.map(|read| read.value);
-    (skipped, read, budget.into_state().0)
+    (skipped, read, budget.into_parts().1)
 }
 
 /// As above, by chunks.
@@ -385,11 +369,11 @@ async fn skip_by_chunks_on_composed<F: ReadChunk<Metadata: nitori_io::Combine>>(
     Result<[u8; 1], nitori_io::calls::ReadArrayError<F::Error>>,
     usize,
 ) {
-    let mut budget = Composed::new(io, ReadLimit(5usize));
-    let mut skipping = budget.compose(ReadChunkSkip);
+    let mut budget = ReadLimit::new(io, 5usize);
+    let mut skipping = ReadChunkSkip::new(&mut budget);
     let skipped = skipping.skip_exact(length).await;
     let read = skipping.read_array::<1>().await.map(|read| read.value);
-    (skipped, read, budget.into_state().0)
+    (skipped, read, budget.into_parts().1)
 }
 
 #[test]
@@ -449,4 +433,49 @@ fn segment(count: usize) -> Option<nitori_io::ReadSegment<()>> {
         count,
         metadata: (),
     })
+}
+
+#[test]
+fn both_wrappers_skip_when_polling_the_view_directly() {
+    use nitori_call::Direct;
+
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut source = b"abcd".as_slice();
+    type Bytes<'a> = Direct<&'a [u8]>;
+
+    let view = ReadSkip::new(Pin::new(&mut source).view());
+    let skipped = <Skippable<Bytes<'_>, ReadSkip<()>> as Skip>::poll_skip(pin!(view), &mut cx, 1u8);
+    assert_eq!(skipped, Poll::Ready(Ok(Some(1))));
+
+    let view = ReadChunkSkip::new(Pin::new(&mut source).view());
+    let skipped =
+        <Skippable<Bytes<'_>, ReadChunkSkip<()>> as Skip>::poll_skip(pin!(view), &mut cx, 2u8);
+    assert_eq!(skipped, Poll::Ready(Ok(Some(2))));
+    assert_eq!(source, b"d");
+}
+
+#[test]
+fn nested_skip_wrappers_keep_send_for_borrowed_sources() {
+    use core::future::Future;
+    fn require_send<F: Future + Send>(future: F) -> F {
+        future
+    }
+
+    let bytes = *b"abcd";
+    let mut reader = ReadSkip::new(ReadLimit::new(bytes.as_slice(), 3u8));
+    let mut chunk_reader = ReadChunkSkip::new(ReadLimit::new(bytes.as_slice(), 3u8));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(
+        pin!(require_send(reader.skip_unpin(2u8))).poll(&mut cx),
+        Poll::Ready(Ok(Some(2)))
+    );
+    assert_eq!(
+        pin!(require_send(chunk_reader.skip_unpin(2u8))).poll(&mut cx),
+        Poll::Ready(Ok(Some(2)))
+    );
+    assert_eq!(reader.into_inner().into_parts(), (b"cd".as_slice(), 1));
+    assert_eq!(
+        chunk_reader.into_inner().into_parts(),
+        (b"cd".as_slice(), 1)
+    );
 }

@@ -3,7 +3,7 @@
 //! that `executor.operation(..).await` works whether the executor can lend a
 //! view at once or must acquire one.
 use crate::{
-    Call, CallPoll, Compose, DynCall, Lend, Lent, Operation, Receiver, ReceiverFamily, Receivers,
+    Call, CallPoll, DynCall, Lend, Lent, Operation, Receiver, ReceiverFamily, Receivers,
     RootOperation, ViewLoan,
     call::{InPlace, remaining},
 };
@@ -481,7 +481,7 @@ where
 mod lend {
     //! How `Drive` lends what its acquisitions delivered. Unnameable outside
     //! this crate: lending each view as it is, or composing it first.
-    use crate::{Compose, Lend, Lent, ReceiverFamily, ViewLoan};
+    use crate::{Lend, Lent, ReceiverFamily, ViewLoan, compose::Compose};
     use core::pin::{Pin, pin};
 
     /// Continues with the lend of one slot.
@@ -576,14 +576,14 @@ mod lend {
 }
 use lend::{AsAcquired, Lender, SlotState, SlotVisitor};
 
-/// Lends a view composed from the acquired one, with the state of a
-/// [`Compose`], or a tuple with a state for each of a tuple of acquisitions;
-/// see [`drive_composed`].
+/// Lends a projection of the acquired view, using one state per acquisition.
+/// See [`drive_composed`].
 #[derive(Debug)]
+// Public in a private module because lock executors use it in their execution type.
 pub struct Composing<S> {
     state: S,
 }
-impl<F: ReceiverFamily, S: Compose<Lent<F>>> Lender<F> for Composing<S> {
+impl<F: ReceiverFamily, S: crate::compose::Compose<Lent<F>>> Lender<F> for Composing<S> {
     type Family = S::Family;
     #[inline(always)]
     fn lend<'p, V: SlotVisitor<S::Family>>(
@@ -1312,7 +1312,8 @@ where
 /// is a tuple with a state for each.
 ///
 /// With [`Guarded`](crate::Guarded) the composed view is the view of the
-/// value behind a lock guard; other states can reach a part of the value,
+/// value behind a lock guard. Use a [`ProjectionState`](crate::ProjectionState)
+/// with a [`ViewProjection`](crate::ViewProjection) to reach a part of the value,
 /// such as one stream of a connection.
 pub fn drive_composed<'view, S, C, Op>(
     acquisition: S,

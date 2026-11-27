@@ -1,7 +1,10 @@
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 #![allow(clippy::multiple_bound_locations)] // pin-project-lite generated projection bounds
 use bytes::BufMut;
-use nitori_call::{Call, CallPoll, Compose, Lend, Receiver, ReceiverAccess, ReceiverFamily, call};
+use nitori_call::{
+    AccessPlan, Call, CallPoll, Lend, Lent, ProvideAccess, Receiver, ReceiverAccess,
+    ReceiverFamily, ViewProjection, call, project_access,
+};
 use nitori_io::{Read, calls::ReadArrayExt as _};
 use std::{
     cell::Cell,
@@ -24,7 +27,10 @@ impl Drop for Count<'_> {
         self.dropped.set(self.dropped.get() + 1);
     }
 }
-struct Counted<'data, F>(PhantomData<fn() -> (&'data str, F)>);
+struct Counted<'data, 'state, F>(
+    PhantomData<&'state mut Count<'data>>,
+    PhantomData<fn() -> F>,
+);
 pin_project_lite::pin_project! {
     // pin-project-lite parses the trait and lifetime bounds separately.
     #[allow(clippy::multiple_bound_locations)]
@@ -35,17 +41,20 @@ pin_project_lite::pin_project! {
         #[pin] pinned:PhantomPinned,
     }
 }
-impl<'data, F: ReceiverFamily> ReceiverFamily for Counted<'data, F> {
+impl<'data, 'state, F: ReceiverFamily> ReceiverFamily for Counted<'data, 'state, F> {
     type ReceiverView<'visit>
         = View<'visit, 'data, F>
     where
         Self: 'visit;
 }
-impl<'data, F: ReceiverFamily> Compose<nitori_call::Lent<F>> for Count<'data> {
-    type Family = Counted<'data, F>;
-    fn compose<'visit>(
-        self: Pin<&'visit mut Self>,
+struct CountProjection<'data, 'state>(PhantomData<&'state mut Count<'data>>);
+
+impl<'data, 'state, F: ReceiverFamily> ViewProjection<Lent<F>> for CountProjection<'data, 'state> {
+    type Family = Counted<'data, 'state, F>;
+    type State = Pin<&'state mut Count<'data>>;
+    fn project<'visit>(
         inner: nitori_call::ViewLoan<'visit, F>,
+        state: &'visit mut Self::State,
     ) -> View<'visit, 'data, F>
     where
         nitori_call::Lent<F>: 'visit,
@@ -53,13 +62,29 @@ impl<'data, F: ReceiverFamily> Compose<nitori_call::Lent<F>> for Count<'data> {
     {
         View {
             inner,
-            state: self,
+            state: state.as_mut(),
             invariant: PhantomData,
             pinned: PhantomPinned,
         }
     }
 }
-impl<F: Read> Read for Counted<'_, F> {
+struct Counting<'data, 'state, A> {
+    io: A,
+    state: Pin<&'state mut Count<'data>>,
+}
+
+impl<'data, 'state, A: ReceiverAccess> ProvideAccess for Counting<'data, 'state, A> {
+    type AccessFamily = Counted<'data, 'state, A::Family>;
+    type Lentness = A::Lentness;
+
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        project_access::<_, CountProjection<'data, 'state>>(&mut self.io, &mut self.state)
+    }
+}
+
+impl<F: Read> Read for Counted<'_, '_, F> {
     type Error = F::Error;
     type Metadata = F::Metadata;
     fn poll_read<'v, B: BufMut + ?Sized>(
@@ -82,7 +107,7 @@ trait TaggedFamily: Read {
     where
         Self: 'v;
 }
-impl<'data, F: Read> TaggedFamily for Counted<'data, F> {
+impl<'data, 'state, F: Read> TaggedFamily for Counted<'data, 'state, F> {
     type Tag = &'data str;
     fn tag<'v>(host: Pin<&mut Self::ReceiverView<'v>>) -> &'data str
     where
@@ -116,7 +141,10 @@ async fn inner<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
         dropped: drops,
         _pin: PhantomPinned
     });
-    let mut composed = io.compose(state.as_mut());
+    let mut composed = Counting {
+        io,
+        state: state.as_mut(),
+    };
     let mut child = pin!(composed.tagged());
     while let Some(event) = child.as_mut().next().await {
         match event {
@@ -143,7 +171,10 @@ async fn outer<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
         dropped: drops.clone(),
         _pin: PhantomPinned
     });
-    let mut composed = io.compose(state.as_mut());
+    let mut composed = Counting {
+        io,
+        state: state.as_mut(),
+    };
     let mut child = pin!(composed.inner(drops));
     while let Some(event) = child.as_mut().next().await {
         match event {
@@ -251,13 +282,13 @@ fn explicit_view_executes_without_reconstruction() {
         _pin: PhantomPinned
     });
     let mut parent = pin!(Pin::new(&mut bytes).view());
-    let mut view = pin!(<Count<'_> as Compose<
-        nitori_call::Lent<nitori_call::Direct<&[u8]>>,
-    >>::compose(
-        state.as_mut(),
-        nitori_call::ViewLoan::new(parent.as_mut())
+    let mut state = state.as_mut();
+    let mut view = pin!(<CountProjection<'_, '_> as ViewProjection<
+        Lent<nitori_call::Direct<&[u8]>>,
+    >>::project(
+        nitori_call::ViewLoan::new(parent.as_mut()), &mut state
     ));
-    let call = pin!(Call::<Counted<'_, nitori_call::Direct<&[u8]>>, _>::new(
+    let call = pin!(Call::<Counted<'_, '_, nitori_call::Direct<&[u8]>>, _>::new(
         Tagged::new()
     ));
     assert!(matches!(
@@ -287,8 +318,14 @@ async fn chained<A: ReceiverAccess<Family: Read<Metadata: nitori_io::Combine>>>(
         dropped: drops.clone(),
         _pin: PhantomPinned,
     });
-    let mut first = io.compose(a.as_mut());
-    let mut second = first.compose(b.as_mut());
+    let mut first = Counting {
+        io,
+        state: a.as_mut(),
+    };
+    let mut second = Counting {
+        io: &mut first,
+        state: b.as_mut(),
+    };
     second.read_array::<2>().await.map(|read| read.value)
 }
 #[test]

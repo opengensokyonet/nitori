@@ -1,8 +1,9 @@
 //! Calls lent a view on every poll: only `.await` and `yield` end a step.
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 use nitori_call::{
-    Compose, Direct, DirectView, Emitter, LentAccess, LentAccesses, LentCall, LentSlot, Operation,
-    Receiver, ReceiverAccess, ReceiverFamily, Start, ViewLoan, call, capability, direct_receiver,
+    AccessPlan, Direct, DirectView, Emitter, LentAccess, LentAccesses, LentCall, LentSlot,
+    Operation, ProvideAccess, Receiver, ReceiverAccess, ReceiverFamily, Start, ViewLoan,
+    ViewProjection, call, capability, direct_receiver, project_access,
 };
 use std::{
     cell::Cell,
@@ -808,11 +809,12 @@ fn four_accesses_at_once() {
 
 /// A view of the same counter, as a composed access.
 struct SameCounter;
-impl Compose<nitori_call::Lent<Direct<Total>>> for SameCounter {
+impl ViewProjection<nitori_call::Lent<Direct<Total>>> for SameCounter {
     type Family = Direct<Total>;
-    fn compose<'scope>(
-        self: Pin<&'scope mut Self>,
+    type State = [(); 0];
+    fn project<'scope>(
         parent: nitori_call::ViewLoan<'scope, Direct<Total>>,
+        _: &'scope mut Self::State,
     ) -> DirectView<'scope, Total>
     where
         nitori_call::Lent<Direct<Total>>: 'scope,
@@ -822,18 +824,32 @@ impl Compose<nitori_call::Lent<Direct<Total>>> for SameCounter {
     }
 }
 
+struct ProjectedCounter<A>(A);
+impl<A: ReceiverAccess<Family = Direct<Total>>> ProvideAccess for ProjectedCounter<A> {
+    type AccessFamily = Direct<Total>;
+    type Lentness = A::Lentness;
+
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        project_access::<_, SameCounter>(&mut self.0, &mut [])
+    }
+}
+
 /// A plain operation, to run on a lent access.
 #[call]
 async fn plain_add<F: Counter>(io: &mut impl ReceiverAccess<Family = F>, by: u32) -> u32 {
     poll_fn(|cx| io.poll_access(cx, |access, _| Poll::Ready(F::add(access.into_pin(), by)))).await
 }
 
-struct Composing;
-impl Operation<(Direct<Total>, Direct<Total>)> for Composing {
+struct UseProjectedCounter;
+impl Operation<(Direct<Total>, Direct<Total>)> for UseProjectedCounter {
     type Output = u32;
     type Yield = Infallible;
 }
-impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)> for Composing {
+impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)>
+    for UseProjectedCounter
+{
     type Fut = impl Future<Output = u32>;
     fn start(
         self,
@@ -842,11 +858,11 @@ impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)> f
     ) -> Self::Fut {
         async move {
             assert_eq!(format!("{io:?}"), "LentSlot { .. }");
-            let mut composed = io.compose(SameCounter);
+            let mut composed = ProjectedCounter(&mut io);
             composed.add(1);
             composed.add_twice(2).await;
             composed.plain_add(3).await;
-            (io.compose(SameCounter), &mut other).with(|(mut first, mut second)| {
+            (ProjectedCounter(&mut io), &mut other).with(|(mut first, mut second)| {
                 second.add(10);
                 first.add(4)
             })
@@ -858,7 +874,7 @@ impl<'s> Start<'s, (LentSlot<'s, Direct<Total>>, LentSlot<'s, Direct<Total>>)> f
 fn compositions_of_lent_accesses_are_lent() {
     let (mut first, mut second) = (Total::default(), Total::default());
     let mut call = pin!(LentCall::<(Direct<Total>, Direct<Total>), _>::new(
-        Composing
+        UseProjectedCounter
     ));
     let mut first_view = pin!(Pin::new(&mut first).view());
     let mut second_view = pin!(Pin::new(&mut second).view());

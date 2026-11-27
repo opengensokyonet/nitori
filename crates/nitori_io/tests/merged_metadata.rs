@@ -7,12 +7,10 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use nitori_call::{
-    AccessPlan, Compose, ComposedReceiver, ProvideAccess, Receiver, ReceiverAccess, call,
-};
+use nitori_call::{AccessPlan, ProvideAccess, Receiver, ReceiverAccess, call};
 use nitori_io::{
     ChunkSegment, Combine, ExactLen, Infinite, Read, ReadChunk, ReadSegment, Skip,
-    adapters::{MergedMetadata, Merging, MergingSource},
+    adapters::{MergedMetadata, Merging},
     prelude::*,
 };
 
@@ -136,12 +134,12 @@ async fn merged<F: Read<Metadata = ZeroRtt>>(
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut first = io.compose(MergedMetadata::default());
+    let mut first = MergedMetadata::new(&mut *io, Default::default());
     let bytes = plain::<3, _>(&mut first).await;
-    let early = first.into_state().0;
-    let mut second = io.compose(MergedMetadata::default());
+    let early = first.into_parts().1;
+    let mut second = MergedMetadata::new(&mut *io, Default::default());
     let later = plain::<3, _>(&mut second).await;
-    (bytes, early, later, second.into_state().0)
+    (bytes, early, later, second.into_parts().1)
 }
 
 #[test]
@@ -163,7 +161,7 @@ where
         + ExactLen<Length = usize, LengthError = !>,
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut merging = io.compose(MergedMetadata::default());
+    let mut merging = MergedMetadata::new(&mut *io, Default::default());
     let chunk = merging.read_chunk(NonZeroUsize::MIN).await.unwrap();
     let chunk = chunk.map(
         |ChunkSegment {
@@ -173,7 +171,7 @@ where
     );
     let skipped = merging.skip(Infinite).await.unwrap();
     let Ok(left) = merging.remaining_len().await;
-    (chunk, skipped, left, merging.into_state().0)
+    (chunk, skipped, left, merging.into_parts().1)
 }
 
 #[test]
@@ -192,9 +190,9 @@ async fn skip_all<F: Skip<Metadata = ZeroRtt, Count = usize>>(
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut merging = io.compose(MergedMetadata::default());
+    let mut merging = MergedMetadata::new(&mut *io, Default::default());
     let skipped = merging.skip(Infinite).await.unwrap();
-    (skipped, merging.into_state().0)
+    (skipped, merging.into_parts().1)
 }
 
 #[test]
@@ -205,13 +203,10 @@ fn skipped_bytes_merge_nothing() {
 
 #[test]
 fn state_kept_with_a_receiver_merges_every_call() {
-    let mut io = ComposedReceiver::new(
-        Received::new(b"abcd", 1),
-        MergedMetadata::<ZeroRtt>::default(),
-    );
+    let mut io = MergedMetadata::new(Received::new(b"abcd", 1), ZeroRtt::default());
     assert_eq!(io.sync_plain_unpin::<2>(), *b"ab");
     assert_eq!(io.sync_plain_unpin::<2>(), *b"cd");
-    assert_eq!(io.into_parts().1, MergedMetadata(ZeroRtt(true)));
+    assert_eq!(io.into_parts().1, ZeroRtt(true));
 }
 
 /// A type of the caller's that lends an access to the stream it keeps.
@@ -231,19 +226,19 @@ impl<A: ReceiverAccess> ProvideAccess for Holder<A> {
 #[call(sync)]
 async fn read_through_holder<F: Read<Metadata = ZeroRtt, Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
-) -> ([u8; 1], [u8; 2], MergedMetadata<ZeroRtt>) {
+) -> ([u8; 1], [u8; 2], ZeroRtt) {
     let mut holder = Holder { io };
-    let mut state = MergedMetadata::default();
-    let mut source = MergingSource::new(&mut holder, &mut state);
+    let mut state = ZeroRtt::default();
+    let mut source = MergedMetadata::borrowing(&mut holder, &mut state);
     let first = source.read_array::<1>().await.unwrap();
     let rest = source.read_array::<2>().await.unwrap();
     (first.value, rest.value, state)
 }
 
 #[test]
-fn a_merging_source_lends_accesses_of_any_source_composed_with_the_state() {
+fn a_merging_wrapper_borrows_an_access_and_accumulator() {
     let result = Received::new(b"xyz", 2).sync_read_through_holder_unpin();
-    assert_eq!(result, (*b"x", *b"yz", MergedMetadata(ZeroRtt(true))));
+    assert_eq!(result, (*b"x", *b"yz", ZeroRtt(true)));
 }
 
 /// The indices of the segments, in the order merged: a metadata whose
@@ -318,10 +313,10 @@ async fn in_order<F: ReadChunk<Metadata = Order>>(io: &mut impl ReceiverAccess<F
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut merging = io.compose(MergedMetadata::default());
+    let mut merging = MergedMetadata::new(&mut *io, Default::default());
     merging.read_array::<2>().await.unwrap();
     merging.read_chunk(NonZeroUsize::MIN).await.unwrap();
-    merging.into_state().0
+    merging.into_parts().1
 }
 
 #[test]
@@ -371,19 +366,53 @@ impl Read for Flaky {
 #[test]
 fn pending_and_errors_merge_nothing() {
     let mut host = Flaky { polls: 0 };
-    let mut state = MergedMetadata::<Order>::default();
+    let mut state = Order::default();
     let mut output = Vec::new();
     for want in [Some(vec![]), Some(vec![]), Some(vec![9])] {
-        let view = <MergedMetadata<Order> as Compose<Flaky>>::compose(
-            Pin::new(&mut state),
-            Pin::new(&mut host).view(),
-        );
+        let view = MergedMetadata::borrowing(Pin::new(&mut host).view(), &mut state);
         let _ = <Merging<Flaky, Order> as Read>::poll_read(
             pin!(view),
             &mut Context::from_waker(Waker::noop()),
             &mut output,
         );
-        assert_eq!(Some(state.0.0.clone()), want);
+        assert_eq!(Some(state.0.clone()), want);
     }
     assert_eq!(output, b"x");
+}
+
+#[test]
+fn a_borrowed_quota_and_accumulator_survive_a_call_on_a_generic_receiver() {
+    use core::future::Future;
+    use nitori_io::adapters::ReadLimit;
+
+    fn require_send<F: Future + Send>(future: F) -> F {
+        future
+    }
+
+    fn read<R>(
+        receiver: &mut R,
+        quota: &mut u16,
+        merged: &mut ZeroRtt,
+    ) -> impl Future<Output = [u8; 2]> + Send
+    where
+        R: Receiver<Family: Read<Metadata = ZeroRtt, Error = !>> + Unpin + Send,
+    {
+        require_send(async move {
+            let limited = ReadLimit::borrowing(receiver, quota);
+            let mut source = MergedMetadata::borrowing(limited, merged);
+            source.read_array_unpin::<2>().await.unwrap().value
+        })
+    }
+
+    let mut source = Received::new(b"abc", 1);
+    let mut quota = 3;
+    let mut merged = ZeroRtt::default();
+    let mut cx = Context::from_waker(Waker::noop());
+    assert_eq!(
+        pin!(read(&mut source, &mut quota, &mut merged)).poll(&mut cx),
+        Poll::Ready(*b"ab")
+    );
+    assert_eq!(source.data, b"c".as_slice());
+    assert_eq!(quota, 1);
+    assert_eq!(merged, ZeroRtt(true));
 }

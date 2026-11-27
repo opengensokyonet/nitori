@@ -7,7 +7,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use nitori_call::{ComposedReceiver, Receiver, ReceiverAccess, call};
+use nitori_call::{Receiver, ReceiverAccess, call};
 use nitori_io::{
     Infinite,
     adapters::{Chunked, ReadLimit},
@@ -90,7 +90,7 @@ async fn bounded<F: ReadChunk<Metadata: nitori_io::Combine> + ExactLen<Length = 
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut src = io.compose(ReadLimit(quota));
+    let mut src = ReadLimit::new(&mut *io, quota);
     let before = query(&mut src).await;
     src.read_array::<1>().await.unwrap();
     let after_byte = query(&mut src).await;
@@ -104,7 +104,7 @@ where
         before,
         after_byte,
         query(&mut src).await,
-        src.into_state().0,
+        src.into_parts().1,
     )
 }
 
@@ -156,9 +156,9 @@ async fn wide<F: Read + ExactLen<Length = Infinite>>(
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut outer = io.compose(ReadLimit(Infinite));
+    let mut outer = ReadLimit::new(&mut *io, Infinite);
     let _: Infinite = query(&mut outer).await;
-    let mut inner = outer.compose(ReadLimit(u128::MAX));
+    let mut inner = ReadLimit::new(&mut outer, u128::MAX);
     let before = query(&mut inner).await;
     let mut dst = [0xff; 4];
     assert_eq!(
@@ -169,7 +169,7 @@ where
             .map(|segment| segment.count.get()),
         Some(2)
     );
-    (before, query(&mut inner).await, inner.into_state().0)
+    (before, query(&mut inner).await, inner.into_parts().1)
 }
 #[test]
 fn infinite_source_and_wide_quota_account_for_actual_short_reads() {
@@ -253,20 +253,17 @@ fn a_query_waits_for_the_length_and_reports_why_it_cannot_be_known() {
         let receiver = || Received { polls: 0, outcome };
         assert_eq!(finish(receiver().query_outcome_unpin()), (outcome, 1));
 
-        let mut limited = ComposedReceiver::new(receiver(), ReadLimit(3u8));
+        let mut limited = ReadLimit::new(receiver(), 3u8);
         assert_eq!(
             finish(limited.query_outcome_unpin()),
             (outcome.map(|_| 3u8), 1)
         );
-        assert_eq!(limited.into_parts().1.0, 3);
+        assert_eq!(limited.into_parts().1, 3);
 
         let mut chunked = Chunked::new(receiver(), NonZeroUsize::MIN);
         assert_eq!(finish(chunked.query_outcome_unpin()), (outcome, 1));
 
-        let mut merging = ComposedReceiver::new(
-            receiver(),
-            nitori_io::adapters::MergedMetadata::<()>::default(),
-        );
+        let mut merging = nitori_io::adapters::MergedMetadata::new(receiver(), ());
         assert_eq!(finish(merging.query_outcome_unpin()), (outcome, 1));
     }
 }
@@ -326,27 +323,23 @@ impl Read for Unknown {
 #[test]
 fn pending_and_error_leave_quota_untouched_even_for_an_unknown_source() {
     use core::task::Waker;
-    use nitori_call::Compose;
     use nitori_io::adapters::Limited;
     let mut host = Unknown { polls: 0 };
-    let mut quota = ReadLimit(255u8);
+    let mut quota = 255u8;
     let mut output = Vec::new();
     for (want, left) in [
         (Poll::Pending, 255),
         (Poll::Ready(Err(())), 255),
         (Poll::Ready(Ok(segment(1))), 254),
     ] {
-        let view = <ReadLimit<u8> as Compose<Unknown>>::compose(
-            Pin::new(&mut quota),
-            Pin::new(&mut host).view(),
-        );
-        let got = <Limited<Unknown, ReadLimit<u8>> as Read>::poll_read(
+        let view = ReadLimit::borrowing(Pin::new(&mut host).view(), &mut quota);
+        let got = <Limited<Unknown, u8> as Read>::poll_read(
             pin!(view),
             &mut Context::from_waker(Waker::noop()),
             &mut output,
         );
         assert_eq!(got, want);
-        assert_eq!(quota.0, left);
+        assert_eq!(quota, left);
     }
     assert_eq!(output, [7]);
 }
@@ -376,15 +369,15 @@ async fn nested<F: Read<Metadata: nitori_io::Combine> + ExactLen<Length = usize>
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut unbounded = io.compose(ReadLimit(Infinite));
+    let mut unbounded = ReadLimit::new(&mut *io, Infinite);
     let initial = query(&mut unbounded).await;
-    let mut small = unbounded.compose(ReadLimit(3u8));
+    let mut small = ReadLimit::new(&mut unbounded, 3u8);
     let small_len = query(&mut small).await;
-    let mut large = small.compose(ReadLimit(1u64 << 40));
+    let mut large = ReadLimit::new(&mut small, 1u64 << 40);
     large.read_array::<2>().await.unwrap();
     let large_len = query(&mut large).await;
-    assert_eq!(large.into_state().0, (1u64 << 40) - 2);
-    let small_left = small.into_state().0;
+    assert_eq!(large.into_parts().1, (1u64 << 40) - 2);
+    let small_left = small.into_parts().1;
     (
         initial,
         small_len,
@@ -406,8 +399,8 @@ fn zero_sized_infinite_quota_is_unchanged_by_subassign() {
     let mut quota = Infinite;
     quota -= usize::MAX;
     assert_eq!(quota, Infinite);
-    assert_eq!(core::mem::size_of::<ReadLimit<Infinite>>(), 0);
-    assert_eq!(core::mem::size_of::<ReadLimit<u8>>(), 1);
+    assert_eq!(core::mem::size_of::<ReadLimit<(), Infinite>>(), 0);
+    assert_eq!(core::mem::size_of::<ReadLimit<(), u8>>(), 1);
 }
 
 #[test]
@@ -415,23 +408,14 @@ fn budget_views_display_the_remaining_quota() {
     fn describe(view: &impl core::fmt::Debug) -> String {
         format!("{view:?}")
     }
-    use nitori_call::{Compose, Direct};
     use nitori_io::adapters::WriteLimit;
-    let mut storage = Vec::<u8>::new();
-    let mut write_limit = WriteLimit(3);
-    let limited = <WriteLimit as Compose<Direct<Vec<u8>>>>::compose(
-        Pin::new(&mut write_limit),
-        Pin::new(&mut storage).view(),
-    );
-    assert_eq!(describe(&limited), "LimitedView { remaining: 3, .. }");
+    let mut storage = WriteLimit::new(Vec::<u8>::new(), 3);
+    let limited = Pin::new(&mut storage).view();
+    assert_eq!(describe(&limited), "WriteLimit { remaining: 3, .. }");
 
-    let mut source = &b"abc"[..];
-    let mut read_limit = ReadLimit(7u8);
-    let limited = <ReadLimit<u8> as Compose<Direct<&[u8]>>>::compose(
-        Pin::new(&mut read_limit),
-        Pin::new(&mut source).view(),
-    );
-    assert_eq!(describe(&limited), "LimitedView { remaining: 7, .. }");
+    let mut source = ReadLimit::new(&b"abc"[..], 7u8);
+    let limited = Pin::new(&mut source).view();
+    assert_eq!(describe(&limited), "ReadLimit { remaining: 7, .. }");
 }
 
 // Formatting a limited view is optional. A quota can participate in reads
@@ -464,9 +448,9 @@ async fn non_debug_quota<F: Read<Metadata: nitori_io::Combine> + ExactLen<Length
 where
     <F as Read>::Error: core::fmt::Debug,
 {
-    let mut limited = io.compose(ReadLimit(OpaqueQuota(3)));
+    let mut limited = ReadLimit::new(&mut *io, OpaqueQuota(3));
     limited.read_array::<1>().await.unwrap();
-    (query(&mut limited).await.0, limited.into_state().0.0)
+    (query(&mut limited).await.0, limited.into_parts().1.0)
 }
 
 #[test]

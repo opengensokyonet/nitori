@@ -1,12 +1,12 @@
 //! An access composed by value: a function wraps the access it is given, and
 //! `into_parts` returns that access to read on after the composition.
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{Composed, ReceiverAccess, call};
+use nitori_call::{ReceiverAccess, call};
 use nitori_io::{adapters::ReadLimit, calls::ReadArrayError, prelude::*};
 
 /// Wraps the access it is given, as it is, in a read budget.
-fn limit<I: ReceiverAccess>(io: I, budget: usize) -> Composed<I, ReadLimit<usize>> {
-    Composed::new(io, ReadLimit(budget))
+fn limit<I: ReceiverAccess>(io: I, budget: usize) -> ReadLimit<I> {
+    ReadLimit::new(io, budget)
 }
 
 type Reads<E> = (
@@ -23,7 +23,7 @@ async fn read_within_then_after<F: Read<Metadata: nitori_io::Combine>>(
 ) -> Reads<F::Error> {
     let mut limited = limit(io, 1);
     let within = limited.read_array::<2>().await.map(|read| read.value);
-    let (io, ReadLimit(left)) = limited.into_parts();
+    let (io, left) = limited.into_parts();
     let after = io.read_array::<1>().await.map(|read| read.value);
     (within, left, after)
 }
@@ -54,14 +54,14 @@ async fn compose_on_composed<F: Read<Metadata: nitori_io::Combine>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Nested<F::Error> {
     let mut outer = limit(io, 3);
-    let mut inner = outer.compose(ReadLimit(1usize));
+    let mut inner = ReadLimit::new(&mut outer, 1usize);
     let first = inner.read_array::<2>().await.map(|read| read.value);
-    let inner_left = inner.into_state().0;
+    let inner_left = inner.into_parts().1;
     let mut nested = limit(outer, 1);
     let second = nested.read_array::<1>().await.map(|read| read.value);
-    let (mut outer, ReadLimit(nested_left)) = nested.into_parts();
+    let (mut outer, nested_left) = nested.into_parts();
     let third = outer.read_array::<1>().await.map(|read| read.value);
-    let outer_left = outer.into_state().0;
+    let outer_left = outer.into_parts().1;
     (first, second, third, [inner_left, nested_left, outer_left])
 }
 

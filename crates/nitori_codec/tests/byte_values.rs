@@ -70,7 +70,7 @@ fn byte_values_encode_inside_an_operation_and_on_a_host() {
 async fn bounded<F: Write<(), Report = ()>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<(), WriteArrayError<F::Error>> {
-    io.compose(WriteLimit(2)).encode(*b"abc").await
+    WriteLimit::new(&mut *io, 2).encode(*b"abc").await
 }
 
 #[test]

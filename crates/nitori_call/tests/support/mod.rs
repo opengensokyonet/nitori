@@ -2,7 +2,8 @@
 #![allow(dead_code)]
 use bytes::BufMut;
 use nitori_call::{
-    Compose, Direct, Lent, ReceiverAccess, ReceiverFamily, ViewLoan, direct_receiver,
+    AccessPlan, Direct, Lent, ProvideAccess, ReceiverAccess, ReceiverFamily, ViewLoan,
+    ViewProjection, direct_receiver, project_access,
 };
 use std::{
     collections::VecDeque,
@@ -147,7 +148,19 @@ where
 }
 
 /// A byte budget owned by the operation, retained across polls.
-pub struct ReadLimit(pub usize);
+pub struct BoundedRead<'a, A>(pub A, pub &'a mut usize);
+struct LimitView;
+
+impl<A: ReceiverAccess> ProvideAccess for BoundedRead<'_, A> {
+    type AccessFamily = Limited<A::Family>;
+    type Lentness = A::Lentness;
+
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        project_access::<_, LimitView>(&mut self.0, self.1)
+    }
+}
 pub struct Limited<F>(PhantomData<fn(F) -> F>);
 pub struct LimitedView<'v, F: ReceiverFamily> {
     inner: ViewLoan<'v, F>,
@@ -159,17 +172,15 @@ impl<F: ReceiverFamily> ReceiverFamily for Limited<F> {
     where
         Self: 'v;
 }
-impl<F: ReceiverFamily> Compose<Lent<F>> for ReadLimit {
+impl<F: ReceiverFamily> ViewProjection<Lent<F>> for LimitView {
     type Family = Limited<F>;
-    fn compose<'v>(self: Pin<&'v mut Self>, inner: ViewLoan<'v, F>) -> LimitedView<'v, F>
+    type State = usize;
+    fn project<'v>(inner: ViewLoan<'v, F>, remaining: &'v mut usize) -> LimitedView<'v, F>
     where
         Lent<F>: 'v,
         Self::Family: 'v,
     {
-        LimitedView {
-            inner,
-            remaining: &mut self.get_mut().0,
-        }
+        LimitedView { inner, remaining }
     }
 }
 impl<F: Read> Read for Limited<F> {

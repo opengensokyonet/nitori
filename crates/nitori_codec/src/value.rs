@@ -1,14 +1,14 @@
 //! Values with the merged metadata of their bytes when read, or the write
 //! options of their bytes when written.
 use crate::{DecodeFrom, EncodeInto, EncodedLen};
-use nitori_call::{Composed, ReceiverAccess};
+use nitori_call::ReceiverAccess;
 use nitori_io::{
     Combine, Read, Value, Write,
-    adapters::{FixedOptions, MappedOptions, MergedMetadata, MergingSource},
+    adapters::{FixedOptions, MappedOptions, MergedMetadata},
 };
 
 /// Decodes `V` from a source with metadata and returns the merged metadata
-/// of the bytes it read: `V` reads from a [`MergingSource`], which reports
+/// of the bytes it read: `V` reads from a [`MergedMetadata`], which reports
 /// no metadata to it and merges the source's.
 ///
 /// This is how a base value, one that reads its own bytes and accepts only
@@ -23,25 +23,23 @@ use nitori_io::{
 impl<S, V, M, E> DecodeFrom<S> for Value<V, M>
 where
     S: ReceiverAccess<Family: Read<Metadata = M>>,
-    M: Combine + Unpin,
-    V: for<'x> DecodeFrom<MergingSource<'x, S, M>, Error = E>,
+    M: Combine,
+    V: for<'x> DecodeFrom<MergedMetadata<&'x mut S, M, &'x mut M>, Error = E>,
 {
     type Error = E;
     async fn decode_from(mut source: S) -> Result<Self, E> {
-        let mut merged = MergedMetadata(M::default());
-        let value = V::decode_from(MergingSource::new(&mut source, &mut merged)).await?;
+        let mut merged = M::default();
+        let value = V::decode_from(MergedMetadata::borrowing(&mut source, &mut merged)).await?;
         Ok(Value {
             value,
-            metadata: merged.0,
+            metadata: merged,
         })
     }
 }
 
 /// Encodes `V` into a sink of [`Write<O>`](Write) with `metadata` as the
-/// write options of every byte it writes: `V` writes to the sink composed
-/// with [`MappedOptions`]`(`[`FixedOptions`]`(metadata))`, which takes any
-/// options, `()` included, and gives the sink these. That composition
-/// state must be `Unpin`, so `V`'s bound holds only for `O: Unpin`.
+/// write options of every byte it writes. [`MappedOptions`] with
+/// [`FixedOptions`] accepts any options from `V` and passes these to the sink.
 ///
 /// This is how a base value, one that writes its own bytes with the
 /// options `()`, is written with options; a composite value takes the
@@ -53,21 +51,14 @@ where
 impl<S, V, O, R, E> EncodeInto<S> for Value<V, O>
 where
     S: ReceiverAccess<Family: Write<O>>,
-    V: for<'x> EncodeInto<
-            Composed<&'x mut S, MappedOptions<FixedOptions<O>>>,
-            Output = R,
-            Error = E,
-        >,
+    V: for<'x> EncodeInto<MappedOptions<&'x mut S, FixedOptions<O>>, Output = R, Error = E>,
 {
     type Output = R;
     type Error = E;
     async fn encode_into(self, mut sink: S) -> Result<R, E> {
         let Value { value, metadata } = self;
         value
-            .encode_into(Composed::new(
-                &mut sink,
-                MappedOptions(FixedOptions(metadata)),
-            ))
+            .encode_into(MappedOptions::new(&mut sink, FixedOptions(metadata)))
             .await
     }
 }

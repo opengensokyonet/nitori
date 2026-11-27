@@ -110,7 +110,7 @@ Host methods have pinned and `_unpin` entries, plus `sync_` entries for
 resources that never wait. Receivers also provide `PollReadExt` and
 `PollWriteExt` for one synchronous poll through their family; the latter
 includes `poll_write_lent`. Access methods
-work on the root access and on composed ones. A local resource can use
+work on the root access and on wrapped accesses. A local resource can use
 `nitori_call::family_receiver!` and implement the capability on itself; custom
 wrapper families define their own views. Host methods also work on custom
 `CallExecutor` implementations.
@@ -229,7 +229,7 @@ use nitori_io::{adapters::ReadLimit, prelude::*};
 async fn bounded_len<F: ExactLen<Length = usize>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<u8, F::LengthError> {
-    io.compose(ReadLimit(4u8)).remaining_len().await
+    ReadLimit::new(io, 4u8).remaining_len().await
 }
 let mut input = &b"abc"[..];
 assert_eq!(input.sync_bounded_len_unpin(), Ok(3u8));
@@ -244,23 +244,20 @@ Slices, `Bytes`, `BytesMut`, `VecDeque<u8>`, and the standard-library
 
 ## Byte budgets
 
-`adapters::ReadLimit(n)` and `adapters::WriteLimit(n)` are byte budgets for
-`io.compose(..)` inside an operation. The composed access reads or accepts at
-most `n` more bytes; past the budget a read reports EOF and a write accepts
-nothing, which `write_all` reports as zero progress; the composed access
-answers there without polling the parent. The budget survives Pending and cancellation, and `into_state` returns
-what remains. A budget kept with a receiver,
-`nitori_call::ComposedReceiver::new(receiver, ReadLimit(n))`, bounds every
-call on that receiver together and outlives each of them. A read budget forwards the parent's read capabilities and can
-also report an exact length when the parent supplies one. A write budget
-forwards `Write` and `WriteLent`, lending at most what is left.
+`ReadLimit::new(io, quota)` and `WriteLimit::new(io, budget)` wrap a source
+or sink. Call them with an access inside an operation or with a receiver
+outside it. At zero, a read reports EOF and a write accepts no bytes,
+which `write_all` reports as zero progress. Both answer at the boundary
+without polling the inner view. The budget survives Pending and
+cancellation. `into_parts` returns the inner IO and what remains, and
+`borrowing(io, &mut budget)` updates a budget stored by the caller.
 
-`ReadLimit<L = usize>` stores a logical quota of type `L`. All unsigned
-integer widths and `Infinite` are supported. A single transfer is still
-bounded by `usize`. With a finite quota on an unknown source, early normal
-EOF can leave unused quota. With an infinite source, the exact length of
-the limited view equals the quota. A bare integer may need its type written
-explicitly, for example `ReadLimit(6usize)`.
+`ReadLimit<IO, L = usize, B = L>` uses a logical quota of type `L`. All
+unsigned integer widths, `Infinite`, and custom quotas are supported. A
+single transfer is bounded by `usize`. An early EOF can leave unused quota.
+Exact length reports the minimum of the remaining quota and the inner
+source's exact length. A write budget supports `Write` and `WriteLent`,
+lending at most what remains.
 
 `Min<Rhs>` takes both operands by value and has an associated `Output`.
 For the built-in lengths, a finite right operand selects the result type and
@@ -288,9 +285,9 @@ async fn write_bounded<F: Write<(), Report = ()>, A: ReceiverAccess<Family = F>>
     payload: &[u8],
     room: usize,
 ) -> (usize, Result<(), WriteAllError<F::Error>>) {
-    let mut bounded = io.compose(WriteLimit(room));
+    let mut bounded = WriteLimit::new(io, room);
     let result = bounded.write_all(payload, ()).await;
-    (bounded.into_state().0, result)
+    (bounded.into_parts().1, result)
 }
 
 fn main() {
@@ -321,14 +318,11 @@ its boundary without polling the parent. For it, the quota must also satisfy
 `L: Min<F::Count, Output = F::Count>` and `F::Count: Min<L> + Clone`, with
 `L: SubAssign` of that minimum, which the built-in widths and `Infinite` do.
 
-A reader that cannot skip natively gets `Skip` from a composition state,
-on an access with `io.compose(..)` or on a receiver with
-`ComposedReceiver::new(..)`. `adapters::ReadSkip` reads at most 8 KiB into a
-stack buffer on each poll and drops it; `adapters::ReadChunkSkip` takes one
-chunk of at most the maximum and drops it, without copying. Both skip with
-`Count = usize`, hold no state, and forward `Read`, `ReadChunk`,
-`ExactLen` and `Write` of the parent. There is no blanket implementation for readers, so
-a source that can skip natively implements `Skip` itself.
+Wrap a reader with `ReadSkip::new(io)` to skip by reading up to 8 KiB into
+a stack buffer on each poll and dropping the bytes. `ReadChunkSkip::new(io)`
+takes a chunk of at most the maximum and drops it without copying. Both
+wrappers skip with `Count = usize` and forward the inner family's `Read`,
+`ReadChunk`, `ExactLen`, `Write` and `WriteLent` when available.
 
 `calls::skip_exact(io, length)` skips exactly `length`, asking for at most
 the remainder on each poll; on EOF or a host failure its `SkipExactError`
@@ -339,7 +333,7 @@ EOF with an `Infinite` maximum and reports no total, which need not fit the
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{ComposedReceiver, ReceiverAccess, call};
+use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     adapters::{ReadLimit, ReadSkip},
     bridge::Std,
@@ -355,7 +349,7 @@ async fn skip_frame<F: Skip<Count = usize>>(
     length: usize,
     header: usize,
 ) -> (Result<(), SkipExactError<F::Error, usize>>, Result<(), F::Error>) {
-    let mut frame = io.compose(ReadLimit(length));
+    let mut frame = ReadLimit::new(io, length);
     let header = frame.skip_exact(header).await;
     (header, frame.skip_to_end().await)
 }
@@ -366,7 +360,7 @@ assert!(header.is_ok() && rest.is_ok());
 assert_eq!(input, b"next");
 
 // A reader without native skipping skips by reading.
-let mut reader = ComposedReceiver::new(Std::new(Cursor::new(b"abcdef")), ReadSkip);
+let mut reader = ReadSkip::new(Std::new(Cursor::new(b"abcdef")));
 assert_eq!(reader.sync_skip_unpin(4u8).unwrap(), Some(4usize));
 ```
 
@@ -421,16 +415,12 @@ async fn request<F: Read<Metadata = Early>>(
 }
 ```
 
-Code that reads only from sources without metadata can read from one with
-it through `adapters::MergedMetadata`: `io.compose(MergedMetadata::default())`
-reports no metadata (`Metadata = ()`) and merges each segment's into the
-state, which `into_state` returns. Chunk reads, skipping and the exact
-length pass through; skipping reports no metadata, so that of skipped bytes
-does not reach the state. Kept with a receiver in
-a `ComposedReceiver`, the state merges every call on it.
-`adapters::MergingSource` borrows any `nitori_call::ReceiverAccess` and
-merges read metadata into a separately borrowed `MergedMetadata` state.
-It provides the adapted access through `nitori_call::ProvideAccess`.
+`MergedMetadata::new(io, accumulator)` presents a source with
+`Metadata = ()` and combines successful reads' metadata into the
+accumulator. This includes chunk reads. Skipping and length queries pass
+through. The accumulator persists across calls on a wrapped receiver.
+Use `into_parts` to recover it or `MergedMetadata::borrowing(io, &mut accumulator)`
+to update a caller-owned value.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
@@ -464,11 +454,11 @@ async fn pair<F: Read<Metadata = ()>>(
 async fn early_pair<F: Read<Metadata = Early>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> Result<Value<[u8; 2], Early>, ReadArrayError<F::Error>> {
-    let mut merging = io.compose(MergedMetadata::default());
+    let mut merging = MergedMetadata::new(io, Early::default());
     let value = pair(&mut merging).await?;
     Ok(Value {
         value,
-        metadata: merging.into_state().0,
+        metadata: merging.into_parts().1,
     })
 }
 ```
@@ -488,7 +478,7 @@ A written value carries its options as a `Value { value, metadata }`,
 whose `metadata` is the options of its bytes, as it is the metadata of
 the bytes a value was read from.
 
-The composition state `adapters::MappedOptions(map)` writes through a sink
+`adapters::MappedOptions::new(sink, map)` wraps a sink
 of `Write<O>` with other options: for a `map` that implements
 `adapters::MapOptions<M, Options = O>`, it gives each segment the options
 `map.map_options(&m)` lends for the `m` it is written with, making a sink of
@@ -501,7 +491,7 @@ it.
 ```rust
 #![feature(impl_trait_in_assoc_type)]
 use bytes::Buf;
-use nitori_call::{ComposedReceiver, family_receiver};
+use nitori_call::{family_receiver};
 use nitori_io::{WriteSegment, adapters::{MapOptions, MappedOptions}, prelude::*};
 use std::{num::NonZeroUsize, pin::Pin, task::{Context, Poll}};
 
@@ -550,20 +540,17 @@ impl MapOptions<Early> for ByArrival {
 
 // Early bytes are sent first.
 let urgency = ByArrival { early: Priority(0), late: Priority(7) };
-let mut sink = ComposedReceiver::new(Sent::default(), MappedOptions(urgency));
+let mut sink = MappedOptions::new(Sent::default(), urgency);
 sink.sync_write_all_unpin(&b"ab"[..], Early(true)).unwrap();
 sink.sync_write_all_unpin(&b"c"[..], Early(false)).unwrap();
 let (sent, _) = sink.into_parts();
 assert_eq!(sent.0, [(b"ab".to_vec(), Priority(0)), (b"c".to_vec(), Priority(7))]);
 ```
 
-With the mapping `adapters::FixedOptions(o)`, `MappedOptions(FixedOptions(o))`
-gives every segment `o`, borrowed, whatever it is written with, so the composed sink implements `Write<M>` for every
-`M`, `()` included: code that writes only to sinks without options, or a
-whole copy, can then write to a sink that takes them. `MappedOptions`
-composes on any family, inside an operation with `io.compose(..)` or kept
-with a receiver in a `ComposedReceiver`, and forwards `Write` and
-`WriteLent`. The mapping is called on every write of a segment, a write that
+`MappedOptions::new(sink, FixedOptions(o))` gives every segment the sink
+options `o`, so the wrapped sink implements `Write<M>` for every `M`,
+including `()`. `MappedOptions` owns its mapping and wraps a view, receiver,
+or access. It supports `Write` and `WriteLent` when the sink does. The mapping is called on every write of a segment, a write that
 waits included; a fill's options are mapped when it returns `Filled`, not
 when it gives up, and the sink
 gets a clone of the options the mapping lends, so lending needs
@@ -617,7 +604,7 @@ async fn greet<F: Write<(), Report = ()>>(
 async fn urgent_greeting<F: Write<Priority, Report = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) {
-    greet(&mut io.compose(MappedOptions(FixedOptions(Priority(0))))).await.unwrap();
+    greet(&mut MappedOptions::new(&mut *io, FixedOptions(Priority(0)))).await.unwrap();
 }
 
 let mut sink = Sent::default();
@@ -689,15 +676,15 @@ the metadata it gives the sink), and the copy takes no options of its
 own. `copy_buffered` writes a segment completely before reading the next, so
 bytes of different metadata are never written together. A copy from a
 source without metadata into a sink without options is `()` to `()`. For
-a sink that takes other options, compose `adapters::MappedOptions` on it,
+a sink that takes other options, wrap it in `adapters::MappedOptions`,
 with a `MapOptions` mapping to choose them from each segment's metadata, or
 with `FixedOptions` to write the whole copy with one (see [Write options](#write-options)).
 
 Each returns a `CopyTotal { count, metadata, report }` with the count as a
 `u64` and the segments' metadata and reports merged with `Combine`. Their
 errors carry the bytes copied before the failure; a sink that accepts nothing
-is a `WriteZeroError<u64>`. To copy exactly `n` bytes, compose
-`ReadLimit(n)` on the source and compare the count with `n`. Dropping
+is a `WriteZeroError<u64>`. To copy exactly `n` bytes, wrap the source with
+`ReadLimit::new(source, n)` and compare the count with `n`. Dropping
 `copy_chunks` or `copy_buffered` while it writes loses the bytes it has taken
 from the source and the sink has not accepted, and so does a write failure or
 zero progress, which reports only the count.

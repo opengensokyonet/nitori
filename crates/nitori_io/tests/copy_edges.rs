@@ -164,13 +164,13 @@ where
     R: ReadChunk<Metadata = (), Error = !>,
     W: Write<(), Error = !, Report: Combine>,
 {
-    let mut limited_source = source.compose(ReadLimit(reads));
-    let mut limited_sink = sink.compose(WriteLimit(writes));
+    let mut limited_source = ReadLimit::new(&mut *source, reads);
+    let mut limited_sink = WriteLimit::new(&mut *sink, writes);
     let result = copy_chunks(&mut limited_source, &mut limited_sink, chunk).await;
     (
         result,
-        limited_source.into_state().0,
-        limited_sink.into_state().0,
+        limited_source.into_parts().1,
+        limited_sink.into_parts().1,
     )
 }
 #[call(sync)]
@@ -189,13 +189,13 @@ where
     R: Read<Metadata = (), Error = !>,
     W: WriteLent<(), Error = !, Report: Combine>,
 {
-    let mut limited_source = source.compose(ReadLimit(reads));
-    let mut limited_sink = sink.compose(WriteLimit(writes));
+    let mut limited_source = ReadLimit::new(&mut *source, reads);
+    let mut limited_sink = WriteLimit::new(&mut *sink, writes);
     let result = copy_into_lent(&mut limited_source, &mut limited_sink, chunk).await;
     (
         result,
-        limited_source.into_state().0,
-        limited_sink.into_state().0,
+        limited_source.into_parts().1,
+        limited_sink.into_parts().1,
     )
 }
 #[call(sync)]
@@ -214,13 +214,13 @@ where
     R: Read<Metadata = (), Error = !>,
     W: Write<(), Error = !, Report: Combine>,
 {
-    let mut limited_source = source.compose(ReadLimit(reads));
-    let mut limited_sink = sink.compose(WriteLimit(writes));
+    let mut limited_source = ReadLimit::new(&mut *source, reads);
+    let mut limited_sink = WriteLimit::new(&mut *sink, writes);
     let result = copy_buffered(&mut limited_source, &mut limited_sink, buffer).await;
     (
         result,
-        limited_source.into_state().0,
-        limited_sink.into_state().0,
+        limited_source.into_parts().1,
+        limited_sink.into_parts().1,
     )
 }
 
@@ -532,9 +532,9 @@ where
     R: Read<Metadata = (), Error = !>,
     W: WriteLent<(), Report = (), Error = !>,
 {
-    let mut limited = sink.compose(WriteLimit(budget));
-    let mut by_reading = limited.compose(ReadSkip);
-    let mut by_chunks = by_reading.compose(ReadChunkSkip);
+    let mut limited = WriteLimit::new(&mut *sink, budget);
+    let mut by_reading = ReadSkip::new(&mut limited);
+    let mut by_chunks = ReadChunkSkip::new(&mut by_reading);
     Ok(copy_into_lent(source, &mut by_chunks, nz(4)).await?.count)
 }
 

@@ -8,7 +8,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{ComposedReceiver, ReceiverAccess, call};
+use nitori_call::{ReceiverAccess, call};
 use nitori_codec::{payload::Buffered, prelude::*};
 use nitori_io::{
     Combine, Read, ReadSegment, Value, Write, WriteSegment,
@@ -185,12 +185,12 @@ fn a_decoded_composite_is_written_with_options_mapped_from_its_metadata() {
         (pair.first.metadata, pair.second.metadata),
         (ZeroRtt(true), ZeroRtt(false))
     );
-    let mut sink = ComposedReceiver::new(
+    let mut sink = MappedOptions::new(
         Prioritized::default(),
-        MappedOptions(ByArrival {
+        ByArrival {
             early: Priority(0),
             late: Priority(9),
-        }),
+        },
     );
     sink.sync_encode_unpin(pair).unwrap();
     let (sink, _) = sink.into_parts();
@@ -216,12 +216,12 @@ where
 
 #[test]
 fn a_buffered_payload_writes_each_segment_with_options_mapped_from_its_metadata() {
-    let mut sink = ComposedReceiver::new(
+    let mut sink = MappedOptions::new(
         Prioritized::default(),
-        MappedOptions(ByArrival {
+        ByArrival {
             early: Priority(0),
             late: Priority(9),
-        }),
+        },
     );
     let mut source = Received {
         data: b"abc",
@@ -241,16 +241,13 @@ async fn tagged<F: Write<Priority, Report = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
     priority: Priority,
 ) {
-    let mut fixed = io.compose(MappedOptions(FixedOptions(priority)));
+    let mut fixed = MappedOptions::new(&mut *io, FixedOptions(priority));
     fixed.encode(*b"xyz").await.unwrap();
 }
 
 #[test]
 fn a_base_value_is_written_with_fixed_options() {
-    let mut sink = ComposedReceiver::new(
-        Prioritized::default(),
-        MappedOptions(FixedOptions(Priority(4))),
-    );
+    let mut sink = MappedOptions::new(Prioritized::default(), FixedOptions(Priority(4)));
     sink.sync_encode_unpin(*b"abc").unwrap();
     let (mut sink, _) = sink.into_parts();
     sink.sync_tagged_unpin(Priority(6));

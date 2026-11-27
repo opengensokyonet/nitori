@@ -390,13 +390,10 @@ Crates that only store, await or stream executions need no features.
 
 Suppose a record contains a one-byte length followed by a two-byte word. If a
 malformed record declares only one payload byte, an unrestricted word parser
-would consume the next record's length as its second byte. Instead, adapt the
-access with a byte budget: `nitori_io::adapters::ReadLimit` implements
-`Compose<F>` and produces a view that still implements `nitori_io::Read` but
-returns EOF at the record boundary. Its
-[implementation](../nitori_io/src/adapters.rs) shows how to write such an
-adapter; the [complete example](../nitori_io/examples/limited_read/main.rs)
-also tests it across Pending and cancellation:
+would consume the next record's length as its second byte.
+`nitori_io::adapters::ReadLimit` wraps the access with a byte quota and returns
+EOF at the record boundary. The [complete example](../nitori_io/examples/limited_read/main.rs)
+also tests the boundary across Pending and cancellation.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
@@ -424,7 +421,7 @@ async fn read_record<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<[u8; 2], ReadRecordError<F::Error>> {
     let [length] = io.read_array::<1>().await.context(LengthSnafu)?.value;
-    io.compose(ReadLimit(usize::from(length)))
+    ReadLimit::new(io, usize::from(length))
         .read_word()
         .await
         .context(WordSnafu)
@@ -446,31 +443,23 @@ fn main() {
 }
 ```
 
-`io.compose(state)` returns a `Composed` access that borrows its parent
-mutably; on each access it builds the child view from the parent view and the
-state. The state must be `Unpin`; pass `pin!(state)` otherwise. `into_state`
-recovers it and ends the borrow. `Composed` holds its parent by value, so
-`Composed::new(io, state)` adapts an access passed in by value, such as the `I`
-of a function `fn(io: I) -> Composed<I, S>` that wraps the access it is given;
-`into_parts` returns the parent and the state, and `parent_mut` and
-`state_mut` reach them between accesses. `Compose::compose` takes the parent
-view by value. On an access the parent view is only borrowed for that access, so the
-state composes on `Lent<F>`, whose view is a `ViewLoan<'view, F>` that hides
-the parent view's inner lifetime: `loan.with(|access| ..)` lends it back for
-one capability call, and `loan.project(|access| ..)` gives the loan up for a
-pinned borrow of a place in the view, such as the value behind a lock guard.
-A capability reaches `Lent<F>` where it is implemented for it; `nitori_io`
-forwards its own.
+A wrapper can hold a receiver, an access, or a view. A wrapper around a
+receiver lends a child view made from the inner view and its own state. The
+state stays with the wrapper across calls, including cancellation.
 
-A state that composes on every family, as `ReadLimit` does, can also live
-with a receiver: `ComposedReceiver::new(receiver, state)` is a receiver whose
-view is the state composed on the inner receiver's view. Its state outlives
-each call on it, a cancelled call included, and calls on it can compose again.
+For a wrapper around an access, implement `ProvideAccess` and return the plan
+from `project_access`. A `ViewProjection<Lent<F>>` builds the child view from a
+`ViewLoan<'view, F>` and a mutable borrow of the wrapper's state. The plan
+borrows the parent access and the state for its lifetime and inherits the
+parent's lentness. Use `loan.with(|access| ..)` to use the parent view for one
+capability call or `loan.project(|access| ..)` to obtain a pinned borrow from
+it. The [read limit implementation](../nitori_io/src/adapters/read_limit.rs)
+uses the same wrapper for the child view and for the outer access or receiver.
 
 ## Receiver access
 
 `ReceiverAccess` is implemented by the framework for every `ProvideAccess`,
-including call slots, compositions, and mutable borrows of accesses.
+including call slots, wrappers, and mutable borrows of accesses.
 Each use borrows the access mutably, so two operations cannot use it at the
 same time. A slot and every access derived from it stay within the
 operation. With the `std` feature, a slot is `Send` and only the thread
@@ -887,11 +876,12 @@ next access; the task is not suspended, so others can take the resource while
 the operation computes on another thread. With a fixed view, as from every
 `Receiver`, or without one, a release point completes at once.
 
-`drive_composed(acquisition, state, operation)` composes each acquired view
-with a `Compose` state before lending it, so the operation runs on the composed
-family; the composed view borrows the acquired one while it is lent, and is
-releasable when the acquired view is. `drive` lends the acquired views as they
-are.
+`drive_composed(acquisition, state, operation)` projects each acquired view
+before lending it. Pass `Guarded` to lend the value behind a lock or
+`ProjectionState::<P, _>::new(state)` to lend the view defined by a
+`ViewProjection<Lent<F>>` on the acquired family `F`. A projected view
+borrows its acquired view while lent and inherits its releasability.
+`drive` lends the acquired views directly.
 
 Locks are executors built this way. `Lock` describes a lock whose guard is
 acquired by a future, `Locked<L>` is the family whose view is that guard, and
@@ -917,8 +907,8 @@ it blocks the polling thread while another thread holds the lock and panics
 when the lock is poisoned. The `tokio-sync` feature adds
 `&tokio::sync::Mutex<T>`, which needs nightly for its lock future, and the
 `futures-lock` feature adds `&futures::lock::Mutex<T>`. Other lock types
-implement `Lock` and use `drive_composed` in an executor of their own. A state
-other than `Guarded` reaches a part of the locked value, such as one stream of
+implement `Lock` and use `drive_composed` in an executor of their own. A projection
+can reach a part of the locked value, such as one stream of
 a connection; when that part is gone, its view reports it, as in the
 [lock tests](tests/locks.rs).
 

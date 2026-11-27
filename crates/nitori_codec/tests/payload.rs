@@ -8,7 +8,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{ComposedReceiver, ReceiverAccess, call};
+use nitori_call::{ReceiverAccess, call};
 use nitori_codec::{
     payload::{Buffered, Chunks, Fill, SourceLengthError},
     prelude::*,
@@ -100,7 +100,7 @@ where
     G: Write<(), Report = (), Error = !>,
 {
     let mut payload = Chunks {
-        source: source.compose(ReadLimit(4u8)),
+        source: ReadLimit::new(&mut *source, 4u8),
         chunk_maximum: nz(8),
     };
     assert_eq!(payload.encoded_len().await.unwrap(), 4);
@@ -176,7 +176,7 @@ impl Read for Received {
 fn writing_a_source_returns_the_merged_metadata_of_what_it_read() {
     // The vector takes no write options: give it `()` for every segment,
     // whatever it was read with.
-    let mut output = ComposedReceiver::new(Vec::new(), MappedOptions(FixedOptions(())));
+    let mut output = MappedOptions::new(Vec::new(), FixedOptions(()));
     let mut source = Received {
         data: b"abcde",
         read: 0,

@@ -1,12 +1,13 @@
 //! Locks as executors: an operation runs on the value behind a lock, which
 //! is locked only on polls whose operation uses it.
-use crate::{
-    Compose, Lend, Lent, Receiver, ReceiverFamily, ViewAcquisition, ViewLoan, call::InPlace,
-};
 #[cfg(any(feature = "std", feature = "tokio-sync", feature = "futures-lock"))]
 use crate::{
     Drive, RootOperation,
     driver::{CallExecutor, Composing, drive_composed},
+};
+use crate::{
+    Lend, Lent, Receiver, ReceiverFamily, ViewAcquisition, ViewLoan, call::InPlace,
+    compose::Compose,
 };
 use core::{
     fmt,

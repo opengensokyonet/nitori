@@ -1,118 +1,104 @@
-//! Reading with the metadata merged into composition state, for values that
-//! read from a source without metadata.
-use crate::{ChunkResult, ChunkSegment, Combine, Read, ReadChunk, ReadResult, ReadSegment, Skip};
-use bytes::BufMut;
+//! Combine the metadata of successful reads.
+use crate::{ChunkSegment, Combine, ExactLen, Read, ReadChunk, ReadSegment, Skip};
 use core::{
+    borrow::BorrowMut,
     fmt,
     marker::PhantomData,
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use nitori_call::{AccessPlan, Compose, Composed, ProvideAccess, ReceiverAccess, ReceiverFamily};
+use nitori_call::{
+    AccessPlan, Lent, ProvideAccess, Receiver, ReceiverAccess, ReceiverFamily, ViewProjection,
+    project_access,
+};
 
-/// The merged metadata of the reads made through a composed access:
-/// `io.compose(MergedMetadata::default())` reads from `io` and merges the
-/// metadata of each segment into the state with [`Combine`], while the
-/// composed access reports none (`Metadata = ()`). A value that reads only
-/// from sources without metadata can then read from one with it, and the
-/// merged metadata of its bytes stays here; `into_state` returns it.
-///
-/// Chunk reads, skipping and the exact length are forwarded. Skipping does
-/// not report metadata, so the metadata of skipped bytes does not reach the
-/// state. Kept with a
-/// receiver in a [`ComposedReceiver`](nitori_call::ComposedReceiver), the
-/// state merges the reads of every call on that receiver.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct MergedMetadata<M>(pub M);
+type ReadPoll<E, M> = Poll<Result<Option<ReadSegment<M>>, E>>;
+type ChunkPoll<C, E, M> = Poll<Result<Option<ChunkSegment<C, M>>, E>>;
 
-impl<M: Combine> MergedMetadata<M> {
-    fn merge(&mut self, next: M) {
-        self.0 = core::mem::take(&mut self.0).combine(next);
-    }
-}
-
-/// The family of a view composed with [`MergedMetadata`] on a view of `F`.
-pub struct Merging<F, M>(PhantomData<fn(F) -> F>, PhantomData<M>);
 pin_project_lite::pin_project! {
-    /// The view of a [`Merging`] family: the parent view, held by value, and
-    /// the merged metadata.
-    pub struct MergingView<'v, F, M>
-    where
-        F: ReceiverFamily,
-        F: 'v,
-    {
+    /// A source that combines the metadata from successful reads and reports `()`.
+    ///
+    /// Read and chunk metadata are combined in order with [`Combine`]. Skips
+    /// and length queries pass through without updating the accumulated metadata.
+    /// The accumulated metadata persists between calls on a wrapped receiver.
+    pub struct MergedMetadata<IO, M, B = M> {
         #[pin]
-        parent: F::ReceiverView<'v>,
-        merged: &'v mut MergedMetadata<M>,
+        io: IO,
+        merged: B,
+        metadata: PhantomData<fn() -> M>,
     }
 }
-impl<F: ReceiverFamily, M: fmt::Debug> fmt::Debug for MergingView<'_, F, M> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MergingView")
-            .field("merged", &self.merged.0)
-            .finish_non_exhaustive()
-    }
-}
-impl<F: ReceiverFamily, M> ReceiverFamily for Merging<F, M> {
-    type ReceiverView<'v>
-        = MergingView<'v, F, M>
-    where
-        Self: 'v;
-}
-impl<F: ReceiverFamily, M: Unpin> Compose<F> for MergedMetadata<M> {
-    type Family = Merging<F, M>;
-    fn compose<'v>(self: Pin<&'v mut Self>, parent: F::ReceiverView<'v>) -> MergingView<'v, F, M>
-    where
-        F: 'v,
-        Self::Family: 'v,
-    {
-        MergingView {
-            parent,
-            merged: self.get_mut(),
+
+impl<IO, M> MergedMetadata<IO, M> {
+    /// Wrap `io` with an owned accumulator. Start with its `Default` value
+    /// to accumulate only the metadata read through this wrapper.
+    pub const fn new(io: IO, merged: M) -> Self {
+        Self {
+            io,
+            merged,
+            metadata: PhantomData,
         }
     }
 }
 
-/// Reads from the parent and merges each segment's metadata into the state.
-impl<F: Read<Metadata = M>, M: Combine> Read for Merging<F, M> {
-    type Error = F::Error;
-    type Metadata = ();
-    fn poll_read<'v, O: BufMut + ?Sized>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
+impl<'m, IO, M> MergedMetadata<IO, M, &'m mut M> {
+    /// Wrap `io`, combining metadata into the caller's accumulator.
+    pub const fn borrowing(io: IO, merged: &'m mut M) -> Self {
+        Self {
+            io,
+            merged,
+            metadata: PhantomData,
+        }
+    }
+}
+
+impl<IO, M, B> MergedMetadata<IO, M, B> {
+    fn io_pin(self: Pin<&mut Self>) -> Pin<&mut IO> {
+        self.project().io
+    }
+    /// Borrow the inner IO and the accumulated metadata or its borrow.
+    pub const fn get_ref(&self) -> (&IO, &B) {
+        (&self.io, &self.merged)
+    }
+    /// Return the inner IO and the accumulated metadata or its borrow.
+    pub fn into_parts(self) -> (IO, B) {
+        (self.io, self.merged)
+    }
+    fn poll_read_with<O: ?Sized, E>(
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        destination: &mut O,
-    ) -> Poll<ReadResult<Self>>
+        output: &mut O,
+        read: impl FnOnce(Pin<&mut IO>, &mut Context<'_>, &mut O) -> ReadPoll<E, M>,
+    ) -> ReadPoll<E, ()>
     where
-        Self: 'v,
+        B: BorrowMut<M>,
+        M: Combine,
     {
-        let view = host.project();
-        let segment = ready!(F::poll_read(view.parent, cx, destination))?;
+        let this = self.project();
+        let segment = ready!(read(this.io, cx, output))?;
         Poll::Ready(Ok(segment.map(|ReadSegment { count, metadata }| {
-            view.merged.merge(metadata);
+            merge(this.merged.borrow_mut(), metadata);
             ReadSegment {
                 count,
                 metadata: (),
             }
         })))
     }
-}
-/// Takes the parent's chunks and merges each chunk's metadata into the
-/// state.
-impl<F: ReadChunk<Metadata = M>, M: Combine> ReadChunk for Merging<F, M> {
-    type Chunk = F::Chunk;
-    fn poll_read_chunk<'v>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
+    fn poll_read_chunk_with<C, E>(
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         maximum: NonZeroUsize,
-    ) -> Poll<ChunkResult<Self>>
+        read: impl FnOnce(Pin<&mut IO>, &mut Context<'_>, NonZeroUsize) -> ChunkPoll<C, E, M>,
+    ) -> ChunkPoll<C, E, ()>
     where
-        Self: 'v,
+        B: BorrowMut<M>,
+        M: Combine,
     {
-        let view = host.project();
-        let segment = ready!(F::poll_read_chunk(view.parent, cx, maximum))?;
+        let this = self.project();
+        let segment = ready!(read(this.io, cx, maximum))?;
         Poll::Ready(Ok(segment.map(|ChunkSegment { chunk, metadata }| {
-            view.merged.merge(metadata);
+            merge(this.merged.borrow_mut(), metadata);
             ChunkSegment {
                 chunk,
                 metadata: (),
@@ -120,56 +106,71 @@ impl<F: ReadChunk<Metadata = M>, M: Combine> ReadChunk for Merging<F, M> {
         })))
     }
 }
-impl<F: Skip<Metadata = M>, M: Combine> Skip for Merging<F, M> {
-    type Count = F::Count;
-    fn poll_skip<'v, C: crate::Min<F::Count, Output = F::Count> + Clone>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-        maximum: C,
-    ) -> Poll<Result<Option<F::Count>, Self::Error>>
-    where
-        Self: 'v,
-    {
-        F::poll_skip(host.project().parent, cx, maximum)
-    }
-}
-impl<F: crate::ExactLen, M> crate::ExactLen for Merging<F, M> {
-    type Length = F::Length;
-    type LengthError = F::LengthError;
-    fn poll_remaining_len<'v>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<F::Length, F::LengthError>>
-    where
-        Self: 'v,
-    {
-        F::poll_remaining_len(host.project().parent, cx)
+
+impl<IO, M, B: fmt::Debug> fmt::Debug for MergedMetadata<IO, M, B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MergedMetadata")
+            .field("merged", &self.merged)
+            .finish_non_exhaustive()
     }
 }
 
-/// An access that merges the metadata of its reads into [`MergedMetadata`].
-///
-/// The caller retains the source and merge state. The adapted access
-/// reports `()` as metadata to operations using it.
-#[derive(Debug)]
-pub struct MergingSource<'x, S: ReceiverAccess, M> {
-    access: Composed<&'x mut S, &'x mut MergedMetadata<M>>,
+fn merge<M: Combine>(into: &mut M, next: M) {
+    *into = core::mem::take(into).combine(next);
 }
-impl<'x, S: ReceiverAccess, M> MergingSource<'x, S, M> {
-    /// Read from `source`, merging the metadata into `merged`.
-    pub fn new(source: &'x mut S, merged: &'x mut MergedMetadata<M>) -> Self {
-        Self {
-            access: Composed::new(source, merged),
-        }
+
+/// The family of a view of `F` that accumulates metadata of type `M`.
+pub struct Merging<F, M>(PhantomData<fn(F) -> F>, PhantomData<M>);
+
+impl<F: ReceiverFamily, M> ReceiverFamily for Merging<F, M> {
+    type ReceiverView<'v>
+        = MergedMetadata<F::ReceiverView<'v>, M, &'v mut M>
+    where
+        Self: 'v;
+}
+
+struct MergeView<M>(PhantomData<M>);
+
+impl<F: ReceiverFamily, M> ViewProjection<F> for MergeView<M> {
+    type State = M;
+    type Family = Merging<F, M>;
+    fn project<'v>(
+        view: F::ReceiverView<'v>,
+        state: &'v mut Self::State,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
+    where
+        F: 'v,
+        Self::Family: 'v,
+    {
+        MergedMetadata::borrowing(view, state)
     }
 }
-impl<'x, S: ReceiverAccess, M: Unpin> ProvideAccess for MergingSource<'x, S, M> {
-    type AccessFamily =
-        <Composed<&'x mut S, &'x mut MergedMetadata<M>> as ProvideAccess>::AccessFamily;
-    type Lentness = <Composed<&'x mut S, &'x mut MergedMetadata<M>> as ProvideAccess>::Lentness;
+
+impl<R: Receiver, M, B: BorrowMut<M>> Receiver for MergedMetadata<R, M, B> {
+    type Family = Merging<R::Family, M>;
+    fn view<'v>(self: Pin<&'v mut Self>) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
+    where
+        Self::Family: 'v,
+    {
+        let this = self.project();
+        <MergeView<M> as ViewProjection<R::Family>>::project(
+            this.io.view(),
+            this.merged.borrow_mut(),
+        )
+    }
+}
+
+impl<A: ReceiverAccess, M, B: BorrowMut<M>> ProvideAccess for MergedMetadata<A, M, B> {
+    type AccessFamily = Merging<Lent<A::Family>, M>;
+    type Lentness = <A as ProvideAccess>::Lentness;
     fn access_plan<'a>(
         &'a mut self,
     ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
-        self.access.access_plan()
+        project_access::<_, MergeView<M>>(&mut self.io, self.merged.borrow_mut())
     }
 }
+
+forward!(Read for [F: Read<Metadata = M>, M: Combine] Merging<F, M>, inner F, Metadata = (), with poll_read_with);
+forward!(ReadChunk for [F: ReadChunk<Metadata = M>, M: Combine] Merging<F, M>, inner F, with poll_read_chunk_with);
+forward!(Skip for [F: Skip<Metadata = M>, M: Combine] Merging<F, M>, inner F, pass);
+forward!(ExactLen for [F: ExactLen, M] Merging<F, M>, inner F, pass);

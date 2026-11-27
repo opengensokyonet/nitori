@@ -1,8 +1,7 @@
 //! Writing with the write options mapped into those of the sink, for
 //! writing bytes with options a sink does not take, such as the metadata
 //! they were read with.
-use crate::{Filled, LentBuffer, Write, WriteLent, WriteLentResult, WriteResult};
-use bytes::Buf;
+use crate::{Filled, LentBuffer, Write, WriteLent, WriteLentResult};
 use core::{
     fmt,
     marker::PhantomData,
@@ -10,7 +9,10 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{Compose, ReceiverFamily};
+use nitori_call::{
+    AccessPlan, Lent, ProvideAccess, Receiver, ReceiverAccess, ReceiverFamily, ViewProjection,
+    project_access,
+};
 
 /// The write options of a sink for those a segment is written with.
 ///
@@ -29,7 +31,7 @@ pub trait MapOptions<M> {
 
 /// Every segment gets these options, whatever it is written with.
 ///
-/// Composed as [`MappedOptions`] on a sink of [`Write<O>`](Write), it makes a
+/// Used with [`MappedOptions`] on a sink of [`Write<O>`](Write), it makes a
 /// sink of [`Write<M>`](Write) for every `M`, `()` included.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FixedOptions<O>(pub O);
@@ -40,89 +42,108 @@ impl<M, O> MapOptions<M> for FixedOptions<O> {
     }
 }
 
-/// Composition state: each segment written through it is written to the
-/// parent with the options the mapping lends for its own.
-///
-/// Composed on a sink of [`Write<O>`](Write), `io.compose(MappedOptions(map))`
-/// is a sink of [`Write<M>`](Write) for a `map: MapOptions<M, Options = O>`.
-/// A copy whose source has metadata `M` can then write to a sink that takes
-/// other options, chosen segment by segment, and
-/// `MappedOptions(FixedOptions(o))` writes every segment with `o`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MappedOptions<P>(pub P);
-
-/// The family of a sink composed with [`MappedOptions`] on a view of `F`.
-///
-/// Only [`Write`] and [`WriteLent`] are available through the composed
-/// access, for every options type `M` the mapping maps into one of `F`.
-pub struct OptionsMapping<F, P>(PhantomData<fn(F) -> F>, PhantomData<P>);
 pin_project_lite::pin_project! {
-    /// The view of an [`OptionsMapping`] family: the parent view, held by
-    /// value, and the mapping.
-    pub struct OptionsMappingView<'v, F, P>
-    where
-        F: ReceiverFamily,
-        F: 'v,
-    {
+    /// A sink that writes with the options selected by its owned mapping.
+    ///
+    /// A `P: MapOptions<M, Options = O>` adapts a sink of [`Write<O>`](Write)
+    /// to one of [`Write<M>`](Write). Use [`FixedOptions`] to give every segment
+    /// the same options. On a lending sink the mapping runs when the fill succeeds.
+    pub struct MappedOptions<IO, P> {
         #[pin]
-        parent: F::ReceiverView<'v>,
-        map: &'v mut P,
+        io: IO,
+        map: P,
     }
 }
-impl<F: ReceiverFamily, P> fmt::Debug for OptionsMappingView<'_, F, P> {
+
+impl<IO, P> MappedOptions<IO, P> {
+    /// Wrap `io` with the given options mapping.
+    pub const fn new(io: IO, map: P) -> Self {
+        Self { io, map }
+    }
+    /// Borrow the inner IO and the mapping.
+    pub const fn get_ref(&self) -> (&IO, &P) {
+        (&self.io, &self.map)
+    }
+    /// Return the inner IO and the mapping.
+    pub fn into_parts(self) -> (IO, P) {
+        (self.io, self.map)
+    }
+}
+
+impl<IO, P> fmt::Debug for MappedOptions<IO, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OptionsMappingView").finish_non_exhaustive()
+        f.debug_struct("MappedOptions").finish_non_exhaustive()
     }
 }
+
+impl<IO, P> MappedOptions<IO, &mut P> {
+    fn poll_write_with<I: ?Sized, M, R>(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        input: &mut I,
+        options: &M,
+        write: impl FnOnce(Pin<&mut IO>, &mut Context<'_>, &mut I, &P::Options) -> R,
+    ) -> R
+    where
+        P: MapOptions<M>,
+    {
+        let this = self.project();
+        let options = this.map.map_options(options);
+        write(this.io, cx, input, options)
+    }
+}
+
+/// The family of a sink of `F` adapted by an options mapping `P`.
+pub struct OptionsMapping<F, P>(PhantomData<fn(F) -> F>, PhantomData<P>);
+
 impl<F: ReceiverFamily, P> ReceiverFamily for OptionsMapping<F, P> {
     type ReceiverView<'v>
-        = OptionsMappingView<'v, F, P>
+        = MappedOptions<F::ReceiverView<'v>, &'v mut P>
     where
         Self: 'v;
 }
-impl<F: ReceiverFamily, P: Unpin> Compose<F> for MappedOptions<P> {
+
+struct MapView<P>(PhantomData<P>);
+
+impl<F: ReceiverFamily, P> ViewProjection<F> for MapView<P> {
+    type State = P;
     type Family = OptionsMapping<F, P>;
-    fn compose<'v>(
-        self: Pin<&'v mut Self>,
-        parent: F::ReceiverView<'v>,
-    ) -> OptionsMappingView<'v, F, P>
+    fn project<'v>(
+        view: F::ReceiverView<'v>,
+        state: &'v mut P,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
     where
         F: 'v,
         Self::Family: 'v,
     {
-        OptionsMappingView {
-            parent,
-            map: &mut self.get_mut().0,
-        }
+        MappedOptions::new(view, state)
     }
 }
 
-/// Writes each segment to the parent with the options the mapping lends for
-/// its own.
-impl<F, P, M> Write<M> for OptionsMapping<F, P>
-where
-    P: MapOptions<M>,
-    F: Write<P::Options>,
-{
-    type Error = F::Error;
-    type Report = F::Report;
-    fn poll_write<'v, I: Buf + ?Sized>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-        input: &mut I,
-        options: &M,
-    ) -> Poll<WriteResult<Self, M>>
+impl<R: Receiver, P> Receiver for MappedOptions<R, P> {
+    type Family = OptionsMapping<R::Family, P>;
+    fn view<'v>(self: Pin<&'v mut Self>) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
     where
-        Self: 'v,
+        Self::Family: 'v,
     {
-        let view = host.project();
-        let options = view.map.map_options(options);
-        F::poll_write(view.parent, cx, input, options)
+        let this = self.project();
+        <MapView<P> as ViewProjection<R::Family>>::project(this.io.view(), this.map)
     }
 }
 
-/// Lends the parent's storage, and gives the parent a clone of the options
-/// the mapping lends for the fill's when the fill returns.
+impl<A: ReceiverAccess, P> ProvideAccess for MappedOptions<A, P> {
+    type AccessFamily = OptionsMapping<Lent<A::Family>, P>;
+    type Lentness = <A as ProvideAccess>::Lentness;
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        project_access::<_, MapView<P>>(&mut self.io, &mut self.map)
+    }
+}
+
+forward!(Write<M> for [F, P, M] OptionsMapping<F, P>, inner F, options <P as MapOptions<M>>::Options, with poll_write_with,
+    where [P: MapOptions<M>, F: Write<<P as MapOptions<M>>::Options>]);
+
 impl<F, P, M> WriteLent<M> for OptionsMapping<F, P>
 where
     P: MapOptions<M, Options: Clone>,
@@ -139,9 +160,9 @@ where
         Self: 'v,
         Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<T, M>, A>,
     {
-        let view = host.project();
-        let map = view.map;
-        F::poll_write_lent(view.parent, cx, wanted, |lent| {
+        let this = host.project();
+        let map = this.map;
+        F::poll_write_lent(this.io, cx, wanted, |lent| {
             let Filled { value, options } = fill(lent)?;
             Ok(Filled {
                 value,

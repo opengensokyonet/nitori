@@ -244,7 +244,7 @@ fn send_a_receiver_to_a_scoped_thread() {
 async fn release_composed<F: Read<Metadata = (), Error = !>>(
     io: &mut impl ReceiverAccess<Family = F>,
 ) -> [u8; 2] {
-    let mut composed = io.compose(nitori_io::adapters::ReadLimit(2usize));
+    let mut composed = nitori_io::adapters::ReadLimit::new(&mut *io, 2usize);
     composed.release_view().await;
     composed.read_array::<2>().await.unwrap().value
 }

@@ -195,7 +195,7 @@ pub use access_operation::{AccessMode, AccessOperation, OnAccess, OnReceiver};
 mod lent;
 pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;
-pub use compose::{Compose, Composed, ComposedReceiver, ViewProjection, project_access};
+pub use compose::{ProjectionState, ViewProjection, project_access};
 mod receivers;
 pub use receivers::{Accesses, Receivers};
 mod call;
@@ -208,8 +208,8 @@ mod fn_operation;
 pub use fn_operation::{FnOperation, fn_operation};
 mod driver;
 pub use driver::{
-    AcquiredScope, AcquisitionState, Acquisitions, BoundCall, CallExecutor, Composing, Constructed,
-    Drive, ReceiverScope, ViewAcquisition, drive, drive_composed,
+    AcquiredScope, AcquisitionState, Acquisitions, BoundCall, CallExecutor, Constructed, Drive,
+    ReceiverScope, ViewAcquisition, drive, drive_composed,
 };
 mod lock;
 #[cfg(feature = "std")]

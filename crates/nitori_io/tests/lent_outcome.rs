@@ -458,12 +458,12 @@ async fn plans_limited<F: WriteLent<(), Report = (), Error = !>>(
     wanted: usize,
     plans: &[Plan],
 ) -> (Vec<Kind>, usize) {
-    let mut limited = io.compose(WriteLimit(budget));
+    let mut limited = WriteLimit::new(&mut *io, budget);
     let mut kinds = Vec::new();
     for plan in plans {
         kinds.push(kind(plan_through(&mut limited, wanted, *plan).await));
     }
-    (kinds, limited.into_state().0)
+    (kinds, limited.into_parts().1)
 }
 
 #[call(sync)]
@@ -472,8 +472,8 @@ async fn plans_skippable<F: WriteLent<(), Report = (), Error = !>>(
     wanted: usize,
     plans: &[Plan],
 ) -> Vec<Kind> {
-    let mut by_reading = io.compose(ReadSkip);
-    let mut by_chunks = by_reading.compose(ReadChunkSkip);
+    let mut by_reading = ReadSkip::new(&mut *io);
+    let mut by_chunks = ReadChunkSkip::new(&mut by_reading);
     let mut kinds = Vec::new();
     for plan in plans {
         kinds.push(kind(plan_through(&mut by_chunks, wanted, *plan).await));

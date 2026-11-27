@@ -1,5 +1,5 @@
 //! Access to the view a call lends for the current poll.
-use crate::{Compose, Composed, Lent, ReceiverFamily, ViewOperation, loan::RawViewLoan};
+use crate::{ReceiverFamily, ViewOperation, loan::RawViewLoan};
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     cell::Cell,
@@ -434,20 +434,6 @@ pub trait ReceiverAccess:
             access: self,
             offered: false,
         }
-    }
-
-    /// Adapt this access with composition state for the borrow's duration.
-    /// The state composes on [`Lent`] views of this access's family. Pass
-    /// `pin!(state)` for state that is not `Unpin`. [`Composed::new`]
-    /// adapts an access taken by value instead.
-    fn compose<S: Compose<Lent<Self::Family>> + Unpin>(
-        &mut self,
-        state: S,
-    ) -> Composed<&mut Self, S>
-    where
-        Self: Sized,
-    {
-        Composed::new(self, state)
     }
 }
 

@@ -6,8 +6,8 @@
 //! [`copy_into_lent`] when the sink lends its storage
 //! ([`WriteLent`](crate::WriteLent)), and [`copy_buffered`], through a
 //! buffer of the caller's, when the two sides only [`Read`](crate::Read) and
-//! [`Write`](crate::Write). To copy exactly `n` bytes, compose
-//! [`ReadLimit`](crate::adapters::ReadLimit) on the source and compare the
+//! [`Write`](crate::Write). To copy exactly `n` bytes, wrap the source in
+//! [`ReadLimit`](crate::adapters::ReadLimit) and compare the
 //! copied count with `n`.
 // The generated operations name both families' associated types through
 // their accesses.

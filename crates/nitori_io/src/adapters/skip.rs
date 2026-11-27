@@ -1,153 +1,119 @@
-//! Skipping built from reading: composition states that give a reader the
-//! [`Skip`] capability by reading and dropping what it reads.
-use crate::{
-    ChunkResult, ExactLen, Filled, LentBuffer, Read, ReadChunk, ReadResult, Skip, Write, WriteLent,
-    WriteLentResult, WriteResult,
-};
-use bytes::{Buf, BufMut};
+//! Skipping by reading and discarding bytes or chunks.
+use crate::{ExactLen, Read, ReadChunk, Skip, Write, WriteLent};
+use bytes::Buf;
 use core::{
     marker::PhantomData,
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use nitori_call::{Compose, ReceiverFamily};
+use nitori_call::{
+    AccessPlan, Lent, ProvideAccess, Receiver, ReceiverAccess, ReceiverFamily, ViewProjection,
+    project_access,
+};
 
-/// The size of the scratch buffer [`ReadSkip`] reads into on each poll.
-///
-/// It matches the stack buffer of the bridge reads: skipping through a bridge
-/// then takes no more polls than the bridge itself, and the buffer lives on
-/// one poll's stack, not in a future.
+// Match the bridge read buffer. Scratch storage lasts for only one poll.
 const SCRATCH_LEN: usize = 8192;
 
-/// Composition state that skips by reading: each skip reads at most 8 KiB into
-/// a stack buffer on that poll and drops it. Compose it on any family with
-/// [`Read`], either on an access, `io.compose(ReadSkip)`, or on a receiver,
-/// `ComposedReceiver::new(receiver, ReadSkip)`. It holds nothing, so it
-/// counts nothing either: the reads report what was consumed, and a count kept
-/// above it stays in step across cancellation.
+/// The family of a view of `F` wrapped by [`ReadSkip`] or [`ReadChunkSkip`].
 ///
-/// The skipped `Count` is `usize`. A zero maximum makes an empty read, which
-/// reaches the parent. A source that skips natively should implement [`Skip`]
-/// instead, and one that produces chunks can use [`ReadChunkSkip`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct ReadSkip;
-
-/// Composition state that skips by chunk reads: each skip takes one chunk of
-/// at most the maximum and drops it, without copying. Compose it on any family
-/// with [`ReadChunk`], on an access or on a receiver, like [`ReadSkip`].
-///
-/// The skipped `Count` is `usize`; a maximum above `usize::MAX`, or
-/// [`Infinite`](crate::Infinite), requests a chunk of at most `usize::MAX`.
-/// A zero maximum cannot be a chunk request, so it makes an empty read on the
-/// parent instead, which can still report its terminal error.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct ReadChunkSkip;
-
-/// The family of a view of `F` composed with [`ReadSkip`] or
-/// [`ReadChunkSkip`] (`S`): its views are the views of `F` themselves. It
-/// forwards [`Read`], [`ReadChunk`], [`ExactLen`], [`Write`] and
-/// [`WriteLent`] when `F` has them, and skips through `S`.
+/// Both forward [`Read`], [`ReadChunk`], [`ExactLen`], [`Write`] and
+/// [`WriteLent`] when `F` supports them.
 pub struct Skippable<F, S>(PhantomData<fn(F) -> F>, PhantomData<S>);
 
-impl<F: ReceiverFamily, S> ReceiverFamily for Skippable<F, S> {
-    type ReceiverView<'v>
-        = F::ReceiverView<'v>
-    where
-        Self: 'v;
-}
-
-macro_rules! skip_compose {
-    ($($state:ty),*) => {$(
-        impl<F: ReceiverFamily> Compose<F> for $state {
-            type Family = Skippable<F, Self>;
-            fn compose<'v>(self: Pin<&'v mut Self>, parent: F::ReceiverView<'v>) -> F::ReceiverView<'v>
+macro_rules! skip_wrapper {
+    ($(#[$doc:meta])* $W:ident, $proj:ident) => {
+        pin_project_lite::pin_project! {
+            $(#[$doc])*
+            #[derive(Debug)]
+            pub struct $W<IO> {
+                #[pin]
+                io: IO,
+            }
+        }
+        impl<IO> $W<IO> {
+            /// Wrap `io` to add skipping.
+            pub const fn new(io: IO) -> Self {
+                Self { io }
+            }
+            fn io_pin(self: Pin<&mut Self>) -> Pin<&mut IO> {
+                self.project().io
+            }
+            /// Borrow the inner IO.
+            pub const fn get_ref(&self) -> &IO {
+                &self.io
+            }
+            /// Return the inner IO.
+            pub fn into_inner(self) -> IO {
+                self.io
+            }
+        }
+        impl<F: ReceiverFamily> ReceiverFamily for Skippable<F, $W<()>> {
+            type ReceiverView<'v>
+                = $W<F::ReceiverView<'v>>
+            where
+                Self: 'v;
+        }
+        struct $proj;
+        impl<F: ReceiverFamily> ViewProjection<F> for $proj {
+            type State = [(); 0];
+            type Family = Skippable<F, $W<()>>;
+            fn project<'v>(
+                view: F::ReceiverView<'v>,
+                _: &'v mut [(); 0],
+            ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
             where
                 F: 'v,
                 Self::Family: 'v,
             {
-                parent
+                $W::new(view)
             }
         }
-    )*};
-}
-skip_compose!(ReadSkip, ReadChunkSkip);
-
-impl<F: Read, S> Read for Skippable<F, S> {
-    type Error = F::Error;
-    type Metadata = F::Metadata;
-    fn poll_read<'v, O: BufMut + ?Sized>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-        destination: &mut O,
-    ) -> Poll<ReadResult<Self>>
-    where
-        Self: 'v,
-    {
-        F::poll_read(host, cx, destination)
-    }
-}
-impl<F: ReadChunk, S> ReadChunk for Skippable<F, S> {
-    type Chunk = F::Chunk;
-    fn poll_read_chunk<'v>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-        maximum: NonZeroUsize,
-    ) -> Poll<ChunkResult<Self>>
-    where
-        Self: 'v,
-    {
-        F::poll_read_chunk(host, cx, maximum)
-    }
-}
-impl<F: ExactLen, S> ExactLen for Skippable<F, S> {
-    type Length = F::Length;
-    type LengthError = F::LengthError;
-    fn poll_remaining_len<'v>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<F::Length, F::LengthError>>
-    where
-        Self: 'v,
-    {
-        F::poll_remaining_len(host, cx)
-    }
+        impl<R: Receiver> Receiver for $W<R> {
+            type Family = Skippable<R::Family, $W<()>>;
+            fn view<'v>(self: Pin<&'v mut Self>) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
+            where
+                Self::Family: 'v,
+            {
+                <$proj as ViewProjection<R::Family>>::project(self.project().io.view(), &mut [])
+            }
+        }
+        impl<A: ReceiverAccess> ProvideAccess for $W<A> {
+            type AccessFamily = Skippable<Lent<A::Family>, $W<()>>;
+            type Lentness = <A as ProvideAccess>::Lentness;
+            fn access_plan<'a>(
+                &'a mut self,
+            ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+                project_access::<_, $proj>(&mut self.io, &mut [])
+            }
+        }
+        forward!(Read for [F: Read] Skippable<F, $W<()>>, inner F, Metadata = <F as Read>::Metadata, pass);
+        forward!(ReadChunk for [F: ReadChunk] Skippable<F, $W<()>>, inner F, pass);
+        forward!(ExactLen for [F: ExactLen] Skippable<F, $W<()>>, inner F, pass);
+        forward!(Write<O> for [F: Write<O>, O] Skippable<F, $W<()>>, inner F, options O, pass);
+        forward!(WriteLent<O> for [F: WriteLent<O>, O] Skippable<F, $W<()>>, inner F, pass);
+    };
 }
 
-impl<F: Write<O>, S, O> Write<O> for Skippable<F, S> {
-    type Error = F::Error;
-    type Report = F::Report;
-    fn poll_write<'v, I: Buf + ?Sized>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-        input: &mut I,
-        options: &O,
-    ) -> Poll<WriteResult<Self, O>>
-    where
-        Self: 'v,
-    {
-        F::poll_write(host, cx, input, options)
-    }
-}
-
-impl<F: WriteLent<O>, S, O> WriteLent<O> for Skippable<F, S> {
-    type Buffer<'l> = F::Buffer<'l>;
-    fn poll_write_lent<'v, T, A, Fill>(
-        host: Pin<&mut Self::ReceiverView<'v>>,
-        cx: &mut Context<'_>,
-        wanted: NonZeroUsize,
-        fill: Fill,
-    ) -> Poll<WriteLentResult<Self, O, T, A>>
-    where
-        Self: 'v,
-        Fill: for<'l> FnOnce(&mut LentBuffer<Self::Buffer<'l>>) -> Result<Filled<T, O>, A>,
-    {
-        F::poll_write_lent(host, cx, wanted, fill)
-    }
-}
+skip_wrapper!(
+    /// A source that skips by reading up to 8 KiB into a stack buffer on
+    /// each poll and discarding the bytes.
+    ///
+    /// The skipped count is `usize`. A maximum of zero polls an empty read.
+    ReadSkip,
+    ReadSkipView
+);
+skip_wrapper!(
+    /// A source that skips by reading and dropping one chunk per poll.
+    ///
+    /// The skipped count is `usize`. A maximum of zero polls an empty read,
+    /// which can still report the source's terminal error.
+    ReadChunkSkip,
+    ReadChunkSkipView
+);
 
 /// Reads into scratch storage and drops what was read.
-impl<F: Read> Skip for Skippable<F, ReadSkip> {
+impl<F: Read> Skip for Skippable<F, ReadSkip<()>> {
     type Count = usize;
     fn poll_skip<'v, M: crate::Min<usize, Output = usize> + Clone>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -159,7 +125,11 @@ impl<F: Read> Skip for Skippable<F, ReadSkip> {
     {
         let mut scratch = [0; SCRATCH_LEN];
         let allowed = crate::Min::min(maximum, SCRATCH_LEN);
-        let segment = ready!(F::poll_read(host, cx, &mut &mut scratch[..allowed]))?;
+        let segment = ready!(F::poll_read(
+            host.io_pin(),
+            cx,
+            &mut &mut scratch[..allowed]
+        ))?;
         let count = segment.map_or(0, |segment| segment.count.get());
         assert!(count <= allowed, "read exceeded the requested capacity");
         // An empty read cannot report EOF; only a nonempty one can.
@@ -168,7 +138,7 @@ impl<F: Read> Skip for Skippable<F, ReadSkip> {
 }
 
 /// Takes one chunk and drops it.
-impl<F: ReadChunk> Skip for Skippable<F, ReadChunkSkip> {
+impl<F: ReadChunk> Skip for Skippable<F, ReadChunkSkip<()>> {
     type Count = usize;
     fn poll_skip<'v, M: crate::Min<usize, Output = usize> + Clone>(
         host: Pin<&mut Self::ReceiverView<'v>>,
@@ -180,10 +150,10 @@ impl<F: ReadChunk> Skip for Skippable<F, ReadChunkSkip> {
     {
         let Some(allowed) = NonZeroUsize::new(crate::Min::min(maximum, usize::MAX)) else {
             let mut empty: &mut [u8] = &mut [];
-            ready!(F::poll_read(host, cx, &mut empty))?;
+            ready!(F::poll_read(host.io_pin(), cx, &mut empty))?;
             return Poll::Ready(Ok(Some(0)));
         };
-        let chunk = ready!(F::poll_read_chunk(host, cx, allowed))?;
+        let chunk = ready!(F::poll_read_chunk(host.io_pin(), cx, allowed))?;
         Poll::Ready(Ok(chunk.map(|segment| {
             let count = segment.chunk.remaining();
             assert!(

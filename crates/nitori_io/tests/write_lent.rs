@@ -431,12 +431,12 @@ async fn lend_limited<F: WriteLent<(), Report = (), Error = !>>(
     rounds: usize,
     called: &Cell<usize>,
 ) -> (Vec<Lend>, usize) {
-    let mut limited = io.compose(WriteLimit(budget));
+    let mut limited = WriteLimit::new(&mut *io, budget);
     let mut lends = Vec::new();
     for _ in 0..rounds {
         lends.push(lend_through(&mut limited, wanted, b"abcdefgh", called).await);
     }
-    (lends, limited.into_state().0)
+    (lends, limited.into_parts().1)
 }
 
 #[test]
