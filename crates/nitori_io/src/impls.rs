@@ -137,6 +137,22 @@ impl Write<()> for Direct<VecDeque<u8>> {
         Poll::Ready(Ok(write_segment(count)))
     }
 }
+/// Whether the cursor is at the end of the bytes it has now: unlike the
+/// exact length, the answer needs no stable length.
+#[cfg(feature = "std")]
+impl<T: AsRef<[u8]> + Unpin> crate::AtEnd for Direct<Cursor<T>> {
+    type RemainderError = !;
+
+    fn poll_at_end<'v>(
+        host: Pin<&mut Self::ReceiverView<'v>>,
+        _: &mut Context<'_>,
+    ) -> Poll<Result<bool, !>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(!host.get_pin_mut().has_remaining()))
+    }
+}
 #[cfg(feature = "std")]
 impl<T: AsRef<[u8]> + Unpin> Read for Direct<Cursor<T>> {
     type Error = Infallible;
@@ -400,21 +416,6 @@ mod cursor_length {
 
     // Cursor::remaining consults AsRef on each call. Implement the length
     // promise for byte storage whose AsRef exposes a stable length.
-    #[allow(private_bounds)]
-    impl<T: StableBytes + Unpin> crate::AtEnd for Direct<Cursor<T>> {
-        type RemainderError = !;
-
-        fn poll_at_end<'v>(
-            host: Pin<&mut Self::ReceiverView<'v>>,
-            _: &mut Context<'_>,
-        ) -> Poll<Result<bool, !>>
-        where
-            Self: 'v,
-        {
-            Poll::Ready(Ok(!host.get_pin_mut().has_remaining()))
-        }
-    }
-
     #[allow(private_bounds)]
     impl<T: StableBytes + Unpin> crate::ExactLen for Direct<Cursor<T>> {
         type Length = usize;

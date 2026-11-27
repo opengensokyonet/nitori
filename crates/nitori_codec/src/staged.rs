@@ -1,4 +1,5 @@
-//! Values decoded or encoded in stages on a receiver held by value.
+//! Values decoded or encoded in stages, which keep their IO: on an access,
+//! or on a receiver held by value.
 use crate::{
     DecodeFrom, DecodeOn, EncodeInto, EncodeOn,
     host::{DecodeHostExt, EncodeHostExt},

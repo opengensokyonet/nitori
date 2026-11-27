@@ -16,8 +16,8 @@ use nitori_codec::{
     staged::{KeepsIo, MapIo},
 };
 use nitori_io::{
-    Read, ReadSegment, Write, WriteSegment,
-    adapters::ReadLimit,
+    AtEnd, Read, ReadSegment, Write, WriteSegment,
+    adapters::{ReadLimit, WriteLimit},
     calls::{ReadArrayError, WriteArrayError},
 };
 
@@ -382,4 +382,57 @@ fn a_staged_decoder_reports_completion_before_attaching_the_access() {
         ["r+", "r+", "r.", "r.", "attached", "r+", "r."]
     );
     assert_eq!(source, b"c");
+}
+
+#[call(sync)]
+async fn encode_past_a_budget<G: Write<(), Report = (), Error = !>>(
+    io: &mut impl ReceiverAccess<Family = G>,
+) -> Vec<&'static str> {
+    let mut tracked = Tracked {
+        io: WriteLimit::new(io, 1),
+        log: Log::default(),
+    };
+    assert!((*b"ab").encode_into(&mut tracked).await.is_err());
+    tracked.log.take()
+}
+
+#[test]
+fn an_encoding_that_fails_is_abandoned() {
+    let mut output = Vec::new();
+    assert_eq!(output.sync_encode_past_a_budget_unpin(), vec!["w+", "w!"]);
+    assert_eq!(output, b"a");
+}
+
+#[call(sync)]
+async fn options_until_the_end<F: Read<Metadata = (), Error = !> + AtEnd<RemainderError = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Vec<Vec<&'static str>> {
+    let mut tracked = Tracked {
+        io,
+        log: Log::default(),
+    };
+    let mut logs = Vec::new();
+    assert_eq!(
+        tracked.decode::<Option<[u8; 1]>>().await.unwrap(),
+        Some(*b"x")
+    );
+    logs.push(tracked.log.take());
+    assert!(tracked.decode::<Option<[u8; 2]>>().await.is_err());
+    logs.push(tracked.log.take());
+    assert_eq!(tracked.decode::<Option<[u8; 1]>>().await.unwrap(), None);
+    logs.push(tracked.log.take());
+    logs
+}
+
+#[test]
+fn an_option_is_a_value_around_its_value() {
+    let mut input = b"xy".as_slice();
+    assert_eq!(
+        (&mut input).sync_options_until_the_end_unpin(),
+        vec![
+            vec!["r+", "r+", "r.", "r."],
+            vec!["r+", "r+", "r!", "r!"],
+            vec!["r+", "r."],
+        ]
+    );
 }

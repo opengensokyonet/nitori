@@ -172,7 +172,9 @@ macro_rules! source_len {
         {
             type Length = <A::Family as ExactLen>::Length;
             type LengthError = <A::Family as AtEnd>::RemainderError;
-            fn encoded_len(&mut self) -> impl Future<Output = Result<Self::Length, Self::LengthError>> {
+            fn encoded_len(
+                &mut self,
+            ) -> impl Future<Output = Result<Self::Length, Self::LengthError>> {
                 self.source.remaining_len()
             }
         }

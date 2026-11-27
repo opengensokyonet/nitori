@@ -172,8 +172,8 @@ macro_rules! widen_usize {
     )+)+};
 }
 widen_usize! {
-    "16": usize => u32, usize => u64, usize => u128;
-    "32": u32 => usize, usize => u64, usize => u128;
+    "16": usize => u16, usize => u32, usize => u64, usize => u128;
+    "32": u32 => usize, usize => u32, usize => u64, usize => u128;
     "64": u32 => usize, u64 => usize, usize => u64, usize => u128;
 }
 

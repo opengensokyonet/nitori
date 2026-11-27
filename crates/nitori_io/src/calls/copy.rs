@@ -6,9 +6,10 @@
 //! [`copy_into_lent`] when the sink lends its storage
 //! ([`WriteLent`](crate::WriteLent)) and the source supports [`AtEnd`],
 //! and [`copy_buffered`], through a buffer of the caller's, when the two
-//! sides only [`Read`](crate::Read) and [`Write`](crate::Write). To copy exactly `n` bytes, wrap the source in
-//! [`ReadLimit`](crate::adapters::ReadLimit) and compare the
-//! copied count with `n`.
+//! sides only [`Read`](crate::Read) and [`Write`](crate::Write). To copy
+//! exactly `n` bytes, wrap the source in
+//! [`ReadLimit`](crate::adapters::ReadLimit) and compare the copied count
+//! with `n`.
 // The generated operations name both families' associated types through
 // their accesses.
 #![allow(clippy::type_complexity)]
@@ -307,7 +308,9 @@ where
     })
 }
 
-/// Failures that [`copy_into_lent`] can produce. Each carries the bytes
+/// Failures that [`copy_into_lent`] can produce, from a source failing with
+/// `R`, a sink failing with `W`, and the source's
+/// [`RemainderError`](AtEnd::RemainderError) `E`. Each carries the bytes
 /// copied before it.
 #[derive(Debug, Snafu)]
 #[snafu(module(copy_into_lent_error), visibility(pub(crate)))]

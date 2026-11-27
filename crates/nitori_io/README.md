@@ -182,6 +182,8 @@ per-poll buffer pointers. Writes pass one contiguous input segment directly to
 the host; the adapted writers take no options, so the bridges write with
 `Write<()>`. Empty requests still reach the host. Flush, close, and seek remain
 explicit operations on the underlying object; dropping a bridge adds no flush.
+The bridged sources do not implement `AtEnd`, so `calls::copy_into_lent` does
+not take them; copy them with `calls::copy_buffered`.
 
 `adapters::Chunked<T>` adds copying `ReadChunk` to a host whose family implements `Read`, including a bridge,
 with an explicit nonzero chunk capacity. It caps each read by both that capacity
@@ -258,8 +260,9 @@ source.
 `ReadLimit::new(io, quota)` and `WriteLimit::new(io, budget)` wrap a source
 or sink. Call them with an access inside an operation or with a receiver
 outside it. At zero, a read reports EOF and a write accepts no bytes,
-which `write_all` reports as zero progress. Both answer at the boundary
-without polling the inner view. The budget survives Pending and
+which `write_all` reports as zero progress, and an `AtEnd` query on a read
+quota answers the end. Both answer at the boundary without polling the inner
+view. The budget survives Pending and
 cancellation. `into_parts` returns `io` and the remaining `quota` or `budget` in a
 struct. `borrowing(io, &mut budget)` updates a budget stored by the caller.
 
@@ -333,7 +336,7 @@ Wrap a reader with `ReadSkip::new(io)` to skip by reading up to 8 KiB into
 a stack buffer on each poll and dropping the bytes. `ReadChunkSkip::new(io)`
 takes a chunk of at most the maximum and drops it without copying. Both
 wrappers skip with `Count = usize` and forward the inner family's `Read`,
-`ReadChunk`, `ExactLen`, `Write` and `WriteLent` when available.
+`ReadChunk`, `AtEnd`, `ExactLen`, `Write` and `WriteLent` when available.
 
 `calls::skip_exact(io, length)` skips exactly `length`, asking for at most
 the remainder on each poll; on EOF or a host failure its `SkipExactError`
@@ -428,8 +431,8 @@ async fn request<F: Read<Metadata = Early>>(
 
 `MergedMetadata::new(io, accumulator)` presents a source with
 `Metadata = ()` and combines successful reads' metadata into the
-accumulator. This includes chunk reads. Skipping and length queries pass
-through. The accumulator persists across calls on a wrapped receiver.
+accumulator. This includes chunk reads. Skipping, end queries and length
+queries pass through. The accumulator persists across calls on a wrapped receiver.
 Use `into_parts` to recover it or `MergedMetadata::borrowing(io, &mut accumulator)`
 to update a caller-owned value.
 
