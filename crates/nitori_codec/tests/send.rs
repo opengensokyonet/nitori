@@ -10,10 +10,10 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AccessPlan, ProvideAccess, ReceiverAccess, call};
+use nitori_call::{AccessPlan, ProvideAccess, ReceiverAccess, TrackValues, call, track_values};
 use nitori_codec::prelude::*;
 use nitori_io::{
-    Combine, Read, ReadSegment, Value, Write, WriteSegment,
+    AtEnd, Combine, Read, ReadSegment, Value, Write, WriteSegment,
     adapters::{Limited, ReadLimit},
     calls::ReadArrayError,
 };
@@ -68,16 +68,16 @@ struct Pair<M = ()> {
     first: Value<[u8; 1], M>,
     second: Value<[u8; 1], M>,
 }
-impl<S, M> DecodeFrom<S> for Pair<M>
+impl<S, M> DecodeOn<S> for Pair<M>
 where
     S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
-    async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
+    async fn decode_on(io: &mut S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: Value::decode_from(&mut io).await?,
-            second: Value::decode_from(&mut io).await?,
+            first: io.decode::<Value<[u8; 1], M>>().await?,
+            second: io.decode::<Value<[u8; 1], M>>().await?,
         })
     }
 }
@@ -289,4 +289,72 @@ fn a_value_with_options_into_a_borrowed_sink_is_send() {
             (b"ab".to_vec(), Priority(3)),
         ]
     );
+}
+
+#[derive(Default)]
+struct Completed(usize);
+
+impl TrackValues for Completed {
+    fn decode_finished(&mut self) {
+        self.0 += 1;
+    }
+
+    fn encode_finished(&mut self) {
+        self.0 += 1;
+    }
+}
+
+struct Tracked<A> {
+    io: A,
+    completed: Completed,
+}
+
+impl<A: ReceiverAccess> ProvideAccess for Tracked<A> {
+    type AccessFamily = A::Family;
+    type Lentness = A::Lentness;
+
+    fn access_plan(
+        &mut self,
+    ) -> impl AccessPlan<'_, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        track_values(self.io.access_plan(), &mut self.completed)
+    }
+}
+
+#[call]
+async fn tracked_option<F: Read<Metadata = (), Error = !> + AtEnd<RemainderError = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> (Option<[u8; 1]>, Option<[u8; 1]>, usize) {
+    let mut tracked = Tracked {
+        io,
+        completed: Completed::default(),
+    };
+    let found = tracked.decode::<Option<[u8; 1]>>().await.unwrap();
+    let end = tracked.decode::<Option<[u8; 1]>>().await.unwrap();
+    (found, end, tracked.completed.0)
+}
+
+#[test]
+fn decoding_an_option_through_a_tracked_access_is_send() {
+    let wire = *b"a";
+    let mut input = wire.as_slice();
+    assert_eq!(send(input.tracked_option_unpin()), (Some(*b"a"), None, 3));
+}
+
+#[call]
+async fn tracked_encode<F: Write<(), Report = (), Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> usize {
+    let mut tracked = Tracked {
+        io,
+        completed: Completed::default(),
+    };
+    tracked.encode(*b"ab").await.unwrap();
+    tracked.completed.0
+}
+
+#[test]
+fn encoding_through_a_tracked_access_is_send() {
+    let mut output = Vec::new();
+    assert_eq!(send(output.tracked_encode_unpin()), 1);
+    assert_eq!(output, b"ab");
 }

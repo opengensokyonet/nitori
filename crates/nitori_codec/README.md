@@ -5,18 +5,21 @@ Experimental encoding and decoding of values on the sources and sinks of
 
 ## Values on sources and sinks
 
-A value implements `EncodeInto<S>` to write itself into a sink of type `S`
-and `DecodeFrom<S>` to read itself from a source of type `S`. `S` is taken
-by value or as `&mut`: a decoded value may keep its source, reading what
-comes first and leaving the rest in the source it keeps, or read everything
-it needs and keep nothing. The traits are implemented on the values, so a
-crate implements them for its own values over any source it supports.
+Implement `DecodeOn<S>` to read a value and `EncodeOn<S>` to write it.
+Both methods borrow the access as `&mut S`. Implement them for any
+`S: nitori_call::ReceiverAccess` whose family has the required IO
+capabilities. This includes call slots and types that offer access through
+`ProvideAccess`.
 
-Implement the traits for any `S: nitori_call::ReceiverAccess` whose family
-has the capabilities the codec needs. This includes call slots and types
-that expose an access through `ProvideAccess`. The access may be borrowed
-with `&mut`, and a future borrowing a `Send` source or sink can itself be
-`Send`.
+The framework supplies `DecodeFrom<S, How>` and `EncodeInto<S, How>` as
+the entry points. It reports the start of each value through the access plan
+to any attached `nitori_call::TrackValues` trackers. A value ends with a
+completion report on success or an abandonment report on error or when
+its in-progress future is dropped, even if it transferred no bytes. Each
+tracker can use those reports and the IO it observed to decide how to handle
+an abandonment. Decode and encode fields through `decode` and `encode`
+or their `DecodeFrom` and `EncodeInto` entry points so they get their own
+nested reports.
 
 Inside an operation, `Decode` and `Encode` borrow an access through
 `io.decode::<V>()` and `io.encode(value)`. On an executor such as a
@@ -56,11 +59,18 @@ the sink's reports of the bytes written, merged with `Combine`.
 
 ## Values that keep their IO
 
-`DecodeFrom<S, How>` and `EncodeInto<S, How>` default to
-`nitori_call::OnAccess`. The framework also supplies `OnReceiver` for
-decoders whose value keeps the source and encoders whose output keeps the
-sink. It runs the access implementation in a call, then puts the receiver
-back into the value. The compiler can infer the mode from the IO argument.
+With `OnAccess`, the default mode, the framework takes an access by value
+or as a mutable borrow. With `OnReceiver`, it owns the receiver for the call
+that decodes the value or encodes its output. The compiler can infer the
+mode from the IO argument.
+
+`DecodeOn::Decoded` defaults to the value itself, and `EncodeOn::Encoded`
+defaults to `EncodeOn::Output`. When the value keeps its source, set
+`Decoded = KeepsIo<Self>`. When the output keeps its sink, set
+`Encoded = KeepsIo<Self::Output>`. Build the value with `KeepsIo::new`,
+which gives the closure a `Vacant` slot for the IO. The framework reports
+completion before filling the slot with the access or receiver. With
+`OnReceiver`, the call's built-in slot has no tracker attached.
 
 Implement `staged::MapIo` for the value that holds the IO. The derive
 supports structs and enums. Use `#[map_io(S)]` when `S` is the IO type
@@ -72,7 +82,7 @@ extracted IO in `io`.
 
 ```rust
 use nitori_call::ReceiverAccess;
-use nitori_codec::{prelude::*, staged::{IoParts, MapIo, take_io}};
+use nitori_codec::{prelude::*, staged::{IoParts, KeepsIo, MapIo, take_io}};
 use nitori_io::{Read, calls::ReadArrayError};
 
 #[derive(MapIo)]
@@ -82,12 +92,14 @@ struct Tagged<S> {
     source: S,
 }
 
-impl<S: ReceiverAccess<Family: Read<Metadata = ()>>> DecodeFrom<S> for Tagged<S> {
+impl<S: ReceiverAccess<Family: Read<Metadata = ()>>> DecodeOn<S> for Tagged<S> {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
 
-    async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
+    type Decoded = KeepsIo<Self>;
+
+    async fn decode_on(source: &mut S) -> Result<Self::Decoded, Self::Error> {
         let [tag] = source.decode::<[u8; 1]>().await?;
-        Ok(Self { tag, source })
+        Ok(KeepsIo::new(|source| Tagged { tag, source }))
     }
 }
 
@@ -98,6 +110,27 @@ async fn read_tag() {
     assert_eq!(source.sync_decode_unpin::<[u8; 2]>().unwrap(), *b"bc");
 }
 # nitori_call::__private::run_sync(read_tag());
+```
+
+## Optional values at the end of a source
+
+`Option<T>` decodes from a source whose family implements `nitori_io::AtEnd`.
+It queries the source without consuming a byte, returns `None` at the end,
+and otherwise decodes `T` as a nested value. A source ending during `T`
+is handled by `T`'s decoder. `option::DecodeOptionError` carries the
+query error in `AtEnd { source }` or the decoder's error in
+`Value { source }`.
+
+On an access, a `T` that keeps its IO keeps it inside `Some`. When the
+result is `None`, the access passed to the decoder is dropped. For a staged
+`T` that keeps an owned receiver, use `T::decode_from` with `OnReceiver`.
+
+```rust
+use nitori_codec::prelude::*;
+
+let mut input = b"x".as_slice();
+assert_eq!(input.sync_decode_unpin::<Option<[u8; 1]>>().unwrap(), Some(*b"x"));
+assert_eq!(input.sync_decode_unpin::<Option<[u8; 1]>>().unwrap(), None);
 ```
 
 ## Metadata
@@ -134,16 +167,16 @@ struct Header<M = ()> {
     kind: Value<[u8; 1], M>,
     length: Value<[u8; 2], M>,
 }
-impl<S, M> DecodeFrom<S> for Header<M>
+impl<S, M> DecodeOn<S> for Header<M>
 where
     S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
-    async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
+    async fn decode_on(io: &mut S) -> Result<Self, Self::Error> {
         Ok(Header {
-            kind: Value::decode_from(&mut io).await?,
-            length: Value::decode_from(&mut io).await?,
+            kind: io.decode::<Value<[u8; 1], M>>().await?,
+            length: io.decode::<Value<[u8; 2], M>>().await?,
         })
     }
 }
@@ -215,16 +248,16 @@ struct Header<O = ()> {
     kind: Value<[u8; 1], O>,
     length: Value<[u8; 2], O>,
 }
-impl<S, O> EncodeInto<S> for Header<O>
+impl<S, O> EncodeOn<S> for Header<O>
 where
     S: ReceiverAccess<Family: Write<O, Report: Combine>>,
     O: Unpin,
 {
     type Output = <S::Family as Write<O>>::Report;
     type Error = WriteArrayError<<S::Family as Write<O>>::Error>;
-    async fn encode_into(self, mut io: S) -> Result<Self::Output, Self::Error> {
-        let kind = self.kind.encode_into(&mut io).await?;
-        Ok(kind.combine(self.length.encode_into(&mut io).await?))
+    async fn encode_on(self, io: &mut S) -> Result<Self::Output, Self::Error> {
+        let kind = io.encode(self.kind).await?;
+        Ok(kind.combine(io.encode(self.length).await?))
     }
 }
 
@@ -244,10 +277,32 @@ assert_eq!(output.into_parts().io, b"\x01\x00\x05");
 
 ## Encoded length
 
-`EncodedLen` tells how many bytes a value encodes to, as a `u64`, for
-formats that write the length first. Telling it can wait and can fail, as
-for a value whose bytes come from a stream that learns its final size later
-or is reset first. Byte arrays, slices and `Bytes` always know it.
+`EncodedLen` reports the byte length as its associated type `Length`.
+Its future can wait for a source to learn its final size or return an error
+if the source cannot tell. `KnownLen` extends `EncodedLen<LengthError = !>`
+and reports the same length synchronously. Byte arrays, byte slices and
+`Bytes` use `usize` and implement both traits. `Value<V, M>` uses its
+inner value's length and implements the length traits available on `V`.
+
+When a pair of constructors needs an encoded length, use the plain name
+such as `new` or `raw` for the synchronous constructor taking a
+`KnownLen` value. Use the `_async` suffix for the constructor taking an
+`EncodedLen` value.
+
+For a composite value, choose a length type that covers the format's range
+and use `Widen` to convert field lengths into it without losing bits.
+For example, `usize` field lengths can widen to `u64` on a 32-bit target
+that needs to represent lengths larger than `usize`. Add the widened
+lengths with saturation so the enclosing constructor can reject a result
+above its format's limit.
+
+```rust
+use nitori_codec::{KnownLen, Widen};
+
+let value = b"abc".as_slice();
+let len: u64 = Widen::widen(value.known_len());
+assert_eq!(len, 3);
+```
 
 ## Sources as payloads
 
@@ -271,11 +326,11 @@ other options in `MappedOptions` with a `MapOptions` mapping or `FixedOptions`. 
 copy's total: the count,
 the merged metadata of what it read and the merged report of what the sink
 accepted. Bound the source to the bytes it is to contribute, such as with
-`ReadLimit`. Its `EncodedLen` is the source's exact remaining length
-(`ExactLen`), which fails when the source cannot tell it or it does not fit
-in 64 bits. A bare source is not a value: which pairing it would take
-cannot be told from it, and a crate that keeps a source in a type of its own
-encodes that type as it chooses.
+`ReadLimit`. A wrapper over a source with `ExactLen` implements
+`EncodedLen` using the source's own length type and `RemainderError`.
+Query these wrappers through `EncodedLen`, even when the source is in
+memory. Choose an explicit wrapper to encode a bare source using the
+capabilities of the source and sink.
 
 ```compile_fail,E0277
 #![feature(impl_trait_in_assoc_type)]

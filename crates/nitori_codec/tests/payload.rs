@@ -10,7 +10,7 @@ use core::{
 };
 use nitori_call::{ReceiverAccess, call};
 use nitori_codec::{
-    payload::{Buffered, Chunks, Fill, SourceLengthError},
+    payload::{Buffered, Chunks, Fill},
     prelude::*,
 };
 use nitori_io::{
@@ -268,10 +268,7 @@ impl ExactLen for Reset {
 #[call]
 async fn chunks_len<F: ExactLen>(
     source: &mut impl ReceiverAccess<Family = F>,
-) -> Result<u64, SourceLengthError<<F as AtEnd>::RemainderError>>
-where
-    u64: TryFrom<<F as ExactLen>::Length>,
-{
+) -> Result<F::Length, F::RemainderError> {
     Chunks {
         source,
         chunk_maximum: nz(1),
@@ -283,10 +280,7 @@ where
 #[call]
 async fn fill_len<F: ExactLen>(
     source: &mut impl ReceiverAccess<Family = F>,
-) -> Result<u64, SourceLengthError<<F as AtEnd>::RemainderError>>
-where
-    u64: TryFrom<<F as ExactLen>::Length>,
-{
+) -> Result<F::Length, F::RemainderError> {
     Fill {
         source,
         chunk_maximum: nz(1),
@@ -296,14 +290,11 @@ where
 }
 
 #[test]
-fn a_length_the_source_cannot_tell_or_that_does_not_fit_fails() {
-    let too_long = nitori_call::__private::run_sync(Huge.chunks_len_unpin());
-    assert!(matches!(too_long, Err(SourceLengthError::TooLong)));
+fn payload_lengths_preserve_the_source_length_and_error() {
+    let Ok(length) = nitori_call::__private::run_sync(Huge.chunks_len_unpin());
+    assert_eq!(length, u128::from(u64::MAX) + 1);
     let unknown = nitori_call::__private::run_sync(Reset.fill_len_unpin());
-    assert!(matches!(
-        unknown,
-        Err(SourceLengthError::Source { source: Reason })
-    ));
+    assert!(matches!(unknown, Err(Reason)));
 }
 
 /// A source whose length is known after one Pending.
@@ -345,7 +336,7 @@ impl ExactLen for Later {
 #[call]
 async fn buffered_len<F: ExactLen<Length = usize, RemainderError = !>>(
     source: &mut impl ReceiverAccess<Family = F>,
-) -> Result<u64, SourceLengthError<!>> {
+) -> Result<usize, !> {
     Buffered {
         source,
         buffer: [0u8; 1],

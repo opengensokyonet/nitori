@@ -1,5 +1,5 @@
 //! The byte values: arrays, slices and `Bytes`.
-use crate::{DecodeFrom, EncodeInto, EncodedLen};
+use crate::{DecodeOn, EncodeOn, EncodedLen, KnownLen};
 use bytes::Bytes;
 use nitori_call::ReceiverAccess;
 use nitori_io::{
@@ -10,78 +10,76 @@ use nitori_io::{
     },
 };
 
-/// A byte count as the length of an encoding.
-pub(crate) fn encoded_length(count: usize) -> u64 {
-    // invariant: a usize fits in a u64 on every supported target. A source's
-    // generic length can be wider, which payload::SourceLengthError reports.
-    u64::try_from(count).expect("a byte count fits in 64 bits")
-}
-
 /// Reads as many bytes as the array holds, from a source without metadata.
-impl<S, const N: usize> DecodeFrom<S> for [u8; N]
+impl<S, const N: usize> DecodeOn<S> for [u8; N]
 where
     S: ReceiverAccess<Family: Read<Metadata = ()>>,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
-    async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
+    async fn decode_on(source: &mut S) -> Result<Self, Self::Error> {
         Ok(source.read_array::<N>().await?.value)
     }
 }
 
 /// Writes the array whole with the write options `()` and
 /// returns the merged report.
-impl<S, const N: usize> EncodeInto<S> for [u8; N]
+impl<S, const N: usize> EncodeOn<S> for [u8; N]
 where
     S: ReceiverAccess<Family: Write<(), Report: Combine>>,
 {
     type Output = <S::Family as Write<()>>::Report;
     type Error = WriteArrayError<<S::Family as Write<()>>::Error>;
-    async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
+    async fn encode_on(self, sink: &mut S) -> Result<Self::Output, Self::Error> {
         sink.write_array(self, ()).await
     }
 }
 
 /// Writes the slice whole with the write options `()` and
 /// returns the merged report.
-impl<S> EncodeInto<S> for &[u8]
+impl<S> EncodeOn<S> for &[u8]
 where
     S: ReceiverAccess<Family: Write<(), Report: Combine>>,
 {
     type Output = <S::Family as Write<()>>::Report;
     type Error = WriteAllError<<S::Family as Write<()>>::Error>;
-    async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
+    async fn encode_on(self, sink: &mut S) -> Result<Self::Output, Self::Error> {
         sink.write_all(self, ()).await
     }
 }
 
 /// Writes the bytes whole with the write options `()` and
 /// returns the merged report.
-impl<S> EncodeInto<S> for Bytes
+impl<S> EncodeOn<S> for Bytes
 where
     S: ReceiverAccess<Family: Write<(), Report: Combine>>,
 {
     type Output = <S::Family as Write<()>>::Report;
     type Error = WriteAllError<<S::Family as Write<()>>::Error>;
-    async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
+    async fn encode_on(self, sink: &mut S) -> Result<Self::Output, Self::Error> {
         sink.write_all(self, ()).await
     }
 }
 
-impl<const N: usize> EncodedLen for [u8; N] {
-    type LengthError = !;
-    async fn encoded_len(&mut self) -> Result<u64, !> {
-        Ok(encoded_length(N))
-    }
+/// Byte values in memory know their length at once.
+macro_rules! known_len {
+    ($([$($g:tt)*] $ty:ty => |$this:ident| $len:expr;)+) => {$(
+        impl<$($g)*> EncodedLen for $ty {
+            type Length = usize;
+            type LengthError = !;
+            async fn encoded_len(&mut self) -> Result<usize, !> {
+                Ok(self.known_len())
+            }
+        }
+        impl<$($g)*> KnownLen for $ty {
+            fn known_len(&self) -> usize {
+                let $this = self;
+                $len
+            }
+        }
+    )+};
 }
-impl EncodedLen for &[u8] {
-    type LengthError = !;
-    async fn encoded_len(&mut self) -> Result<u64, !> {
-        Ok(encoded_length(self.len()))
-    }
-}
-impl EncodedLen for Bytes {
-    type LengthError = !;
-    async fn encoded_len(&mut self) -> Result<u64, !> {
-        Ok(encoded_length(self.len()))
-    }
+known_len! {
+    [const N: usize] [u8; N] => |_this| N;
+    [] &[u8] => |this| this.len();
+    [] Bytes => |this| this.len();
 }

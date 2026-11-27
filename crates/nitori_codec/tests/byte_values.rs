@@ -133,14 +133,15 @@ fn encoding_returns_the_merged_report_of_the_segments() {
 
 #[test]
 fn byte_values_know_their_encoded_length() {
-    fn length(mut value: impl EncodedLen<LengthError = !>) -> u64 {
+    fn assert_length(mut value: impl KnownLen<Length = usize>, expected: usize) {
+        assert_eq!(value.known_len(), expected);
         let Ok(length) = nitori_call::__private::run_sync(value.encoded_len());
-        length
+        assert_eq!(length, expected);
     }
-    assert_eq!(length([0u8; 4]), 4);
-    assert_eq!(length(&b"abc"[..]), 3);
-    assert_eq!(length(Bytes::from_static(b"ab")), 2);
-    assert_eq!(length([0u8; 0]), 0);
+    assert_length([0u8; 4], 4);
+    assert_length(&b"abc"[..], 3);
+    assert_length(Bytes::from_static(b"ab"), 2);
+    assert_length([0u8; 0], 0);
 }
 
 /// A source that never has bytes yet.

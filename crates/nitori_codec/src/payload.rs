@@ -15,7 +15,8 @@
 //! Each wrapper copies until the source ends, so bound the source to the
 //! bytes it is to contribute first, such as with
 //! [`ReadLimit`](nitori_io::adapters::ReadLimit); [`EncodedLen`] is the
-//! source's exact remaining length ([`ExactLen`]).
+//! source's exact remaining length ([`ExactLen`]), returned in the source's
+//! length type and with its remainder error.
 //!
 //! As in the copies, the bytes are written with the metadata they were read
 //! with as their write options: the sink takes the source's metadata
@@ -23,8 +24,8 @@
 //! options in [`MappedOptions`](nitori_io::adapters::MappedOptions) with a
 //! [`MapOptions`](nitori_io::adapters::MapOptions) mapping or
 //! [`FixedOptions`](nitori_io::adapters::FixedOptions).
-use crate::{EncodeInto, EncodedLen};
-use core::num::NonZeroUsize;
+use crate::{EncodeOn, EncodedLen};
+use core::{future::Future, num::NonZeroUsize};
 use nitori_call::ReceiverAccess;
 use nitori_io::{
     AtEnd, Combine, ExactLen, ExactLenExt as _, Read, ReadChunk, Write, WriteLent,
@@ -33,12 +34,27 @@ use nitori_io::{
         copy_chunks, copy_into_lent,
     },
 };
-use snafu::{OptionExt as _, ResultExt as _, Snafu};
 
 /// A source written out by writing its chunks, of at most `chunk_maximum`
 /// bytes each: a source that hands out owned chunks ([`ReadChunk`]) into a
 /// sink that accepts bytes ([`Write`]). Shared chunks, such as `Bytes`,
 /// reach the sink without being copied.
+///
+/// Query the payload length through [`EncodedLen`].
+///
+/// ```compile_fail,E0277
+/// use core::num::NonZeroUsize;
+/// use nitori_call::ReceiverAccess;
+/// use nitori_codec::{EncodedLen, KnownLen, payload::Chunks};
+/// use nitori_io::ExactLen;
+///
+/// fn require_known(_: &impl KnownLen) {}
+/// fn check<A: ReceiverAccess<Family: ExactLen>>(source: A) {
+///     let mut payload: Chunks<A> = Chunks { source, chunk_maximum: NonZeroUsize::MIN };
+///     drop(payload.encoded_len());
+///     require_known(&payload);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Chunks<A> {
     /// The source.
@@ -52,6 +68,22 @@ pub struct Chunks<A> {
 /// that reads into a buffer ([`Read`]) without an intermediate copy.
 /// If the sink fills up, the source reports whether it has reached EOF
 /// ([`AtEnd`]) without consuming bytes.
+///
+/// Query the payload length through [`EncodedLen`].
+///
+/// ```compile_fail,E0277
+/// use core::num::NonZeroUsize;
+/// use nitori_call::ReceiverAccess;
+/// use nitori_codec::{EncodedLen, KnownLen, payload::Fill};
+/// use nitori_io::ExactLen;
+///
+/// fn require_known(_: &impl KnownLen) {}
+/// fn check<A: ReceiverAccess<Family: ExactLen>>(source: A) {
+///     let mut payload: Fill<A> = Fill { source, chunk_maximum: NonZeroUsize::MIN };
+///     drop(payload.encoded_len());
+///     require_known(&payload);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Fill<A> {
     /// The source.
@@ -63,6 +95,21 @@ pub struct Fill<A> {
 /// A source written out through `buffer`: a source that reads ([`Read`])
 /// into a sink that accepts bytes ([`Write`]), when neither lends nor hands
 /// out chunks. An empty buffer fails with no progress possible.
+///
+/// Query the payload length through [`EncodedLen`].
+///
+/// ```compile_fail,E0277
+/// use nitori_call::ReceiverAccess;
+/// use nitori_codec::{EncodedLen, KnownLen, payload::Buffered};
+/// use nitori_io::ExactLen;
+///
+/// fn require_known(_: &impl KnownLen) {}
+/// fn check<A: ReceiverAccess<Family: ExactLen>>(source: A) {
+///     let mut payload: Buffered<A, [u8; 8]> = Buffered { source, buffer: [0u8; 8] };
+///     drop(payload.encoded_len());
+///     require_known(&payload);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Buffered<A, B> {
     /// The source.
@@ -71,7 +118,7 @@ pub struct Buffered<A, B> {
     pub buffer: B,
 }
 
-impl<A, S, M> EncodeInto<S> for Chunks<A>
+impl<A, S, M> EncodeOn<S> for Chunks<A>
 where
     A: ReceiverAccess<Family: ReadChunk<Metadata = M>>,
     M: Combine,
@@ -79,12 +126,12 @@ where
 {
     type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
     type Error = CopyChunksError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
-    async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        copy_chunks(&mut self.source, &mut sink, self.chunk_maximum).await
+    async fn encode_on(mut self, sink: &mut S) -> Result<Self::Output, Self::Error> {
+        copy_chunks(&mut self.source, sink, self.chunk_maximum).await
     }
 }
 
-impl<A, S, M> EncodeInto<S> for Fill<A>
+impl<A, S, M> EncodeOn<S> for Fill<A>
 where
     A: ReceiverAccess<Family: Read<Metadata = M> + AtEnd>,
     M: Combine + Clone,
@@ -97,12 +144,12 @@ where
         <S::Family as Write<M>>::Error,
         <A::Family as AtEnd>::RemainderError,
     >;
-    async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        copy_into_lent(&mut self.source, &mut sink, self.chunk_maximum).await
+    async fn encode_on(mut self, sink: &mut S) -> Result<Self::Output, Self::Error> {
+        copy_into_lent(&mut self.source, sink, self.chunk_maximum).await
     }
 }
 
-impl<A, B, S, M> EncodeInto<S> for Buffered<A, B>
+impl<A, B, S, M> EncodeOn<S> for Buffered<A, B>
 where
     A: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine,
@@ -111,68 +158,28 @@ where
 {
     type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
     type Error = CopyBufferedError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
-    async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        copy_buffered(&mut self.source, &mut sink, self.buffer.as_mut()).await
+    async fn encode_on(mut self, sink: &mut S) -> Result<Self::Output, Self::Error> {
+        copy_buffered(&mut self.source, sink, self.buffer.as_mut()).await
     }
 }
 
-/// Why the length of a source written out as a value cannot be told.
-#[derive(Debug, Snafu)]
-#[snafu(module(source_length_error), visibility(pub(crate)))]
-pub enum SourceLengthError<E> {
-    /// The source cannot tell its length.
-    #[snafu(display("the source cannot tell its length"))]
-    Source { source: E },
-    /// The source's length does not fit in 64 bits, which only a `Length`
-    /// wider than 64 bits can reach.
-    #[snafu(display("the source's length does not fit in 64 bits"))]
-    TooLong,
+/// The source's exact remaining length, in the source's own length type.
+macro_rules! source_len {
+    ($([$($g:tt)*] $ty:ty;)+) => {$(
+        impl<$($g)*> EncodedLen for $ty
+        where
+            A: ReceiverAccess<Family: ExactLen>,
+        {
+            type Length = <A::Family as ExactLen>::Length;
+            type LengthError = <A::Family as AtEnd>::RemainderError;
+            fn encoded_len(&mut self) -> impl Future<Output = Result<Self::Length, Self::LengthError>> {
+                self.source.remaining_len()
+            }
+        }
+    )+};
 }
-
-/// The exact remaining length of `source`, as the length of its encoding.
-async fn source_len<A>(
-    source: &mut A,
-) -> Result<u64, SourceLengthError<<A::Family as AtEnd>::RemainderError>>
-where
-    A: ReceiverAccess<Family: ExactLen>,
-    u64: TryFrom<<A::Family as ExactLen>::Length>,
-{
-    let length = source
-        .remaining_len()
-        .await
-        .context(source_length_error::SourceSnafu)?;
-    u64::try_from(length)
-        .ok()
-        .context(source_length_error::TooLongSnafu)
-}
-
-impl<A> EncodedLen for Chunks<A>
-where
-    A: ReceiverAccess<Family: ExactLen>,
-    u64: TryFrom<<A::Family as ExactLen>::Length>,
-{
-    type LengthError = SourceLengthError<<A::Family as AtEnd>::RemainderError>;
-    async fn encoded_len(&mut self) -> Result<u64, Self::LengthError> {
-        source_len(&mut self.source).await
-    }
-}
-impl<A> EncodedLen for Fill<A>
-where
-    A: ReceiverAccess<Family: ExactLen>,
-    u64: TryFrom<<A::Family as ExactLen>::Length>,
-{
-    type LengthError = SourceLengthError<<A::Family as AtEnd>::RemainderError>;
-    async fn encoded_len(&mut self) -> Result<u64, Self::LengthError> {
-        source_len(&mut self.source).await
-    }
-}
-impl<A, B> EncodedLen for Buffered<A, B>
-where
-    A: ReceiverAccess<Family: ExactLen>,
-    u64: TryFrom<<A::Family as ExactLen>::Length>,
-{
-    type LengthError = SourceLengthError<<A::Family as AtEnd>::RemainderError>;
-    async fn encoded_len(&mut self) -> Result<u64, Self::LengthError> {
-        source_len(&mut self.source).await
-    }
+source_len! {
+    [A] Chunks<A>;
+    [A] Fill<A>;
+    [A, B] Buffered<A, B>;
 }

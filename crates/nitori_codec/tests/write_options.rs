@@ -104,30 +104,30 @@ struct Pair<O> {
     first: Value<[u8; 1], O>,
     second: Value<[u8; 1], O>,
 }
-impl<S, M> DecodeFrom<S> for Pair<M>
+impl<S, M> DecodeOn<S> for Pair<M>
 where
     S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
-    async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
+    async fn decode_on(io: &mut S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: Value::decode_from(&mut io).await?,
-            second: Value::decode_from(&mut io).await?,
+            first: io.decode::<Value<[u8; 1], M>>().await?,
+            second: io.decode::<Value<[u8; 1], M>>().await?,
         })
     }
 }
 /// Writes each field with its own options, whatever they are.
-impl<S, O> EncodeInto<S> for Pair<O>
+impl<S, O> EncodeOn<S> for Pair<O>
 where
     S: ReceiverAccess<Family: Write<O, Report: Combine>>,
     O: Unpin,
 {
     type Output = <S::Family as Write<O>>::Report;
     type Error = WriteArrayError<<S::Family as Write<O>>::Error>;
-    async fn encode_into(self, mut io: S) -> Result<Self::Output, Self::Error> {
-        let first = self.first.encode_into(&mut io).await?;
-        let second = self.second.encode_into(&mut io).await?;
+    async fn encode_on(self, io: &mut S) -> Result<Self::Output, Self::Error> {
+        let first = io.encode(self.first).await?;
+        let second = io.encode(self.second).await?;
         Ok(first.combine(second))
     }
 }

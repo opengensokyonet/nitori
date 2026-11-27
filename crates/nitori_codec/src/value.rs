@@ -1,6 +1,6 @@
 //! Values with the merged metadata of their bytes when read, or the write
 //! options of their bytes when written.
-use crate::{DecodeFrom, EncodeInto, EncodedLen};
+use crate::{DecodeFrom, DecodeOn, EncodeInto, EncodeOn, EncodedLen, KnownLen};
 use nitori_call::ReceiverAccess;
 use nitori_io::{
     Combine, Read, Value, Write,
@@ -20,16 +20,16 @@ use nitori_io::{
 ///
 /// A failure or cancellation does not return the metadata of the bytes read
 /// before it, as a failed read of an array does not return its bytes.
-impl<S, V, M, E> DecodeFrom<S> for Value<V, M>
+impl<S, V, M, E> DecodeOn<S> for Value<V, M>
 where
     S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine,
     V: for<'x> DecodeFrom<MergedMetadata<&'x mut S, M, &'x mut M>, Error = E>,
 {
     type Error = E;
-    async fn decode_from(mut source: S) -> Result<Self, E> {
+    async fn decode_on(source: &mut S) -> Result<Self, E> {
         let mut merged = M::default();
-        let value = V::decode_from(MergedMetadata::borrowing(&mut source, &mut merged)).await?;
+        let value = V::decode_from(MergedMetadata::borrowing(source, &mut merged)).await?;
         Ok(Value {
             value,
             metadata: merged,
@@ -48,25 +48,33 @@ where
 /// options. A value decoded from a source with metadata `M` is written
 /// into a sink that takes other options through [`MappedOptions`] with a
 /// [`MapOptions`](nitori_io::adapters::MapOptions) mapping.
-impl<S, V, O, R, E> EncodeInto<S> for Value<V, O>
+impl<S, V, O, R, E> EncodeOn<S> for Value<V, O>
 where
     S: ReceiverAccess<Family: Write<O>>,
     V: for<'x> EncodeInto<MappedOptions<&'x mut S, FixedOptions<O>>, Output = R, Error = E>,
 {
     type Output = R;
     type Error = E;
-    async fn encode_into(self, mut sink: S) -> Result<R, E> {
+    async fn encode_on(self, sink: &mut S) -> Result<R, E> {
         let Value { value, metadata } = self;
         value
-            .encode_into(MappedOptions::new(&mut sink, FixedOptions(metadata)))
+            .encode_into(MappedOptions::new(sink, FixedOptions(metadata)))
             .await
     }
 }
 
 /// The value's encoded length.
 impl<V: EncodedLen, M> EncodedLen for Value<V, M> {
+    type Length = V::Length;
     type LengthError = V::LengthError;
-    async fn encoded_len(&mut self) -> Result<u64, V::LengthError> {
+    async fn encoded_len(&mut self) -> Result<V::Length, V::LengthError> {
         self.value.encoded_len().await
+    }
+}
+
+/// The value's encoded length, known at once when the value knows it.
+impl<V: KnownLen, M> KnownLen for Value<V, M> {
+    fn known_len(&self) -> V::Length {
+        self.value.known_len()
     }
 }

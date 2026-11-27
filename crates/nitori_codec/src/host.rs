@@ -82,8 +82,9 @@ where
 /// Decode values as the whole operation of a call on this executor:
 /// `input.sync_decode_unpin::<V>()` on a memory buffer.
 ///
-/// A `V` qualifies when it decodes from the slot of a call on the
-/// executor's family, as every `V: DecodeFrom<S>` for `S: ReceiverAccess` does.
+/// Implement [`DecodeOn`](crate::DecodeOn) for accesses of the executor's
+/// family to use a value here. The framework runs it through [`DecodeFrom`]
+/// on the call slot.
 /// The `sync_` versions are for executors that never wait, such as memory
 /// buffers, and panic if the decoding returns `Pending`.
 pub trait DecodeHostExt: CallExecutor {
@@ -131,8 +132,9 @@ impl<H: CallExecutor + ?Sized> DecodeHostExt for H {}
 /// Encode values as the whole operation of a call on this executor:
 /// `output.sync_encode_unpin(value)` on a memory buffer.
 ///
-/// A `V` qualifies when it encodes into the slot of a call on the
-/// executor's family, as every `V: EncodeInto<S>` for `S: ReceiverAccess` does.
+/// Implement [`EncodeOn`](crate::EncodeOn) for accesses of the executor's
+/// family to use a value here. The framework runs it through [`EncodeInto`]
+/// on the call slot.
 /// The `sync_` versions are for executors that never wait and panic if the
 /// encoding returns `Pending`.
 pub trait EncodeHostExt: CallExecutor {

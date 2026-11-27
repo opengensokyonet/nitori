@@ -1,7 +1,8 @@
 //! Values decoded or encoded in stages on a receiver held by value.
 use crate::{
-    DecodeFrom, EncodeInto,
+    DecodeFrom, DecodeOn, EncodeInto, EncodeOn,
     host::{DecodeHostExt, EncodeHostExt},
+    scoped::Framework,
 };
 use core::{
     future::Future,
@@ -41,6 +42,105 @@ pub struct IoParts<V, IO> {
     pub io: IO,
 }
 
+/// A value that keeps its IO, decoded or encoded with the IO's place
+/// vacant: what [`DecodeOn`] or [`EncodeOn`] gives for such a value, which
+/// the framework completes with the IO once the value is finished.
+///
+/// ```
+/// # #![feature(impl_trait_in_assoc_type)]
+/// use nitori_call::ReceiverAccess;
+/// use nitori_codec::{prelude::*, DecodeOn, staged::{KeepsIo, MapIo}};
+/// use nitori_io::{Read, calls::ReadArrayError};
+///
+/// /// A tag, and the source the rest is read from.
+/// #[derive(MapIo)]
+/// #[map_io(I)]
+/// struct Tagged<I> {
+///     tag: u8,
+///     io: I,
+/// }
+///
+/// impl<A: ReceiverAccess<Family: Read<Metadata = ()>>> DecodeOn<A> for Tagged<A> {
+///     type Error = ReadArrayError<<A::Family as Read>::Error>;
+///     type Decoded = KeepsIo<Self>;
+///     async fn decode_on(io: &mut A) -> Result<KeepsIo<Self>, Self::Error> {
+///         let [tag] = io.decode::<[u8; 1]>().await?;
+///         Ok(KeepsIo::new(|io| Tagged { tag, io }))
+///     }
+/// }
+/// ```
+pub struct KeepsIo<V: MapIo>(V::With<Vacant>);
+
+impl<V: MapIo> KeepsIo<V> {
+    /// The value `build` makes around the vacant place of its IO.
+    pub fn new(build: impl FnOnce(Vacant) -> V::With<Vacant>) -> Self {
+        Self(build(Vacant(())))
+    }
+}
+
+impl<V: MapIo<With<Vacant>: core::fmt::Debug>> core::fmt::Debug for KeepsIo<V> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("KeepsIo").field(&self.0).finish()
+    }
+}
+
+mod attach_sealed {
+    pub trait Sealed<S, V> {}
+}
+
+/// What [`DecodeOn`] or [`EncodeOn`] gave, made into the value or output
+/// with the IO it was decoded from or encoded into: a value that keeps
+/// nothing drops the borrowed IO's owner, [`KeepsIo`] puts the IO in, and
+/// an `Option` of it does so when there is a value. Only this crate
+/// implements it.
+pub trait AttachIo<S, V>: attach_sealed::Sealed<S, V> {
+    /// Make the value with `io`.
+    fn attach_io(self, io: S) -> V;
+}
+
+impl<S, V> attach_sealed::Sealed<S, V> for V {}
+/// A value that keeps nothing of the IO.
+impl<S, V> AttachIo<S, V> for V {
+    fn attach_io(self, _: S) -> V {
+        self
+    }
+}
+
+impl<S, V> attach_sealed::Sealed<S, V> for KeepsIo<V>
+where
+    V: MapIo<Io = S>,
+    V::With<Vacant>: MapIo<With<S> = V>,
+{
+}
+/// A value that keeps the IO: the IO takes its vacant place.
+impl<S, V> AttachIo<S, V> for KeepsIo<V>
+where
+    V: MapIo<Io = S>,
+    V::With<Vacant>: MapIo<With<S> = V>,
+{
+    fn attach_io(self, io: S) -> V {
+        self.0.map_io(|_| io)
+    }
+}
+
+impl<S, V> attach_sealed::Sealed<S, Option<V>> for Option<KeepsIo<V>>
+where
+    V: MapIo<Io = S>,
+    V::With<Vacant>: MapIo<With<S> = V>,
+{
+}
+/// A value that may be absent and keeps the IO when present: the IO takes
+/// its vacant place, or is dropped with `None`.
+impl<S, V> AttachIo<S, Option<V>> for Option<KeepsIo<V>>
+where
+    V: MapIo<Io = S>,
+    V::With<Vacant>: MapIo<With<S> = V>,
+{
+    fn attach_io(self, io: S) -> Option<V> {
+        self.map(|kept| kept.attach_io(io))
+    }
+}
+
 /// `V` with its source taken out.
 struct Detached<V: MapIo>(V::With<Vacant>);
 
@@ -75,22 +175,24 @@ impl<Fut: Future<Output = Result<T, E>>, T, U, E, M: FnOnce(T) -> U> Future for 
     }
 }
 
-fn vacate<T: MapIo>(value: T) -> T::With<Vacant> {
-    value.map_io(|_| Vacant(()))
-}
-
-impl<'a, F, V, E> DecodeFrom<ReceiverSlot<'a, F>> for Detached<V>
+/// A value that keeps the slot it is decoded on, with the slot taken out.
+impl<'a, F, V, E> DecodeOn<ReceiverSlot<'a, F>> for Detached<V>
 where
     F: ReceiverFamily,
     V: MapIo,
     V::With<ReceiverSlot<'a, F>>:
-        DecodeFrom<ReceiverSlot<'a, F>, Error = E> + MapIo<With<Vacant> = V::With<Vacant>>,
+        DecodeOn<ReceiverSlot<'a, F>, Error = E> + MapIo<With<Vacant> = V::With<Vacant>>,
+    <V::With<ReceiverSlot<'a, F>> as DecodeOn<ReceiverSlot<'a, F>>>::Decoded:
+        Into<KeepsIo<V::With<ReceiverSlot<'a, F>>>>,
 {
     type Error = E;
-    fn decode_from(slot: ReceiverSlot<'a, F>) -> impl Future<Output = Result<Self, E>> {
+    fn decode_on(slot: &mut ReceiverSlot<'a, F>) -> impl Future<Output = Result<Self, E>> {
         MapOk::new(
-            <V::With<ReceiverSlot<'a, F>> as DecodeFrom<_>>::decode_from(slot),
-            |value: V::With<ReceiverSlot<'a, F>>| Detached::<V>(vacate(value)),
+            <V::With<ReceiverSlot<'a, F>> as DecodeOn<_>>::decode_on(slot),
+            |decoded: <V::With<ReceiverSlot<'a, F>> as DecodeOn<_>>::Decoded| {
+                let KeepsIo(value) = decoded.into();
+                Detached::<V>(value)
+            },
         )
     }
 }
@@ -105,29 +207,36 @@ where
     V: MapIo<Io = R>,
     V::With<Vacant>: MapIo<With<R> = V>,
     for<'a> V::With<Slot<'a, R>>:
-        DecodeFrom<Slot<'a, R>, Error = E> + MapIo<With<Vacant> = V::With<Vacant>>,
+        DecodeOn<Slot<'a, R>, Error = E> + MapIo<With<Vacant> = V::With<Vacant>>,
+    for<'a> <V::With<Slot<'a, R>> as DecodeOn<Slot<'a, R>>>::Decoded:
+        Into<KeepsIo<V::With<Slot<'a, R>>>>,
 {
     type Error = E;
     async fn decode_from(mut receiver: R) -> Result<V, E> {
         let Detached(value) = receiver.decode_unpin::<Detached<V>>().await?;
         Ok(value.map_io(|_| receiver))
     }
+    fn __framework(_: Framework) {}
 }
 
 /// A value written in stages whose output keeps the sink, with the sink
 /// taken out of it.
 struct Detaching<V, D>(V, PhantomData<fn() -> D>);
 
-impl<'a, F, V, D, E> EncodeInto<ReceiverSlot<'a, F>> for Detaching<V, D>
+impl<'a, F, V, D, E> EncodeOn<ReceiverSlot<'a, F>> for Detaching<V, D>
 where
     F: ReceiverFamily,
-    V: EncodeInto<ReceiverSlot<'a, F>, Error = E>,
+    V: EncodeOn<ReceiverSlot<'a, F>, Error = E>,
     V::Output: MapIo<With<Vacant> = D>,
+    V::Encoded: Into<KeepsIo<V::Output>>,
 {
     type Output = D;
     type Error = E;
-    fn encode_into(self, slot: ReceiverSlot<'a, F>) -> impl Future<Output = Result<D, E>> {
-        MapOk::new(self.0.encode_into(slot), vacate::<V::Output>)
+    fn encode_on(self, slot: &mut ReceiverSlot<'a, F>) -> impl Future<Output = Result<D, E>> {
+        MapOk::new(self.0.encode_on(slot), |encoded: V::Encoded| {
+            let KeepsIo(output) = encoded.into();
+            output
+        })
     }
 }
 
@@ -136,8 +245,10 @@ where
 impl<R, V, D, O, E> EncodeInto<R, OnReceiver> for V
 where
     R: Receiver + Unpin,
-    for<'a> V: EncodeInto<Slot<'a, R>, Error = E>,
-    for<'a> <V as EncodeInto<Slot<'a, R>>>::Output: MapIo<With<Vacant> = D>,
+    for<'a> V: EncodeOn<Slot<'a, R>, Error = E>,
+    for<'a> <V as EncodeOn<Slot<'a, R>>>::Output: MapIo<With<Vacant> = D>,
+    for<'a> <V as EncodeOn<Slot<'a, R>>>::Encoded:
+        Into<KeepsIo<<V as EncodeOn<Slot<'a, R>>>::Output>>,
     D: MapIo<With<R> = O>,
 {
     type Output = O;
@@ -148,6 +259,7 @@ where
             .await?;
         Ok(output.map_io(|_| receiver))
     }
+    fn __framework(_: Framework) {}
 }
 
 /// Extract the IO and leave a [`Vacant`] slot in the value.

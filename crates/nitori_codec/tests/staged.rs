@@ -3,8 +3,9 @@
 use core::marker::PhantomData;
 use nitori_call::{AccessMode, AccessOperation, Receiver, ReceiverAccess, call};
 use nitori_codec::{
+    DecodeOn, EncodeOn,
     prelude::*,
-    staged::{IoParts, MapIo, MapOk, Vacant, take_io},
+    staged::{IoParts, KeepsIo, MapIo, MapOk, Vacant, take_io},
 };
 use nitori_io::{
     Read, Write,
@@ -19,30 +20,32 @@ struct Held<I> {
     io: I,
 }
 
-impl<A> DecodeFrom<A> for Held<A>
+impl<A> DecodeOn<A> for Held<A>
 where
     A: ReceiverAccess<Family: Read<Metadata = ()>>,
 {
     type Error = ReadArrayError<<A::Family as Read>::Error>;
+    type Decoded = KeepsIo<Self>;
 
-    async fn decode_from(mut io: A) -> Result<Self, Self::Error> {
+    async fn decode_on(io: &mut A) -> Result<KeepsIo<Self>, Self::Error> {
         let [tag] = io.decode::<[u8; 1]>().await?;
-        Ok(Self { tag, io })
+        Ok(KeepsIo::new(|io| Held { tag, io }))
     }
 }
 
 struct Tag(u8);
 
-impl<A> EncodeInto<A> for Tag
+impl<A> EncodeOn<A> for Tag
 where
     A: ReceiverAccess<Family: Write<(), Report = ()>>,
 {
     type Output = Held<A>;
     type Error = WriteArrayError<<A::Family as Write<()>>::Error>;
+    type Encoded = KeepsIo<Held<A>>;
 
-    async fn encode_into(self, mut io: A) -> Result<Self::Output, Self::Error> {
+    async fn encode_on(self, io: &mut A) -> Result<KeepsIo<Held<A>>, Self::Error> {
         io.encode([self.0]).await?;
-        Ok(Held { tag: self.0, io })
+        Ok(KeepsIo::new(|io| Held { tag: self.0, io }))
     }
 }
 
