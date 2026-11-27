@@ -9,7 +9,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll, ready},
 };
-use nitori_call::{AsAccess, BorrowedAccess, Compose, Composed, Lent, ReceiverFamily};
+use nitori_call::{AccessPlan, Compose, Composed, ProvideAccess, ReceiverAccess, ReceiverFamily};
 
 /// The merged metadata of the reads made through a composed access:
 /// `io.compose(MergedMetadata::default())` reads from `io` and merges the
@@ -147,27 +147,29 @@ impl<F: crate::ExactLen, M> crate::ExactLen for Merging<F, M> {
     }
 }
 
-/// A source that merges into a [`MergedMetadata`] the metadata of what is
-/// read through it: the access it lends is the one `source` lends, composed
-/// with the state. It stands for any [`AsAccess`] source, an access or a type
-/// that lends one, so a value that reads only from sources without metadata
-/// can be decoded from one with it.
+/// An access that merges the metadata of its reads into [`MergedMetadata`].
+///
+/// The caller retains the source and merge state. The adapted access
+/// reports `()` as metadata to operations using it.
 #[derive(Debug)]
-pub struct MergingSource<'x, S: AsAccess, M> {
-    access: Composed<BorrowedAccess<'x, S::Access>, &'x mut MergedMetadata<M>>,
+pub struct MergingSource<'x, S: ReceiverAccess, M> {
+    access: Composed<&'x mut S, &'x mut MergedMetadata<M>>,
 }
-impl<'x, S: AsAccess, M> MergingSource<'x, S, M> {
+impl<'x, S: ReceiverAccess, M> MergingSource<'x, S, M> {
     /// Read from `source`, merging the metadata into `merged`.
     pub fn new(source: &'x mut S, merged: &'x mut MergedMetadata<M>) -> Self {
         Self {
-            access: Composed::new(source.access(), merged),
+            access: Composed::new(source, merged),
         }
     }
 }
-impl<'x, S: AsAccess, M: Unpin> AsAccess for MergingSource<'x, S, M> {
-    type Family = Merging<Lent<S::Family>, M>;
-    type Access = Composed<BorrowedAccess<'x, S::Access>, &'x mut MergedMetadata<M>>;
-    fn access(&mut self) -> BorrowedAccess<'_, Self::Access> {
-        BorrowedAccess::new(&mut self.access)
+impl<'x, S: ReceiverAccess, M: Unpin> ProvideAccess for MergingSource<'x, S, M> {
+    type AccessFamily =
+        <Composed<&'x mut S, &'x mut MergedMetadata<M>> as ProvideAccess>::AccessFamily;
+    type Lentness = <Composed<&'x mut S, &'x mut MergedMetadata<M>> as ProvideAccess>::Lentness;
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        self.access.access_plan()
     }
 }

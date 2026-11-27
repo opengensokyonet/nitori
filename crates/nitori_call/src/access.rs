@@ -1,15 +1,12 @@
-//! Access to the view of the current poll: lent by a call, or constructed
-//! from a held receiver.
-use crate::{
-    Compose, Composed, Lent, LentAccess, Receiver, ReceiverFamily, ViewOperation, loan::RawViewLoan,
-};
+//! Access to the view a call lends for the current poll.
+use crate::{Compose, Composed, Lent, ReceiverFamily, ViewOperation, loan::RawViewLoan};
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     cell::Cell,
     fmt,
     future::Future,
     marker::PhantomData,
-    pin::{Pin, pin},
+    pin::Pin,
     ptr,
     task::{Context, Poll, Waker},
 };
@@ -98,14 +95,14 @@ impl<F: ReceiverFamily> ViewCell<F> {
         }
     }
     fn release_point(&self) -> ReleasePoint<'_> {
-        ReleasePoint(Some(Offer {
+        ReleasePoint(Offer {
             lent: self.view.get().is_some(),
             releasable: self.releasable.get(),
             kept: self.kept.get(),
             release: &self.release,
             branches: &self.branches,
             root: self.root.get(),
-        }))
+        })
     }
 }
 
@@ -208,9 +205,8 @@ impl ViewRequest<'_> {
     }
 }
 
-/// Where an operation offers back the view of the current poll: nowhere for
-/// an access that is never lent a view.
-pub struct ReleasePoint<'a>(Option<Offer<'a>>);
+/// Where an operation offers back the view of the current poll.
+pub struct ReleasePoint<'a>(Offer<'a>);
 /// The state of a slot's cell that answers a release point.
 struct Offer<'a> {
     lent: bool,
@@ -221,20 +217,13 @@ struct Offer<'a> {
     root: *const Waker,
 }
 impl ReleasePoint<'_> {
-    /// The release point of an access that is never lent a view, and so has
-    /// none to offer back: it completes at once.
-    fn fixed() -> ReleasePoint<'static> {
-        ReleasePoint(None)
-    }
     /// Offer the view back unless there is none to release. `offered`
     /// records whether this release point already did. Like a request, an
     /// offer wakes nothing: the caller answers at once, and a branch of an
     /// executor between the call and this point is woken before the call
     /// is polled with the answer.
     fn poll(self, offered: &mut bool, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(offer) = self.0 else {
-            return Poll::Ready(());
-        };
+        let offer = self.0;
         if !offer.lent || !offer.releasable || (*offered && offer.kept) {
             return Poll::Ready(());
         }
@@ -257,16 +246,156 @@ mod sealed {
     /// Implemented only by this crate's accesses.
     pub trait Sealed {}
 }
+
 pub(crate) use sealed::Sealed;
+
+mod plan_sealed {
+    pub trait Sealed {}
+}
+pub(crate) use plan_sealed::Sealed as PlanSealed;
+
+mod lentness_sealed {
+    pub trait Sealed {}
+}
+/// Whether an access always has its view at hand: [`AtHand`] or
+/// [`OnPoll`]. Only this crate's plans decide it.
+pub trait Lentness: lentness_sealed::Sealed {}
+/// The view is at hand whenever the access is used: a lent access.
+pub struct AtHand;
+/// The view is lent for a poll, and may be missing.
+pub struct OnPoll;
+impl lentness_sealed::Sealed for AtHand {}
+impl lentness_sealed::Sealed for OnPoll {}
+impl Lentness for AtHand {}
+impl Lentness for OnPoll {}
+
+/// A sealed plan issued by the framework to visit or release the current view.
+pub trait AccessPlan<'a>: PlanSealed {
+    /// The family of the view reached by this plan.
+    type Family: ReceiverFamily;
+    /// Whether the plan's view is always at hand.
+    type Lentness: Lentness;
+
+    #[doc(hidden)]
+    fn visit<V: ViewVisitor<Self::Family>>(self, visitor: V) -> V::Output;
+    #[doc(hidden)]
+    fn release(self) -> ReleasePoint<'a>;
+}
+
+/// Provide an access by issuing a framework plan for the current view.
+///
+/// A wrapper can forward the plan of its stored access, or use
+/// [`project_access`](crate::project_access) to expose an adapted view.
+/// The framework implements [`ReceiverAccess`] for every implementation.
+///
+/// ```
+/// use nitori_call::{AccessPlan, ProvideAccess, ReceiverAccess};
+///
+/// struct Payload<A> {
+///     io: A,
+/// }
+///
+/// impl<A: ReceiverAccess> ProvideAccess for Payload<A> {
+///     type AccessFamily = A::Family;
+///     type Lentness = A::Lentness;
+///
+///     fn access_plan<'a>(
+///         &'a mut self,
+///     ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+///         self.io.access_plan()
+///     }
+/// }
+///
+/// fn accepts_access(_: &mut impl ReceiverAccess) {}
+///
+/// fn read_payload<A: ReceiverAccess>(io: A) {
+///     accepts_access(&mut Payload { io });
+/// }
+/// ```
+pub trait ProvideAccess {
+    /// The family of views the plan makes available.
+    type AccessFamily: ReceiverFamily;
+    /// Whether the plans have their view at hand: the plan's own, which a
+    /// wrapper states as its parent's.
+    type Lentness: Lentness;
+    /// Issue the plan for this exclusive borrow.
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness>;
+}
+
+/// An access is lent when its plans have their view at hand.
+impl<A: ProvideAccess<Lentness = AtHand> + ?Sized> crate::LentAccess for A {}
+
+impl<A: ProvideAccess + ?Sized> Sealed for A {}
+
+impl<A: ProvideAccess + ?Sized> ReceiverAccess for A {
+    type Family = A::AccessFamily;
+
+    fn visit_view<V: ViewVisitor<Self::Family>>(&mut self, visitor: V) -> V::Output {
+        self.access_plan().visit(visitor)
+    }
+
+    fn release_point(&mut self) -> ReleasePoint<'_> {
+        self.access_plan().release()
+    }
+}
+
+impl<A: ProvideAccess + ?Sized> ProvideAccess for &mut A {
+    type AccessFamily = A::AccessFamily;
+    type Lentness = A::Lentness;
+
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        (**self).access_plan()
+    }
+}
+
+// The framework retains direct control of built-in accesses.
+pub(crate) trait RawAccess {
+    type Family: ReceiverFamily;
+    type Lentness: Lentness;
+    fn raw_visit<V: ViewVisitor<Self::Family>>(&mut self, visitor: V) -> V::Output;
+    fn raw_release(&mut self) -> ReleasePoint<'_>;
+}
+
+pub(crate) struct RawPlan<'a, A>(pub(crate) &'a mut A);
+
+impl<A: RawAccess> PlanSealed for RawPlan<'_, A> {}
+
+impl<'a, A: RawAccess> AccessPlan<'a> for RawPlan<'a, A> {
+    type Family = A::Family;
+    type Lentness = A::Lentness;
+
+    fn visit<V: ViewVisitor<Self::Family>>(self, visitor: V) -> V::Output {
+        self.0.raw_visit(visitor)
+    }
+
+    fn release(self) -> ReleasePoint<'a> {
+        self.0.raw_release()
+    }
+}
+
+impl<F: ReceiverFamily> ProvideAccess for ReceiverSlot<'_, F> {
+    type AccessFamily = F;
+    type Lentness = OnPoll;
+
+    fn access_plan<'a>(&'a mut self) -> impl AccessPlan<'a, Family = F, Lentness = OnPoll> {
+        RawPlan(self)
+    }
+}
 
 /// A value that can lend a view of its family during the current poll.
 ///
 /// Borrow it mutably for each use: at most one operation uses an access at a
-/// time, as with any `&mut` resource. This crate's slots,
-/// [`ConstructedAccess`], compositions, [`BorrowedAccess`](crate::BorrowedAccess),
-/// and `&mut` borrows of accesses implement this trait.
+/// time, as with any `&mut` resource. The framework implements this trait
+/// for each type that issues a plan through [`ProvideAccess`], including
+/// slots, compositions, and mutable borrows of accesses.
 #[allow(private_bounds)]
-pub trait ReceiverAccess: sealed::Sealed {
+pub trait ReceiverAccess:
+    sealed::Sealed + ProvideAccess<AccessFamily = <Self as ReceiverAccess>::Family>
+{
     type Family: ReceiverFamily;
 
     /// Lend this poll's view to `visitor`, or give it a request for one.
@@ -319,18 +448,6 @@ pub trait ReceiverAccess: sealed::Sealed {
         Self: Sized,
     {
         Composed::new(self, state)
-    }
-}
-
-impl<A: ReceiverAccess + ?Sized> Sealed for &mut A {}
-#[allow(private_bounds)]
-impl<A: ReceiverAccess + ?Sized> ReceiverAccess for &mut A {
-    type Family = A::Family;
-    fn visit_view<V: ViewVisitor<A::Family>>(&mut self, visitor: V) -> V::Output {
-        (**self).visit_view(visitor)
-    }
-    fn release_point(&mut self) -> ReleasePoint<'_> {
-        (**self).release_point()
     }
 }
 
@@ -431,11 +548,11 @@ impl<F: ReceiverFamily> ReceiverSlot<'_, F> {
         }
     }
 }
-impl<F: ReceiverFamily> Sealed for ReceiverSlot<'_, F> {}
 #[allow(private_bounds)]
-impl<F: ReceiverFamily> ReceiverAccess for ReceiverSlot<'_, F> {
+impl<F: ReceiverFamily> RawAccess for ReceiverSlot<'_, F> {
     type Family = F;
-    fn visit_view<V: ViewVisitor<F>>(&mut self, visitor: V) -> V::Output {
+    type Lentness = OnPoll;
+    fn raw_visit<V: ViewVisitor<F>>(&mut self, visitor: V) -> V::Output {
         // SAFETY: new's contract. No other thread uses the cell meanwhile:
         // see the Send implementation.
         let cell = unsafe { &*self.cell };
@@ -462,71 +579,8 @@ impl<F: ReceiverFamily> ReceiverAccess for ReceiverSlot<'_, F> {
             }
         }
     }
-    fn release_point(&mut self) -> ReleasePoint<'_> {
+    fn raw_release(&mut self) -> ReleasePoint<'_> {
         // SAFETY: as in `visit_view`.
         unsafe { &*self.cell }.release_point()
     }
 }
-
-/// An access that holds a receiver and constructs the receiver's view at
-/// each access, instead of being lent one by a call.
-///
-/// A type that holds its access, such as a stream that reads one record after
-/// another, is written once for every [`ReceiverAccess`]. Inside an operation
-/// it holds the operation's access; elsewhere it holds a `ConstructedAccess`
-/// of a receiver, and lives across as many awaits as its owner wants, with no
-/// call in between. Every operation written for an access runs on it.
-///
-/// The view is always at hand: an access never waits for it, a release point
-/// completes at once, and [`LentAccess::with`] works outside any poll too, a
-/// destructor included, where a slot has no view. Each access constructs a
-/// view of its own. The access is `Send` and `Sync` when the receiver is,
-/// with or without `std`, and its views may be used on any thread it reaches.
-///
-/// The receiver is held by value or by `&mut`, and must be `Unpin`, since
-/// the access moves with whatever holds it. Pin one that is not first:
-/// `ConstructedAccess::new(pin!(receiver))` borrows it pinned on the stack,
-/// `ConstructedAccess::new(Box::pin(receiver))` owns it pinned in a box.
-///
-/// ```compile_fail,E0277
-/// # use nitori_call::{ConstructedAccess, Direct, ReceiverAccess};
-/// # use std::marker::PhantomPinned;
-/// struct Fixed(PhantomPinned);
-/// nitori_call::direct_receiver!(impl [] for Fixed);
-/// fn access(_: impl ReceiverAccess<Family = Direct<Fixed>>) {}
-/// access(ConstructedAccess::new(Fixed(PhantomPinned)));
-/// ```
-#[derive(Debug)]
-pub struct ConstructedAccess<R> {
-    receiver: R,
-}
-impl<R> ConstructedAccess<R> {
-    /// Access `receiver` by constructing its view at each access.
-    pub fn new(receiver: R) -> Self {
-        Self { receiver }
-    }
-    /// The receiver.
-    pub fn get_ref(&self) -> &R {
-        &self.receiver
-    }
-    /// The receiver, for use between accesses.
-    pub fn get_mut(&mut self) -> &mut R {
-        &mut self.receiver
-    }
-    /// End the access, returning the receiver.
-    pub fn into_inner(self) -> R {
-        self.receiver
-    }
-}
-impl<R: Receiver + Unpin> Sealed for ConstructedAccess<R> {}
-#[allow(private_bounds)]
-impl<R: Receiver + Unpin> ReceiverAccess for ConstructedAccess<R> {
-    type Family = R::Family;
-    fn visit_view<V: ViewVisitor<R::Family>>(&mut self, visitor: V) -> V::Output {
-        visitor.run(pin!(Pin::new(&mut self.receiver).view()))
-    }
-    fn release_point(&mut self) -> ReleasePoint<'_> {
-        ReleasePoint::fixed()
-    }
-}
-impl<R: Receiver + Unpin> LentAccess for ConstructedAccess<R> {}

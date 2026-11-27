@@ -2,8 +2,9 @@
 //!
 //! The value is decoded from, or encoded into, the slot the call lends its
 //! operation, so it cannot keep the slot: a value decoded or encoded in
-//! stages is used inside an operation, through [`Decode`](crate::Decode)
-//! and [`Encode`](crate::Encode).
+//! stages is used inside an operation through [`Decode`](crate::Decode) and
+//! [`Encode`](crate::Encode), or on a receiver held by value through
+//! [`DecodeFrom`] or [`EncodeInto`] with [`OnReceiver`](nitori_call::OnReceiver).
 use crate::{DecodeFrom, EncodeInto};
 use core::{
     future::Future,
@@ -82,7 +83,7 @@ where
 /// `input.sync_decode_unpin::<V>()` on a memory buffer.
 ///
 /// A `V` qualifies when it decodes from the slot of a call on the
-/// executor's family, as every `V: DecodeFrom<S>` for `S: AsAccess` does.
+/// executor's family, as every `V: DecodeFrom<S>` for `S: ReceiverAccess` does.
 /// The `sync_` versions are for executors that never wait, such as memory
 /// buffers, and panic if the decoding returns `Pending`.
 pub trait DecodeHostExt: CallExecutor {
@@ -131,7 +132,7 @@ impl<H: CallExecutor + ?Sized> DecodeHostExt for H {}
 /// `output.sync_encode_unpin(value)` on a memory buffer.
 ///
 /// A `V` qualifies when it encodes into the slot of a call on the
-/// executor's family, as every `V: EncodeInto<S>` for `S: AsAccess` does.
+/// executor's family, as every `V: EncodeInto<S>` for `S: ReceiverAccess` does.
 /// The `sync_` versions are for executors that never wait and panic if the
 /// encoding returns `Pending`.
 pub trait EncodeHostExt: CallExecutor {

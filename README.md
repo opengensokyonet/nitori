@@ -12,15 +12,15 @@ Each package documents itself in its own README or crate documentation. Dependen
 
 ### Calls
 
-- [`crates/nitori_call`](crates/nitori_call/README.md): operations written as ordinary async functions that run on a resource their caller lends one poll at a time; depends on `nitori_call_macros`.
-- `crates/nitori_call_macros`: the `#[call]` and `#[capability]` procedural macros of `nitori_call`.
+- [`crates/nitori_call`](crates/nitori_call/README.md): operations written as ordinary async functions that run on a resource their caller lends one poll at a time. `AccessOperation` runs the same operation on an existing access or in a call on a receiver. Depends on `nitori_call_macros`.
+- `crates/nitori_call_macros`: the `#[call]` and `#[capability]` macros of `nitori_call` and the `MapIo` derive of `nitori_codec`.
 - [`crates/nitori_driver`](crates/nitori_driver/README.md): a driver for the state of one connection: the structure of nodes, the needs lent to calls and components, capabilities, reaction points, requests and their handlers, and the driver that runs the calls by priority; depends on `nitori_call` and `nitori_clock`.
 - [`crates/nitori_driver_timer`](crates/nitori_driver_timer/README.md): the timer component of `nitori_driver`, which wakes components at the instants they set, and the part that keeps it at the root; depends on `nitori_driver`, `nitori_call` and `nitori_clock`.
 
 ### IO
 
 - [`crates/nitori_io`](crates/nitori_io/README.md): byte IO capabilities, operations and conversion helpers; depends on `nitori_call`.
-- [`crates/nitori_codec`](crates/nitori_codec/README.md): values encoded into the sinks and decoded from the sources of `nitori_io`, and sources written out as the bytes of a value; depends on `nitori_call` and `nitori_io`.
+- [`crates/nitori_codec`](crates/nitori_codec/README.md): values encoded into sinks and decoded from sources of `nitori_io`. Staged values can keep their IO and use the same codec entry points on accesses and receivers. Depends on `nitori_call`, `nitori_call_macros`, and `nitori_io`.
 
 ### Synchronization
 

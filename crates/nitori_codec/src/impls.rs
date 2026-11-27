@@ -1,7 +1,7 @@
 //! The byte values: arrays, slices and `Bytes`.
 use crate::{DecodeFrom, EncodeInto, EncodedLen};
 use bytes::Bytes;
-use nitori_call::AsAccess;
+use nitori_call::ReceiverAccess;
 use nitori_io::{
     Combine, Read, Write,
     calls::{
@@ -20,11 +20,11 @@ pub(crate) fn encoded_length(count: usize) -> u64 {
 /// Reads as many bytes as the array holds, from a source without metadata.
 impl<S, const N: usize> DecodeFrom<S> for [u8; N]
 where
-    S: AsAccess<Family: Read<Metadata = ()>>,
+    S: ReceiverAccess<Family: Read<Metadata = ()>>,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
     async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
-        Ok(source.access().read_array::<N>().await?.value)
+        Ok(source.read_array::<N>().await?.value)
     }
 }
 
@@ -32,12 +32,12 @@ where
 /// returns the merged report.
 impl<S, const N: usize> EncodeInto<S> for [u8; N]
 where
-    S: AsAccess<Family: Write<(), Report: Combine>>,
+    S: ReceiverAccess<Family: Write<(), Report: Combine>>,
 {
     type Output = <S::Family as Write<()>>::Report;
     type Error = WriteArrayError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        sink.access().write_array(self, ()).await
+        sink.write_array(self, ()).await
     }
 }
 
@@ -45,12 +45,12 @@ where
 /// returns the merged report.
 impl<S> EncodeInto<S> for &[u8]
 where
-    S: AsAccess<Family: Write<(), Report: Combine>>,
+    S: ReceiverAccess<Family: Write<(), Report: Combine>>,
 {
     type Output = <S::Family as Write<()>>::Report;
     type Error = WriteAllError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        sink.access().write_all(self, ()).await
+        sink.write_all(self, ()).await
     }
 }
 
@@ -58,12 +58,12 @@ where
 /// returns the merged report.
 impl<S> EncodeInto<S> for Bytes
 where
-    S: AsAccess<Family: Write<(), Report: Combine>>,
+    S: ReceiverAccess<Family: Write<(), Report: Combine>>,
 {
     type Output = <S::Family as Write<()>>::Report;
     type Error = WriteAllError<<S::Family as Write<()>>::Error>;
     async fn encode_into(self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        sink.access().write_all(self, ()).await
+        sink.write_all(self, ()).await
     }
 }
 

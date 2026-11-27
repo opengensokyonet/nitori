@@ -8,8 +8,7 @@ use core::{
     task::{Context, Poll, Waker},
 };
 use nitori_call::{
-    AsAccess, BorrowedAccess, Compose, ComposedReceiver, ConstructedAccess, Receiver,
-    ReceiverAccess, call,
+    AccessPlan, Compose, ComposedReceiver, ProvideAccess, Receiver, ReceiverAccess, call,
 };
 use nitori_io::{
     ChunkSegment, Combine, ExactLen, Infinite, Read, ReadChunk, ReadSegment, Skip,
@@ -219,25 +218,32 @@ fn state_kept_with_a_receiver_merges_every_call() {
 struct Holder<A> {
     io: A,
 }
-impl<A: ReceiverAccess> AsAccess for Holder<A> {
-    type Family = A::Family;
-    type Access = A;
-    fn access(&mut self) -> BorrowedAccess<'_, A> {
-        BorrowedAccess::new(&mut self.io)
+impl<A: ReceiverAccess> ProvideAccess for Holder<A> {
+    type AccessFamily = A::Family;
+    type Lentness = <A as ProvideAccess>::Lentness;
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = A::Family, Lentness = Self::Lentness> {
+        self.io.access_plan()
     }
+}
+
+#[call(sync)]
+async fn read_through_holder<F: Read<Metadata = ZeroRtt, Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> ([u8; 1], [u8; 2], MergedMetadata<ZeroRtt>) {
+    let mut holder = Holder { io };
+    let mut state = MergedMetadata::default();
+    let mut source = MergingSource::new(&mut holder, &mut state);
+    let first = source.read_array::<1>().await.unwrap();
+    let rest = source.read_array::<2>().await.unwrap();
+    (first.value, rest.value, state)
 }
 
 #[test]
 fn a_merging_source_lends_accesses_of_any_source_composed_with_the_state() {
-    let mut holder = Holder {
-        io: ConstructedAccess::new(Received::new(b"xyz", 2)),
-    };
-    let mut state = MergedMetadata::default();
-    let mut source = MergingSource::new(&mut holder, &mut state);
-    let first = nitori_call::__private::run_sync(source.access().read_array::<1>()).unwrap();
-    let rest = nitori_call::__private::run_sync(source.access().read_array::<2>()).unwrap();
-    assert_eq!((first.value, rest.value), (*b"x", *b"yz"));
-    assert_eq!(state, MergedMetadata(ZeroRtt(true)));
+    let result = Received::new(b"xyz", 2).sync_read_through_holder_unpin();
+    assert_eq!(result, (*b"x", *b"yz", MergedMetadata(ZeroRtt(true))));
 }
 
 /// The indices of the segments, in the order merged: a metadata whose

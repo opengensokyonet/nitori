@@ -12,21 +12,17 @@ comes first and leaving the rest in the source it keeps, or read everything
 it needs and keep nothing. The traits are implemented on the values, so a
 crate implements them for its own values over any source it supports.
 
-Sources and sinks are usually `nitori_call::AsAccess` values: every access
-is one, and so is a type of the caller's that lends an access, such as a
-payload that keeps its stream composed with what is left of it. The
-implementations in this crate are for every `S: AsAccess` whose family has
-the capabilities they need. Decoding from a borrowed source, as
-`io.decode::<V>()` does, is `Send` when the source is.
+Implement the traits for any `S: nitori_call::ReceiverAccess` whose family
+has the capabilities the codec needs. This includes call slots and types
+that expose an access through `ProvideAccess`. The access may be borrowed
+with `&mut`, and a future borrowing a `Send` source or sink can itself be
+`Send`.
 
-Inside an operation, `Decode` and `Encode` turn the traits around into
-methods of an access: `io.decode::<V>()` and `io.encode(value)`, which
-borrow the access for the value. On an executor such as a memory buffer,
-`DecodeHostExt` and `EncodeHostExt` run them as the whole operation of a
-call, with `sync_` versions for executors that never wait. The value is
-decoded from the slot of the call, so a value that keeps its source is
-decoded inside an operation instead. `use nitori_codec::prelude::*` imports
-the traits and the extension traits.
+Inside an operation, `Decode` and `Encode` borrow an access through
+`io.decode::<V>()` and `io.encode(value)`. On an executor such as a
+memory buffer, `DecodeHostExt` and `EncodeHostExt` run the codec as the whole
+operation of a call, with `sync_` versions for executors that never wait.
+Use `nitori_codec::prelude::*` to import the codec and extension traits.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
@@ -58,6 +54,51 @@ encode. They write with the write options `()`, into sinks of
 `Write<()>` (see [Write options](#write-options)). An encoding returns
 the sink's reports of the bytes written, merged with `Combine`.
 
+## Values that keep their IO
+
+`DecodeFrom<S, How>` and `EncodeInto<S, How>` default to
+`nitori_call::OnAccess`. The framework also supplies `OnReceiver` for
+decoders whose value keeps the source and encoders whose output keeps the
+sink. It runs the access implementation in a call, then puts the receiver
+back into the value. The compiler can infer the mode from the IO argument.
+
+Implement `staged::MapIo` for the value that holds the IO. The derive
+supports structs and enums. Use `#[map_io(S)]` when `S` is the IO type
+parameter, or `#[map_io(within = P)]` when a field of type `P: MapIo`
+holds it. Each variant keeps the IO in one field. `take_io(value)`
+returns the value with a `Vacant` slot and the IO it held.
+`MapIo::map_io` can fill that slot with another IO object.
+
+```rust
+use nitori_call::ReceiverAccess;
+use nitori_codec::{prelude::*, staged::{MapIo, take_io}};
+use nitori_io::{Read, calls::ReadArrayError};
+
+#[derive(MapIo)]
+#[map_io(S)]
+struct Tagged<S> {
+    tag: u8,
+    source: S,
+}
+
+impl<S: ReceiverAccess<Family: Read<Metadata = ()>>> DecodeFrom<S> for Tagged<S> {
+    type Error = ReadArrayError<<S::Family as Read>::Error>;
+
+    async fn decode_from(mut source: S) -> Result<Self, Self::Error> {
+        let [tag] = source.decode::<[u8; 1]>().await?;
+        Ok(Self { tag, source })
+    }
+}
+
+async fn read_tag() {
+    let tagged = Tagged::decode_from(b"abc".as_slice()).await.unwrap();
+    let (tagged, mut source) = take_io(tagged);
+    assert_eq!(tagged.tag, b'a');
+    assert_eq!(source.sync_decode_unpin::<[u8; 2]>().unwrap(), *b"bc");
+}
+# nitori_call::__private::run_sync(read_tag());
+```
+
 ## Metadata
 
 A source's reads carry metadata, such as whether the bytes arrived in
@@ -83,7 +124,7 @@ A source's reads carry metadata, such as whether the bytes arrived in
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{AsAccess, ReceiverAccess, call};
+use nitori_call::{ReceiverAccess, call};
 use nitori_codec::prelude::*;
 use nitori_io::{Combine, Read, Value, calls::ReadArrayError};
 
@@ -94,14 +135,14 @@ struct Header<M = ()> {
 }
 impl<S, M> DecodeFrom<S> for Header<M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Header {
-            kind: Value::decode_from(io.access()).await?,
-            length: Value::decode_from(io.access()).await?,
+            kind: Value::decode_from(&mut io).await?,
+            length: Value::decode_from(&mut io).await?,
         })
     }
 }
@@ -160,7 +201,7 @@ of a `Value` is its value's.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{AsAccess, ComposedReceiver};
+use nitori_call::{ComposedReceiver, ReceiverAccess};
 use nitori_codec::prelude::*;
 use nitori_io::{
     Combine, Value, Write,
@@ -175,14 +216,14 @@ struct Header<O = ()> {
 }
 impl<S, O> EncodeInto<S> for Header<O>
 where
-    S: AsAccess<Family: Write<O, Report: Combine>>,
+    S: ReceiverAccess<Family: Write<O, Report: Combine>>,
     O: Unpin,
 {
     type Output = <S::Family as Write<O>>::Report;
     type Error = WriteArrayError<<S::Family as Write<O>>::Error>;
     async fn encode_into(self, mut io: S) -> Result<Self::Output, Self::Error> {
-        let kind = self.kind.encode_into(io.access()).await?;
-        Ok(kind.combine(self.length.encode_into(io.access()).await?))
+        let kind = self.kind.encode_into(&mut io).await?;
+        Ok(kind.combine(self.length.encode_into(&mut io).await?))
     }
 }
 
@@ -233,28 +274,46 @@ in 64 bits. A bare source is not a value: which pairing it would take
 cannot be told from it, and a crate that keeps a source in a type of its own
 encodes that type as it chooses.
 
-```compile_fail,E0271
-use nitori_call::ConstructedAccess;
+```compile_fail,E0277
+#![feature(impl_trait_in_assoc_type)]
+use nitori_call::{ReceiverAccess, call};
 use nitori_codec::prelude::*;
+use nitori_io::{Read, Write};
 
-let mut output = Vec::new();
-output.sync_encode_unpin(ConstructedAccess::new(&b"payload"[..])).unwrap();
+#[call(sync)]
+async fn write_bare_source<F: Read<Metadata = ()>, G: Write<()>>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+) {
+    let _ = sink.encode(source).await;
+}
 ```
 
 ```rust
+#![feature(impl_trait_in_assoc_type)]
 use core::num::NonZeroUsize;
-use nitori_call::{Composed, ConstructedAccess};
+use nitori_call::{ReceiverAccess, call};
 use nitori_codec::{payload::Chunks, prelude::*};
-use nitori_io::adapters::ReadLimit;
+use nitori_io::{ReadChunk, Write, adapters::ReadLimit};
+
+#[call(sync)]
+async fn write_bounded<F, G>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    output: &mut impl ReceiverAccess<Family = G>,
+) -> u64
+where
+    F: ReadChunk<Metadata = (), Error = !>,
+    G: Write<(), Report = (), Error = !>,
+{
+    output.encode(Chunks {
+        source: source.compose(ReadLimit(7u8)),
+        chunk_maximum: NonZeroUsize::new(4).unwrap(),
+    }).await.unwrap().count
+}
 
 let mut source = &b"payload and more"[..];
 let mut output = Vec::new();
-let total = output
-    .sync_encode_unpin(Chunks {
-        source: Composed::new(ConstructedAccess::new(&mut source), ReadLimit(7u8)),
-        chunk_maximum: NonZeroUsize::new(4).unwrap(),
-    })
-    .unwrap();
-assert_eq!((total.count, &output[..]), (7, &b"payload"[..]));
+let count = (&mut source, &mut output).sync_write_bounded_unpin();
+assert_eq!((count, &output[..]), (7, &b"payload"[..]));
 assert_eq!(source, b" and more");
 ```

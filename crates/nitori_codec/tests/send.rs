@@ -3,13 +3,14 @@
 //! composite values with metadata, values read from a type that keeps the
 //! source, and values written with options, through generic accesses and
 //! concrete ones.
+#![feature(impl_trait_in_assoc_type)]
 use bytes::{Buf, BufMut};
 use core::{
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AsAccess, BorrowedAccess, Composed, ConstructedAccess, ReceiverAccess};
+use nitori_call::{AccessPlan, Composed, ProvideAccess, ReceiverAccess, call};
 use nitori_codec::prelude::*;
 use nitori_io::{
     Combine, Read, ReadSegment, Value, Write, WriteSegment,
@@ -61,9 +62,6 @@ impl Read for Received {
     }
 }
 
-type Plain = ConstructedAccess<&'static [u8]>;
-type Early = ConstructedAccess<Received>;
-
 /// A composite value: two base fields with the metadata of their bytes.
 #[derive(Debug, PartialEq)]
 struct Pair<M = ()> {
@@ -72,14 +70,14 @@ struct Pair<M = ()> {
 }
 impl<S, M> DecodeFrom<S> for Pair<M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: Value::decode_from(io.access()).await?,
-            second: Value::decode_from(io.access()).await?,
+            first: Value::decode_from(&mut io).await?,
+            second: Value::decode_from(&mut io).await?,
         })
     }
 }
@@ -89,11 +87,13 @@ where
 struct Payload<S> {
     io: Composed<S, ReadLimit<u64>>,
 }
-impl<S: AsAccess<Family: Read>> AsAccess for &mut Payload<S> {
-    type Family = Limited<nitori_call::Lent<S::Family>, ReadLimit<u64>>;
-    type Access = Composed<S, ReadLimit<u64>>;
-    fn access(&mut self) -> BorrowedAccess<'_, Self::Access> {
-        BorrowedAccess::new(&mut self.io)
+impl<S: ReceiverAccess<Family: Read>> ProvideAccess for Payload<S> {
+    type AccessFamily = Limited<nitori_call::Lent<S::Family>, ReadLimit<u64>>;
+    type Lentness = <S as ProvideAccess>::Lentness;
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        self.io.access_plan()
     }
 }
 
@@ -128,46 +128,93 @@ async fn encode_through<I: ReceiverAccess<Family: Write<(), Report = ()>>>(io: &
     io.encode(*b"ab").await.is_ok() && io.encode(&b"cd"[..]).await.is_ok()
 }
 
+#[call]
+async fn arrays<F: Read<Metadata = (), Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> ([u8; 2], [u8; 1]) {
+    let first = io.decode::<[u8; 2]>().await.unwrap();
+    let last = <[u8; 1]>::decode_from(&mut &mut *io).await.unwrap();
+    (first, last)
+}
+
 #[test]
 fn an_array_from_a_borrowed_concrete_source_is_send() {
-    let mut io: Plain = ConstructedAccess::new(b"abc");
-    assert_eq!(send(io.decode::<[u8; 2]>()).unwrap(), *b"ab");
-    assert_eq!(send(<[u8; 1]>::decode_from(&mut &mut io)).unwrap(), *b"c");
+    let wire = *b"abc";
+    let mut io = wire.as_slice();
+    assert_eq!(send(io.arrays_unpin()), (*b"ab", *b"c"));
+}
+
+#[call]
+async fn generic_arrays<F: Read<Metadata = ()>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> (Option<[u8; 2]>, Option<[u8; 2]>) {
+    (array_through(io).await, array_through(&mut &mut *io).await)
 }
 
 #[test]
 fn an_array_through_a_generic_access_is_send() {
-    let mut io: Plain = ConstructedAccess::new(b"abcd");
-    assert_eq!(send(array_through(&mut io)), Some(*b"ab"));
-    assert_eq!(send(array_through(&mut &mut io)), Some(*b"cd"));
+    let mut io = &b"abcd"[..];
+    assert_eq!(
+        send(io.generic_arrays_unpin()),
+        (Some(*b"ab"), Some(*b"cd"))
+    );
+}
+
+#[call]
+async fn pairs<F: Read<Metadata = ZeroRtt, Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> (Pair<ZeroRtt>, Pair<ZeroRtt>) {
+    let first = io.decode::<Pair<ZeroRtt>>().await.unwrap();
+    let second = pair_through(&mut &mut *io).await.unwrap();
+    (first, second)
 }
 
 #[test]
 fn a_composite_with_metadata_from_a_borrowed_source_is_send() {
-    let mut io: Early = ConstructedAccess::new(Received { data: b"abcd" });
-    let pair = send(io.decode::<Pair<ZeroRtt>>()).unwrap();
-    assert_eq!(pair.first.metadata, ZeroRtt(true));
-    let pair = send(pair_through(&mut &mut io)).unwrap();
-    assert_eq!((pair.first.value, pair.second.value), (*b"c", *b"d"));
+    let mut io = Received { data: b"abcd" };
+    let (first, second) = send(io.pairs_unpin());
+    assert_eq!(first.first.metadata, ZeroRtt(true));
+    assert_eq!((second.first.value, second.second.value), (*b"c", *b"d"));
+}
+
+#[call]
+async fn through_early_payload<F: Read<Metadata = ZeroRtt>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Option<(Pair<ZeroRtt>, [u8; 1])> {
+    from_payload(io).await
+}
+
+#[call]
+async fn through_plain_payload<F: Read<Metadata = ()>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Option<(Pair, [u8; 1])> {
+    from_payload(&mut &mut *io).await
 }
 
 #[test]
 fn values_from_a_type_that_keeps_a_borrowed_source_are_send() {
-    let mut io: Early = ConstructedAccess::new(Received { data: b"abcd" });
-    let (pair, last) = send(from_payload(&mut io)).unwrap();
+    let mut io = Received { data: b"abcd" };
+    let (pair, last) = send(io.through_early_payload_unpin()).unwrap();
     assert_eq!((pair.first.value, last), (*b"a", *b"c"));
-    let mut plain: Plain = ConstructedAccess::new(b"xyz");
-    let (pair, last) = send(from_payload(&mut &mut plain)).unwrap();
+    let mut plain = &b"xyz"[..];
+    let (pair, last) = send(plain.through_plain_payload_unpin()).unwrap();
     assert_eq!((pair.second.value, last), (*b"y", *b"z"));
+}
+
+#[call]
+async fn encode_bytes<F: Write<(), Report = (), Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) {
+    io.encode(*b"xy").await.unwrap();
+    assert!(encode_through(io).await);
+    assert!(encode_through(&mut &mut *io).await);
 }
 
 #[test]
 fn encoding_into_a_borrowed_sink_is_send() {
-    let mut io = ConstructedAccess::new(Vec::new());
-    send(io.encode(*b"xy")).unwrap();
-    assert!(send(encode_through(&mut io)));
-    assert!(send(encode_through(&mut &mut io)));
-    assert_eq!(io.into_inner(), b"xyabcdabcd");
+    let mut io = Vec::new();
+    send(io.encode_bytes_unpin());
+    assert_eq!(io, b"xyabcdabcd");
 }
 
 /// How urgently a segment is to be sent.
@@ -216,18 +263,26 @@ where
     .is_ok()
 }
 
-#[test]
-fn a_value_with_options_into_a_borrowed_sink_is_send() {
-    let mut io = ConstructedAccess::new(Prioritized::default());
-    send(io.encode(Value {
+#[call]
+async fn encode_prioritized<F: Write<Priority, Report = (), Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) {
+    io.encode(Value {
         value: *b"xy",
         metadata: Priority(1),
-    }))
+    })
+    .await
     .unwrap();
-    assert!(send(value_through(&mut io, Priority(2))));
-    assert!(send(value_through(&mut &mut io, Priority(3))));
+    assert!(value_through(io, Priority(2)).await);
+    assert!(value_through(&mut &mut *io, Priority(3)).await);
+}
+
+#[test]
+fn a_value_with_options_into_a_borrowed_sink_is_send() {
+    let mut io = Prioritized::default();
+    send(io.encode_prioritized_unpin());
     assert_eq!(
-        io.into_inner().segments,
+        io.segments,
         [
             (b"xy".to_vec(), Priority(1)),
             (b"ab".to_vec(), Priority(2)),

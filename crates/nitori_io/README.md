@@ -428,9 +428,9 @@ state, which `into_state` returns. Chunk reads, skipping and the exact
 length pass through; skipping reports no metadata, so that of skipped bytes
 does not reach the state. Kept with a receiver in
 a `ComposedReceiver`, the state merges every call on it.
-`adapters::MergingSource` does the same for any `nitori_call::AsAccess`
-source, an access or a type that lends one, composing the state on the
-access the source lends.
+`adapters::MergingSource` borrows any `nitori_call::ReceiverAccess` and
+merges read metadata into a separately borrowed `MergedMetadata` state.
+It provides the adapted access through `nitori_call::ProvideAccess`.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]

@@ -8,9 +8,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{
-    AsAccess, BorrowedAccess, Composed, ConstructedAccess, Lent, ReceiverAccess, call,
-};
+use nitori_call::{AccessPlan, Composed, Lent, ProvideAccess, ReceiverAccess, call};
 use nitori_codec::{payload::Chunks, prelude::*};
 use nitori_io::{
     Combine, ExactLen, Read, ReadChunk, ReadSegment, Value, Write,
@@ -62,15 +60,15 @@ impl Read for Received {
     }
 }
 
-fn stream(data: &'static [u8], early: usize) -> ConstructedAccess<Received> {
-    ConstructedAccess::new(Received { data, early })
+fn stream(data: &'static [u8], early: usize) -> Received {
+    Received { data, early }
 }
 
 #[test]
 fn a_base_value_is_read_with_the_metadata_of_its_bytes() {
     let mut io = stream(b"abcd", 3);
-    let first = nitori_call::__private::run_sync(io.decode::<Value<[u8; 2], ZeroRtt>>());
-    let second = nitori_call::__private::run_sync(io.decode::<Value<[u8; 2], ZeroRtt>>());
+    let first = io.sync_decode_unpin::<Value<[u8; 2], ZeroRtt>>();
+    let second = io.sync_decode_unpin::<Value<[u8; 2], ZeroRtt>>();
     assert_eq!(
         (first.unwrap(), second.unwrap()),
         (
@@ -85,7 +83,7 @@ fn a_base_value_is_read_with_the_metadata_of_its_bytes() {
         )
     );
     let mut later = stream(b"ef", 0);
-    let third = nitori_call::__private::run_sync(later.decode::<Value<[u8; 2], ZeroRtt>>());
+    let third = later.sync_decode_unpin::<Value<[u8; 2], ZeroRtt>>();
     assert_eq!(third.unwrap().metadata, ZeroRtt(false));
 }
 
@@ -94,11 +92,13 @@ fn a_base_value_is_read_with_the_metadata_of_its_bytes() {
 struct Payload<S> {
     io: Composed<S, ReadLimit<u64>>,
 }
-impl<S: AsAccess<Family: Read>> AsAccess for &mut Payload<S> {
-    type Family = Limited<Lent<S::Family>, ReadLimit<u64>>;
-    type Access = Composed<S, ReadLimit<u64>>;
-    fn access(&mut self) -> BorrowedAccess<'_, Self::Access> {
-        BorrowedAccess::new(&mut self.io)
+impl<S: ReceiverAccess<Family: Read>> ProvideAccess for Payload<S> {
+    type AccessFamily = Limited<Lent<S::Family>, ReadLimit<u64>>;
+    type Lentness = <S as ProvideAccess>::Lentness;
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        self.io.access_plan()
     }
 }
 
@@ -109,18 +109,18 @@ struct Frame<P, M = ()> {
     payload: P,
 }
 
-type FrameError<S> = ReadArrayError<<<S as AsAccess>::Family as Read>::Error>;
+type FrameError<S> = ReadArrayError<<<S as ReceiverAccess>::Family as Read>::Error>;
 
 /// In stages: the header now, the payload from the source it keeps.
 impl<S, M> DecodeFrom<S> for Frame<Payload<S>, M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = FrameError<S>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
-        let kind = Value::<[u8; 1], M>::decode_from(io.access()).await?;
-        let length = Value::<[u8; 1], M>::decode_from(io.access()).await?;
+        let kind = Value::<[u8; 1], M>::decode_from(&mut io).await?;
+        let length = Value::<[u8; 1], M>::decode_from(&mut io).await?;
         let [left] = length.value;
         Ok(Frame {
             kind,
@@ -135,7 +135,7 @@ where
 /// Whole: the payload read by a nested decoder.
 impl<S, M, P> DecodeFrom<S> for Frame<P, M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
     P: for<'a> DecodeFrom<&'a mut Payload<S>, Error = FrameError<S>>,
 {
@@ -163,24 +163,23 @@ struct Pair<M = ()> {
 }
 impl<S, M> DecodeFrom<S> for Pair<M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = FrameError<S>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: Value::decode_from(io.access()).await?,
-            second: Value::decode_from(io.access()).await?,
+            first: Value::decode_from(&mut io).await?,
+            second: Value::decode_from(&mut io).await?,
         })
     }
 }
 
-#[test]
-fn a_frame_in_stages_keeps_its_header_and_the_payload_reports_its_own() {
-    // The type byte and the length byte arrived in 0-RTT, the payload after.
-    let mut io = stream(b"\x07\x02xyz", 2);
-    let mut frame =
-        nitori_call::__private::run_sync(io.decode::<Frame<Payload<_>, ZeroRtt>>()).unwrap();
+#[call(sync)]
+async fn frame_in_stages<F: Read<Metadata = ZeroRtt, Error = !>>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) {
+    let mut frame = io.decode::<Frame<Payload<_>, ZeroRtt>>().await.unwrap();
     assert_eq!(
         (frame.kind, frame.length),
         (
@@ -194,13 +193,11 @@ fn a_frame_in_stages_keeps_its_header_and_the_payload_reports_its_own() {
             }
         )
     );
-    let mut payload = &mut frame.payload;
-    let byte = nitori_call::__private::run_sync(payload.access().read_array::<1>()).unwrap();
+    let byte = frame.payload.read_array::<1>().await.unwrap();
     assert_eq!((byte.value, byte.metadata), (*b"x", ZeroRtt(false)));
-    let next = nitori_call::__private::run_sync(Value::<[u8; 1], ZeroRtt>::decode_from(
-        &mut frame.payload,
-    ))
-    .unwrap();
+    let next = Value::<[u8; 1], ZeroRtt>::decode_from(&mut frame.payload)
+        .await
+        .unwrap();
     assert_eq!(
         next,
         Value {
@@ -208,18 +205,27 @@ fn a_frame_in_stages_keeps_its_header_and_the_payload_reports_its_own() {
             metadata: ZeroRtt(false)
         }
     );
-    // The payload ends at its length.
-    let mut payload = &mut frame.payload;
-    let end = nitori_call::__private::run_sync(payload.access().read_array::<1>());
-    assert!(matches!(end, Err(ReadArrayError::Incomplete { .. })));
+    assert!(matches!(
+        frame.payload.read_array::<1>().await,
+        Err(ReadArrayError::Incomplete { .. })
+    ));
+}
+
+#[test]
+fn a_frame_in_stages_keeps_its_header_and_the_payload_reports_its_own() {
+    // The type byte and the length byte arrived in 0-RTT, the payload after.
+    let mut receiver = stream(b"\x07\x02xyz", 2);
+    receiver.sync_frame_in_stages_unpin();
+    assert_eq!(receiver.data, b"z");
 }
 
 #[test]
 fn a_composite_payload_takes_the_same_metadata_without_another_wrapper() {
     // Only the type byte arrived in 0-RTT.
     let mut io = stream(b"\x07\x02ab", 1);
-    let frame =
-        nitori_call::__private::run_sync(io.decode::<Frame<Pair<ZeroRtt>, ZeroRtt>>()).unwrap();
+    let frame = io
+        .sync_decode_unpin::<Frame<Pair<ZeroRtt>, ZeroRtt>>()
+        .unwrap();
     assert_eq!(frame.kind.metadata, ZeroRtt(true));
     assert_eq!(frame.length.metadata, ZeroRtt(false));
     assert_eq!(
@@ -392,12 +398,12 @@ fn finish<F: core::future::Future>(future: F) -> (F::Output, usize) {
 
 #[test]
 fn metadata_merges_once_per_segment_in_order_across_pending() {
-    let mut io = ConstructedAccess::new(Waiting {
+    let mut io = Waiting {
         data: b"abc",
         next: 0,
         ready: false,
-    });
-    let (decoded, pendings) = finish(io.decode::<Value<[u8; 3], Order>>());
+    };
+    let (decoded, pendings) = finish(io.decode_unpin::<Value<[u8; 3], Order>>());
     assert_eq!(
         decoded.unwrap(),
         Value {

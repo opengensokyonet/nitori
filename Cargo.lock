@@ -227,7 +227,9 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "nitori_call",
+ "nitori_call_macros",
  "nitori_io",
+ "pin-project-lite",
  "snafu",
 ]
 

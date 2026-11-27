@@ -8,7 +8,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{AsAccess, ComposedReceiver, ConstructedAccess, ReceiverAccess, call};
+use nitori_call::{ComposedReceiver, ReceiverAccess, call};
 use nitori_codec::{payload::Buffered, prelude::*};
 use nitori_io::{
     Combine, Read, ReadSegment, Value, Write, WriteSegment,
@@ -106,28 +106,28 @@ struct Pair<O> {
 }
 impl<S, M> DecodeFrom<S> for Pair<M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
 {
     type Error = ReadArrayError<<S::Family as Read>::Error>;
     async fn decode_from(mut io: S) -> Result<Self, Self::Error> {
         Ok(Pair {
-            first: Value::decode_from(io.access()).await?,
-            second: Value::decode_from(io.access()).await?,
+            first: Value::decode_from(&mut io).await?,
+            second: Value::decode_from(&mut io).await?,
         })
     }
 }
 /// Writes each field with its own options, whatever they are.
 impl<S, O> EncodeInto<S> for Pair<O>
 where
-    S: AsAccess<Family: Write<O, Report: Combine>>,
+    S: ReceiverAccess<Family: Write<O, Report: Combine>>,
     O: Unpin,
 {
     type Output = <S::Family as Write<O>>::Report;
     type Error = WriteArrayError<<S::Family as Write<O>>::Error>;
     async fn encode_into(self, mut io: S) -> Result<Self::Output, Self::Error> {
-        let first = self.first.encode_into(io.access()).await?;
-        let second = self.second.encode_into(io.access()).await?;
+        let first = self.first.encode_into(&mut io).await?;
+        let second = self.second.encode_into(&mut io).await?;
         Ok(first.combine(second))
     }
 }
@@ -197,6 +197,23 @@ fn a_decoded_composite_is_written_with_options_mapped_from_its_metadata() {
     assert_eq!(sink.segments, [segment(b"a", 0), segment(b"b", 9)]);
 }
 
+#[call(sync)]
+async fn write_payload<F, G>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+) -> nitori_io::calls::CopyTotal<ZeroRtt, ()>
+where
+    F: Read<Metadata = ZeroRtt, Error = !>,
+    G: Write<ZeroRtt, Report = (), Error = !>,
+{
+    sink.encode(Buffered {
+        source,
+        buffer: [0u8; 4],
+    })
+    .await
+    .unwrap()
+}
+
 #[test]
 fn a_buffered_payload_writes_each_segment_with_options_mapped_from_its_metadata() {
     let mut sink = ComposedReceiver::new(
@@ -206,15 +223,11 @@ fn a_buffered_payload_writes_each_segment_with_options_mapped_from_its_metadata(
             late: Priority(9),
         }),
     );
-    let total = sink
-        .sync_encode_unpin(Buffered {
-            source: ConstructedAccess::new(Received {
-                data: b"abc",
-                early: 1,
-            }),
-            buffer: [0u8; 4],
-        })
-        .unwrap();
+    let mut source = Received {
+        data: b"abc",
+        early: 1,
+    };
+    let total = (&mut source, &mut sink).sync_write_payload_unpin();
     assert_eq!((total.count, total.metadata), (3, ZeroRtt(true)));
     let (sink, _) = sink.into_parts();
     assert_eq!(

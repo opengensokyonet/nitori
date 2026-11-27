@@ -4,22 +4,26 @@
 #![forbid(unsafe_code)]
 
 use core::future::Future;
-use nitori_call::ReceiverAccess;
+use nitori_call::{AccessMode, OnAccess, ReceiverAccess};
 
 pub mod host;
 mod impls;
 pub mod payload;
 pub mod prelude;
+pub mod staged;
 mod value;
 
 /// Decode a value from a source of type `S`.
 ///
 /// `S` is the source by value or as `&mut`. Implement it on the value: for
-/// every source that can provide its bytes, usually `S: AsAccess` with a
+/// every source that can provide its bytes, usually `S: ReceiverAccess` with a
 /// bound on the family, or for a source type of the value's own crate. A
 /// value that keeps `S` is decoded in stages: it reads what comes first
-/// and leaves the rest in the source it keeps.
-pub trait DecodeFrom<S>: Sized {
+/// and leaves the rest in the source it keeps. For such values implementing
+/// [`staged::MapIo`], the framework derives the
+/// [`OnReceiver`](nitori_call::OnReceiver) implementation from the one on
+/// [`OnAccess`].
+pub trait DecodeFrom<S, How: AccessMode = OnAccess>: Sized {
     /// Why decoding failed.
     type Error;
     /// Read the value from `source`.
@@ -32,8 +36,10 @@ pub trait DecodeFrom<S>: Sized {
 /// chooses its output: usually the sink's reports of the bytes written,
 /// merged; for a source written out as a payload, also the count and the
 /// merged metadata of what was read; for a value written in stages, a value
-/// that keeps the sink to write the rest.
-pub trait EncodeInto<S> {
+/// that keeps the sink to write the rest. When that output implements
+/// [`staged::MapIo`], the framework can run the encoding in a call on the
+/// receiver held by value and return it in the output.
+pub trait EncodeInto<S, How: AccessMode = OnAccess> {
     /// What encoding produced.
     type Output;
     /// Why encoding failed.

@@ -453,10 +453,8 @@ recovers it and ends the borrow. `Composed` holds its parent by value, so
 `Composed::new(io, state)` adapts an access passed in by value, such as the `I`
 of a function `fn(io: I) -> Composed<I, S>` that wraps the access it is given;
 `into_parts` returns the parent and the state, and `parent_mut` and
-`state_mut` reach them between accesses. The parent can also be any
-`AsAccess` source (below), so a type that keeps a source and the state keeps
-them as one `Composed`. `Compose::compose` takes the parent view by
-value. On an access the parent view is only borrowed for that access, so the
+`state_mut` reach them between accesses. `Compose::compose` takes the parent
+view by value. On an access the parent view is only borrowed for that access, so the
 state composes on `Lent<F>`, whose view is a `ViewLoan<'view, F>` that hides
 the parent view's inner lifetime: `loan.with(|access| ..)` lends it back for
 one capability call, and `loan.project(|access| ..)` gives the loan up for a
@@ -471,16 +469,21 @@ each call on it, a cancelled call included, and calls on it can compose again.
 
 ## Receiver access
 
-`ReceiverAccess` is implemented by the slot a root operation receives, by
-`ConstructedAccess`, by `Composed`, and by `&mut A`; downstream crates do not
-implement it. Each use
-borrows the access mutably, so two operations cannot use it at the same time.
-A slot, and every access derived from it, never leaves the operation. With the
-`std` feature such an access is `Send` but not `Sync`: within a poll it may move
-to a scoped thread, which can ask for a view, but only the thread polling the
-call may use the view, and an access elsewhere panics. Without `std` it is
-neither `Send` nor `Sync`. A `ConstructedAccess`, described below, is held
-outside any operation and is `Send` and `Sync` when its receiver is.
+`ReceiverAccess` is implemented by the framework for every `ProvideAccess`,
+including call slots, compositions, and mutable borrows of accesses.
+Each use borrows the access mutably, so two operations cannot use it at the
+same time. A slot and every access derived from it stay within the
+operation. With the `std` feature, a slot is `Send` and only the thread
+polling the call may use its view. Without `std` a slot is neither
+`Send` nor `Sync`.
+
+A type that holds an access can implement `ProvideAccess` by forwarding its
+stored access's `access_plan` or by calling `project_access` with a
+`ViewProjection`. The framework-issued plan carries the family and whether
+the view is at hand (`AtHand`) or lent on demand (`OnPoll`). The framework
+gives `LentAccess` to types that provide `AtHand` plans. A wrapper can
+expose its adapted access while keeping its parent and state private.
+
 Hand-written leaf operations call `poll_access`, which lends the current view
 to a callback:
 
@@ -505,15 +508,17 @@ When the call is polled without a view, the first access records a request
 and the poll ends with `CallPoll::NeedsView`; polls that touch no resource need
 no view.
 
-A type that holds its access, such as a stream reading one record after
-another, is written once for every access. `ConstructedAccess` holds a
-receiver and constructs its view at each access, so outside any call the same
-type holds one and lives across awaits; inside an operation it holds the
-operation's access:
+## Operations on an access or a receiver
+
+Use `AccessOperation<S>` for an operation written on an access that can
+also run as a call on a receiver. A type such as a stream parser can hold
+its IO separately from its parsing state. The operation borrows both
+through the same method inside and outside a call. The compiler infers
+`OnAccess` or `OnReceiver`, the two forms of `AccessMode`.
 
 ```rust
 #![feature(impl_trait_in_assoc_type)]
-use nitori_call::{ConstructedAccess, ReceiverAccess, call};
+use nitori_call::{AccessMode, AccessOperation, ReceiverAccess, call};
 use nitori_io::prelude::*;
 # use std::{future::Future, pin::pin, task::{Context, Poll, Waker}};
 # fn ready<T>(future: impl Future<Output = T>) -> T {
@@ -523,52 +528,51 @@ use nitori_io::prelude::*;
 #     }
 # }
 
-/// Counts the bytes it reads from the access it holds.
 struct Counting<I> {
     io: I,
     count: usize,
 }
-impl<I: ReceiverAccess<Family: Read<Metadata = ()>>> Counting<I> {
-    async fn next_byte(&mut self) -> Option<u8> {
-        let [byte] = self.io.read_array::<1>().await.ok()?.value;
-        self.count += 1;
+
+struct NextByte<'a>(&'a mut usize);
+
+impl<A: ReceiverAccess<Family: Read<Metadata = ()>>> AccessOperation<A> for NextByte<'_> {
+    type Output = Option<u8>;
+
+    async fn run_on(self, io: &mut A) -> Option<u8> {
+        let [byte] = io.read_array::<1>().await.ok()?.value;
+        *self.0 += 1;
         Some(byte)
     }
 }
 
+impl<I> Counting<I> {
+    fn next_byte<'a, How: AccessMode>(&'a mut self) -> impl Future<Output = Option<u8>>
+    where
+        NextByte<'a>: AccessOperation<I, How, Output = Option<u8>>,
+    {
+        NextByte(&mut self.count).run_on(&mut self.io)
+    }
+}
+
 #[call(sync)]
-async fn first_two<F: Read<Metadata = ()>, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> [Option<u8>; 2] {
+async fn first_two<A: ReceiverAccess<Family: Read<Metadata = ()>>>(io: &mut A) -> [Option<u8>; 2] {
     let mut counting = Counting { io, count: 0 };
     [counting.next_byte().await, counting.next_byte().await]
 }
 
-fn main() {
-    let mut input = b"ab".as_slice();
-    assert_eq!(input.sync_first_two_unpin(), [Some(b'a'), Some(b'b')]);
+let mut input = b"ab".as_slice();
+assert_eq!(input.sync_first_two_unpin(), [Some(b'a'), Some(b'b')]);
 
-    let mut counting = Counting { io: ConstructedAccess::new(b"xyz".as_slice()), count: 0 };
-    assert_eq!(ready(counting.next_byte()), Some(b'x'));
-    // later, after other work
-    assert_eq!(ready(counting.next_byte()), Some(b'y'));
-    assert_eq!((counting.count, counting.io.into_inner()), (2, b"z".as_slice()));
-}
+let mut counting = Counting { io: b"xyz".as_slice(), count: 0 };
+assert_eq!(ready(counting.next_byte()), Some(b'x'));
+assert_eq!(ready(counting.next_byte()), Some(b'y'));
+assert_eq!((counting.count, counting.io), (2, b"z".as_slice()));
 ```
 
-Its view is always at hand: an access never waits for it, and a release point
-completes at once. The receiver must be `Unpin`; pin one that is not with
-`pin!` or `Box::pin` and hold the pinned pointer.
-
-Such a type can also stand for the access it holds. `AsAccess::access` returns
-a `BorrowedAccess`, which borrows the stored access exclusively and exposes
-its receiver operations. A payload can keep `Composed<S, ReadLimit<u64>>`
-and lend reads through its limit while keeping control of the stream and
-the limit itself. The type of the stored access is fixed across borrows,
-so the compiler can use that type to check a future holding the loan for
-`Send`.
-Every access lends itself, so code written for `S: AsAccess` takes accesses
-and such types alike, as the values of `nitori_codec` decode from any of them.
+On a receiver each operation opens one call, which lends one view for each
+poll. The state remains in the parser when an operation is cancelled, so
+the parser can keep track of partial progress. A receiver passed directly
+must be `Unpin`; a pinned stack or box pointer also works.
 
 ## Calls
 
@@ -776,8 +780,7 @@ hold no resource between polls.
 
 An operation's destructor can run outside a poll, when the call is dropped, and
 there is no view then. `with` panics in that case. A destructor uses `try_with`,
-which returns `None` there, on one access or on a tuple. A `ConstructedAccess`
-has its view outside a poll too: `try_with` on it always runs.
+which returns `None` there, on one access or on a tuple.
 
 ## Executors
 

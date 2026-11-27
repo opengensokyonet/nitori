@@ -172,7 +172,7 @@
     clippy::std_instead_of_alloc,
     clippy::alloc_instead_of_core
 )]
-#![cfg_attr(feature = "tokio-sync", feature(impl_trait_in_assoc_type))]
+#![feature(impl_trait_in_assoc_type)]
 #![cfg_attr(feature = "fn-operation", feature(async_fn_traits, unboxed_closures))]
 
 extern crate alloc;
@@ -186,13 +186,16 @@ pub use receiver::{BorrowedReceiver, Direct, DirectView, Receiver, ReceiverFamil
 mod loan;
 pub use loan::{Lent, ViewLoan, ViewOperation};
 mod access;
-pub use access::{Access, ConstructedAccess, ReceiverAccess, ReceiverSlot, ReleaseView};
-mod as_access;
-pub use as_access::{AsAccess, BorrowedAccess};
+pub use access::{
+    Access, AccessPlan, AtHand, Lentness, OnPoll, ProvideAccess, ReceiverAccess, ReceiverSlot,
+    ReleaseView,
+};
+mod access_operation;
+pub use access_operation::{AccessMode, AccessOperation, OnAccess, OnReceiver};
 mod lent;
 pub use lent::{LentAccess, LentAccesses, LentCall, LentSlot};
 mod compose;
-pub use compose::{Compose, Composed, ComposedReceiver};
+pub use compose::{Compose, Composed, ComposedReceiver, ViewProjection, project_access};
 mod receivers;
 pub use receivers::{Accesses, Receivers};
 mod call;

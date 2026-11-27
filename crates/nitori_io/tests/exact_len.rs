@@ -7,7 +7,7 @@ use core::{
     pin::{Pin, pin},
     task::{Context, Poll},
 };
-use nitori_call::{Receiver, ReceiverAccess, call};
+use nitori_call::{ComposedReceiver, Receiver, ReceiverAccess, call};
 use nitori_io::{
     Infinite,
     adapters::{Chunked, ReadLimit},
@@ -240,27 +240,34 @@ fn finish<Q: Future>(query: Q) -> (Q::Output, usize) {
     panic!("the query does not finish");
 }
 
+#[call]
+async fn query_outcome<F: ExactLen>(
+    io: &mut impl ReceiverAccess<Family = F>,
+) -> Result<F::Length, F::LengthError> {
+    io.remaining_len().await
+}
+
 #[test]
 fn a_query_waits_for_the_length_and_reports_why_it_cannot_be_known() {
-    use nitori_call::ConstructedAccess;
     for outcome in [Ok(5), Err(Reset)] {
-        let mut direct = ConstructedAccess::new(Received { polls: 0, outcome });
-        assert_eq!(finish(direct.remaining_len()), (outcome, 1));
+        let receiver = || Received { polls: 0, outcome };
+        assert_eq!(finish(receiver().query_outcome_unpin()), (outcome, 1));
 
-        let mut access = ConstructedAccess::new(Received { polls: 0, outcome });
-        let mut limited = access.compose(ReadLimit(3u8));
-        assert_eq!(finish(limited.remaining_len()), (outcome.map(|_| 3u8), 1));
-        assert_eq!(limited.into_state().0, 3);
+        let mut limited = ComposedReceiver::new(receiver(), ReadLimit(3u8));
+        assert_eq!(
+            finish(limited.query_outcome_unpin()),
+            (outcome.map(|_| 3u8), 1)
+        );
+        assert_eq!(limited.into_parts().1.0, 3);
 
-        let mut chunked = ConstructedAccess::new(Chunked::new(
-            Received { polls: 0, outcome },
-            NonZeroUsize::MIN,
-        ));
-        assert_eq!(finish(chunked.remaining_len()), (outcome, 1));
+        let mut chunked = Chunked::new(receiver(), NonZeroUsize::MIN);
+        assert_eq!(finish(chunked.query_outcome_unpin()), (outcome, 1));
 
-        let mut access = ConstructedAccess::new(Received { polls: 0, outcome });
-        let mut merging = access.compose(nitori_io::adapters::MergedMetadata::<()>::default());
-        assert_eq!(finish(merging.remaining_len()), (outcome, 1));
+        let mut merging = ComposedReceiver::new(
+            receiver(),
+            nitori_io::adapters::MergedMetadata::<()>::default(),
+        );
+        assert_eq!(finish(merging.query_outcome_unpin()), (outcome, 1));
     }
 }
 

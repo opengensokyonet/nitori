@@ -1,7 +1,7 @@
 //! Values with the merged metadata of their bytes when read, or the write
 //! options of their bytes when written.
 use crate::{DecodeFrom, EncodeInto, EncodedLen};
-use nitori_call::{AsAccess, BorrowedAccess, Composed};
+use nitori_call::{Composed, ReceiverAccess};
 use nitori_io::{
     Combine, Read, Value, Write,
     adapters::{FixedOptions, MappedOptions, MergedMetadata, MergingSource},
@@ -22,7 +22,7 @@ use nitori_io::{
 /// before it, as a failed read of an array does not return its bytes.
 impl<S, V, M, E> DecodeFrom<S> for Value<V, M>
 where
-    S: AsAccess<Family: Read<Metadata = M>>,
+    S: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Unpin,
     V: for<'x> DecodeFrom<MergingSource<'x, S, M>, Error = E>,
 {
@@ -52,9 +52,9 @@ where
 /// [`MapOptions`](nitori_io::adapters::MapOptions) mapping.
 impl<S, V, O, R, E> EncodeInto<S> for Value<V, O>
 where
-    S: AsAccess<Family: Write<O>>,
+    S: ReceiverAccess<Family: Write<O>>,
     V: for<'x> EncodeInto<
-            Composed<BorrowedAccess<'x, S::Access>, MappedOptions<FixedOptions<O>>>,
+            Composed<&'x mut S, MappedOptions<FixedOptions<O>>>,
             Output = R,
             Error = E,
         >,
@@ -65,7 +65,7 @@ where
         let Value { value, metadata } = self;
         value
             .encode_into(Composed::new(
-                sink.access(),
+                &mut sink,
                 MappedOptions(FixedOptions(metadata)),
             ))
             .await

@@ -25,7 +25,7 @@
 //! other options.
 use crate::{EncodeInto, EncodedLen};
 use core::num::NonZeroUsize;
-use nitori_call::AsAccess;
+use nitori_call::ReceiverAccess;
 use nitori_io::{
     Combine, ExactLen, ExactLenExt as _, Read, ReadChunk, Write, WriteLent,
     calls::{
@@ -71,57 +71,42 @@ pub struct Buffered<A, B> {
 
 impl<A, S, M> EncodeInto<S> for Chunks<A>
 where
-    A: AsAccess<Family: ReadChunk<Metadata = M>>,
+    A: ReceiverAccess<Family: ReadChunk<Metadata = M>>,
     M: Combine,
-    S: AsAccess<Family: Write<M, Report: Combine>>,
+    S: ReceiverAccess<Family: Write<M, Report: Combine>>,
 {
     type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
     type Error = CopyChunksError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        copy_chunks(
-            &mut self.source.access(),
-            &mut sink.access(),
-            self.chunk_maximum,
-        )
-        .await
+        copy_chunks(&mut self.source, &mut sink, self.chunk_maximum).await
     }
 }
 
 impl<A, S, M> EncodeInto<S> for Fill<A>
 where
-    A: AsAccess<Family: Read<Metadata = M>>,
+    A: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine + Clone,
-    S: AsAccess<Family: WriteLent<M>>,
+    S: ReceiverAccess<Family: WriteLent<M>>,
     <S::Family as Write<M>>::Report: Combine,
 {
     type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
     type Error = CopyIntoLentError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        copy_into_lent(
-            &mut self.source.access(),
-            &mut sink.access(),
-            self.chunk_maximum,
-        )
-        .await
+        copy_into_lent(&mut self.source, &mut sink, self.chunk_maximum).await
     }
 }
 
 impl<A, B, S, M> EncodeInto<S> for Buffered<A, B>
 where
-    A: AsAccess<Family: Read<Metadata = M>>,
+    A: ReceiverAccess<Family: Read<Metadata = M>>,
     M: Combine,
     B: AsMut<[u8]>,
-    S: AsAccess<Family: Write<M, Report: Combine>>,
+    S: ReceiverAccess<Family: Write<M, Report: Combine>>,
 {
     type Output = CopyTotal<M, <S::Family as Write<M>>::Report>;
     type Error = CopyBufferedError<<A::Family as Read>::Error, <S::Family as Write<M>>::Error>;
     async fn encode_into(mut self, mut sink: S) -> Result<Self::Output, Self::Error> {
-        copy_buffered(
-            &mut self.source.access(),
-            &mut sink.access(),
-            self.buffer.as_mut(),
-        )
-        .await
+        copy_buffered(&mut self.source, &mut sink, self.buffer.as_mut()).await
     }
 }
 
@@ -143,11 +128,10 @@ async fn source_len<A>(
     source: &mut A,
 ) -> Result<u64, SourceLengthError<<A::Family as ExactLen>::LengthError>>
 where
-    A: AsAccess<Family: ExactLen>,
+    A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
     let length = source
-        .access()
         .remaining_len()
         .await
         .context(source_length_error::SourceSnafu)?;
@@ -158,7 +142,7 @@ where
 
 impl<A> EncodedLen for Chunks<A>
 where
-    A: AsAccess<Family: ExactLen>,
+    A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
     type LengthError = SourceLengthError<<A::Family as ExactLen>::LengthError>;
@@ -168,7 +152,7 @@ where
 }
 impl<A> EncodedLen for Fill<A>
 where
-    A: AsAccess<Family: ExactLen>,
+    A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
     type LengthError = SourceLengthError<<A::Family as ExactLen>::LengthError>;
@@ -178,7 +162,7 @@ where
 }
 impl<A, B> EncodedLen for Buffered<A, B>
 where
-    A: AsAccess<Family: ExactLen>,
+    A: ReceiverAccess<Family: ExactLen>,
     u64: TryFrom<<A::Family as ExactLen>::Length>,
 {
     type LengthError = SourceLengthError<<A::Family as ExactLen>::LengthError>;

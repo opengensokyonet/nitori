@@ -38,7 +38,7 @@
 //! An operation written for a lent access cannot run on a plain call, and a
 //! lent call cannot be polled without a view of every receiver:
 //!
-//! ```compile_fail,E0277
+//! ```compile_fail,E0271
 //! #![feature(impl_trait_in_assoc_type)]
 //! use nitori_call::{Call, Direct, LentAccess, ReceiverFamily, call};
 //! #[call]
@@ -81,7 +81,7 @@
 //! keep it from a plain call, and an access declared plain stays plain in its
 //! body, however it was lent:
 //!
-//! ```compile_fail,E0277
+//! ```compile_fail,E0271
 //! #![feature(impl_trait_in_assoc_type)]
 //! use nitori_call::{Call, Direct, LentAccess, ReceiverAccess, ReceiverFamily, call};
 //! #[call]
@@ -154,7 +154,7 @@
 //! }
 //! ```
 //!
-//! ```compile_fail,E0277
+//! ```compile_fail,E0271
 //! # use nitori_call::{ReceiverAccess, ReceiverFamily, capability};
 //! # use std::pin::Pin;
 //! #[capability]
@@ -168,9 +168,9 @@
 //! }
 //! ```
 use crate::{
-    Access, Call, Emitter, Operation, ReceiverAccess, ReceiverFamily, ReceiverSlot, Receivers,
-    Start, ViewOperation,
-    access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
+    Access, AccessPlan, Call, Emitter, Operation, ProvideAccess, ReceiverAccess, ReceiverFamily,
+    ReceiverSlot, Receivers, Start, ViewOperation,
+    access::{ViewRequest, ViewVisitor},
 };
 use core::{
     fmt,
@@ -181,26 +181,38 @@ use core::{
 };
 use receivers::{LentReceivers, LentViews};
 
-/// An access whose view is at hand whenever it is polled, so that using the
-/// view neither waits nor can end the poll: the call of a slot is lent one on
-/// every poll, and a [`ConstructedAccess`](crate::ConstructedAccess)
-/// constructs one at each access. Other work runs only at `.await` and
-/// `yield`; the code between them is atomic with respect to it.
+/// An access whose view is lent on every poll of its call.
 ///
-/// The slots of a [`LentCall`], [`ConstructedAccess`](crate::ConstructedAccess),
-/// compositions of them, and borrows of them through
-/// [`BorrowedAccess`](crate::BorrowedAccess) or `&mut` are such accesses.
-/// Every operation written for a
-/// [`ReceiverAccess`] works on them too.
-pub trait LentAccess: ReceiverAccess {
+/// Lent slots, compositions of them, and wrappers that provide their plans
+/// are lent accesses. Every operation written for a [`ReceiverAccess`] also
+/// works on a lent access.
+///
+/// The framework implements this trait from [`ProvideAccess::Lentness`].
+///
+/// ```compile_fail,E0119
+/// use nitori_call::{AccessPlan, AtHand, LentAccess, LentSlot, ProvideAccess, ReceiverFamily};
+///
+/// struct Wrapper<'a, F: ReceiverFamily>(LentSlot<'a, F>);
+///
+/// impl<F: ReceiverFamily> ProvideAccess for Wrapper<'_, F> {
+///     type AccessFamily = F;
+///     type Lentness = AtHand;
+///
+///     fn access_plan<'a>(&'a mut self) -> impl AccessPlan<'a, Family = F, Lentness = AtHand> {
+///         self.0.access_plan()
+///     }
+/// }
+///
+/// impl<F: ReceiverFamily> LentAccess for Wrapper<'_, F> {}
+/// ```
+pub trait LentAccess: ReceiverAccess + ProvideAccess<Lentness = crate::AtHand> {
     /// Run `body` once with this poll's view.
     ///
     /// # Panics
     /// Without a view: on a slot outside the poll of its call, which only an
     /// operation's destructor can reach; use [`try_with`](Self::try_with)
     /// there. Like every use of a lent view, on a thread other than the one
-    /// polling the call. A [`ConstructedAccess`](crate::ConstructedAccess)
-    /// panics in neither case.
+    /// polling the call.
     #[track_caller]
     fn with<R, B>(&mut self, body: B) -> R
     where
@@ -213,9 +225,7 @@ pub trait LentAccess: ReceiverAccess {
 
     /// Run `body` once with this poll's view, or return `None` without one:
     /// on a slot outside the poll of its call, which only an operation's
-    /// destructor can reach. A [`ConstructedAccess`](crate::ConstructedAccess)
-    /// always has its view, so a destructor of a type that holds one does
-    /// access its receiver here.
+    /// destructor can reach.
     ///
     /// # Panics
     /// Like every use of a lent view, on a thread other than the one polling
@@ -231,7 +241,6 @@ pub trait LentAccess: ReceiverAccess {
         })
     }
 }
-impl<A: LentAccess + ?Sized> LentAccess for &mut A {}
 
 /// The visitor of [`LentAccess::try_with`].
 struct WithView<B, R> {
@@ -269,19 +278,27 @@ impl<F: ReceiverFamily> fmt::Debug for LentSlot<'_, F> {
         f.debug_struct("LentSlot").finish_non_exhaustive()
     }
 }
-impl<F: ReceiverFamily> Sealed for LentSlot<'_, F> {}
+
 #[allow(private_bounds)]
-impl<F: ReceiverFamily> ReceiverAccess for LentSlot<'_, F> {
+impl<F: ReceiverFamily> crate::access::RawAccess for LentSlot<'_, F> {
     type Family = F;
-    #[inline]
-    fn visit_view<V: ViewVisitor<F>>(&mut self, visitor: V) -> V::Output {
+    // A lent call cannot be polled without a view.
+    type Lentness = crate::AtHand;
+    fn raw_visit<V: ViewVisitor<F>>(&mut self, visitor: V) -> V::Output {
         self.0.visit_view(visitor)
     }
-    fn release_point(&mut self) -> ReleasePoint<'_> {
+    fn raw_release(&mut self) -> crate::access::ReleasePoint<'_> {
         self.0.release_point()
     }
 }
-impl<F: ReceiverFamily> LentAccess for LentSlot<'_, F> {}
+impl<F: ReceiverFamily> ProvideAccess for LentSlot<'_, F> {
+    type AccessFamily = F;
+    type Lentness = crate::AtHand;
+
+    fn access_plan<'a>(&'a mut self) -> impl AccessPlan<'a, Family = F, Lentness = crate::AtHand> {
+        crate::access::RawPlan(self)
+    }
+}
 
 /// Several lent accesses used at once, in one synchronous step: the closure
 /// gets one argument of the tuple's shape with an [`Access`] for each access,

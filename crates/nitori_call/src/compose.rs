@@ -1,7 +1,7 @@
 //! Scoped adaptation of the current view into another family.
 use crate::{
-    AsAccess, LentAccess, Receiver, ReceiverAccess, ReceiverFamily, ViewLoan, ViewOperation,
-    access::{ReleasePoint, Sealed, ViewRequest, ViewVisitor},
+    AccessPlan, ProvideAccess, Receiver, ReceiverAccess, ReceiverFamily, ViewLoan, ViewOperation,
+    access::{PlanSealed, RawAccess, RawPlan, ReleasePoint, ViewRequest, ViewVisitor},
     loan::Lent,
 };
 use core::{
@@ -64,8 +64,8 @@ where
 /// the parent is unavailable while the adapted access exists, and
 /// [`Composed::new`] takes whatever access it is given, such as one passed
 /// into a function that returns the adapted access. The parent can also be
-/// any [`AsAccess`] source, so a type that keeps a source and the state
-/// keeps them as one `Composed` and lends it. On each access the state
+/// an access held by value, so a type that keeps a source and the state
+/// keeps them as one `Composed` and issues its plans. On each access the state
 /// composes on a [`ViewLoan`] of the parent's view, a view of [`Lent`], so
 /// the child view ends with that access; what must last longer is kept in the
 /// state.
@@ -107,24 +107,31 @@ impl<A, S> Composed<A, S> {
         (self.parent, self.state)
     }
 }
-impl<A: AsAccess, S: Compose<Lent<A::Family>> + Unpin> Sealed for Composed<A, S> {}
+
 #[allow(private_bounds)]
-impl<A: AsAccess, S: Compose<Lent<A::Family>> + Unpin> ReceiverAccess for Composed<A, S> {
+impl<A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> RawAccess for Composed<A, S> {
     type Family = S::Family;
-    fn visit_view<V: ViewVisitor<S::Family>>(&mut self, visitor: V) -> V::Output {
-        self.parent.access().visit_view(ComposeChild {
+    type Lentness = <A as ProvideAccess>::Lentness;
+    fn raw_visit<V: ViewVisitor<S::Family>>(&mut self, visitor: V) -> V::Output {
+        self.parent.visit_view(ComposeChild {
             state: Pin::new(&mut self.state),
             inner: visitor,
             family: PhantomData,
         })
     }
-    fn release_point(&mut self) -> ReleasePoint<'_> {
-        self.parent.access().into_release_point()
+    fn raw_release(&mut self) -> ReleasePoint<'_> {
+        self.parent.release_point()
     }
 }
-impl<A: AsAccess<Access: LentAccess>, S: Compose<Lent<A::Family>> + Unpin> LentAccess
-    for Composed<A, S>
-{
+impl<A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> ProvideAccess for Composed<A, S> {
+    type AccessFamily = S::Family;
+    type Lentness = <A as ProvideAccess>::Lentness;
+
+    fn access_plan<'a>(
+        &'a mut self,
+    ) -> impl AccessPlan<'a, Family = Self::AccessFamily, Lentness = Self::Lentness> {
+        RawPlan(self)
+    }
 }
 
 /// Builds the child view from a loan of the parent view before visiting it.
@@ -195,5 +202,75 @@ impl<T: Receiver, S: Compose<T::Family>> Receiver for ComposedReceiver<T, S> {
     {
         let this = self.project();
         this.state.compose(this.inner.view())
+    }
+}
+
+/// Build a child view from a parent view and persistent state.
+pub trait ViewProjection<F: ReceiverFamily> {
+    /// State borrowed for the lifetime of the child view.
+    type State;
+    /// The family of the child view.
+    type Family: ReceiverFamily;
+
+    /// Project the view using the current state.
+    fn project<'v>(
+        view: F::ReceiverView<'v>,
+        state: &'v mut Self::State,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
+    where
+        F: 'v,
+        Self::Family: 'v;
+}
+
+struct ProjectionState<'a, P, S>(&'a mut S, PhantomData<fn() -> P>);
+
+impl<F, P, S> Compose<F> for ProjectionState<'_, P, S>
+where
+    F: ReceiverFamily,
+    P: ViewProjection<F, State = S>,
+{
+    type Family = P::Family;
+
+    fn compose<'v>(
+        self: Pin<&'v mut Self>,
+        view: F::ReceiverView<'v>,
+    ) -> <Self::Family as ReceiverFamily>::ReceiverView<'v>
+    where
+        F: 'v,
+        Self::Family: 'v,
+    {
+        P::project(view, self.get_mut().0)
+    }
+}
+
+/// Issue a plan for a projected view of the parent access.
+///
+/// The plan borrows the parent and the state exclusively and inherits the
+/// parent's [`Lentness`](crate::Lentness).
+pub fn project_access<'a, A, P>(
+    parent: &'a mut A,
+    state: &'a mut P::State,
+) -> impl AccessPlan<'a, Family = P::Family, Lentness = <A as ProvideAccess>::Lentness>
+where
+    A: ReceiverAccess,
+    P: ViewProjection<Lent<A::Family>>,
+{
+    Composed::new(parent, ProjectionState::<P, _>(state, PhantomData))
+}
+
+impl<A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> PlanSealed for Composed<&mut A, S> {}
+
+impl<'a, A: ReceiverAccess, S: Compose<Lent<A::Family>> + Unpin> AccessPlan<'a>
+    for Composed<&'a mut A, S>
+{
+    type Family = S::Family;
+    type Lentness = <A as ProvideAccess>::Lentness;
+
+    fn visit<V: ViewVisitor<S::Family>>(mut self, visitor: V) -> V::Output {
+        self.raw_visit(visitor)
+    }
+
+    fn release(self) -> ReleasePoint<'a> {
+        self.into_parts().0.release_point()
     }
 }

@@ -1,5 +1,6 @@
 //! Sources written out as values: the three pairings, the merged metadata
 //! and reports they return, and the length they report.
+#![feature(impl_trait_in_assoc_type)]
 use bytes::{BufMut, Bytes};
 use core::{
     future::Future,
@@ -7,13 +8,13 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
-use nitori_call::{Composed, ComposedReceiver, ConstructedAccess};
+use nitori_call::{ComposedReceiver, ReceiverAccess, call};
 use nitori_codec::{
     payload::{Buffered, Chunks, Fill, SourceLengthError},
     prelude::*,
 };
 use nitori_io::{
-    Combine, ExactLen, Read, ReadSegment,
+    Combine, ExactLen, Read, ReadChunk, ReadSegment, Write, WriteLent,
     adapters::{FixedOptions, MappedOptions, ReadLimit},
     calls::{CopyBufferedError, CopyTotal},
 };
@@ -22,58 +23,105 @@ fn nz(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).unwrap()
 }
 
+#[call(sync)]
+async fn write_chunks<F, G>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+    maximum: NonZeroUsize,
+) -> u64
+where
+    F: ReadChunk<Metadata = (), Error = !>,
+    G: Write<(), Report = (), Error = !>,
+{
+    sink.encode(Chunks {
+        source,
+        chunk_maximum: maximum,
+    })
+    .await
+    .unwrap()
+    .count
+}
+
+#[call(sync)]
+async fn write_fill<F, G>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+) -> CopyTotal<F::Metadata, ()>
+where
+    F: Read<Metadata: Clone + Combine, Error = !>,
+    G: WriteLent<F::Metadata, Report = (), Error = !>,
+{
+    sink.encode(Fill {
+        source,
+        chunk_maximum: nz(3),
+    })
+    .await
+    .unwrap()
+}
+
+#[call(sync)]
+async fn write_buffered<F, G>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+    buffer: &mut [u8],
+) -> Result<CopyTotal<F::Metadata, ()>, CopyBufferedError<!, !>>
+where
+    F: Read<Metadata: Combine, Error = !>,
+    G: Write<F::Metadata, Report = (), Error = !>,
+{
+    sink.encode(Buffered { source, buffer }).await
+}
+
 #[test]
 fn each_pairing_writes_the_whole_source() {
     let mut output = Vec::new();
-    let total = output
-        .sync_encode_unpin(Chunks {
-            source: ConstructedAccess::new(Bytes::from_static(b"abc")),
-            chunk_maximum: nz(2),
-        })
-        .unwrap();
-    assert_eq!(total.count, 3);
-    let total = output
-        .sync_encode_unpin(Fill {
-            source: ConstructedAccess::new(&b"defg"[..]),
-            chunk_maximum: nz(3),
-        })
-        .unwrap();
-    assert_eq!(total.count, 4);
-    let total = output
-        .sync_encode_unpin(Buffered {
-            source: ConstructedAccess::new(&b"hi"[..]),
-            buffer: [0u8; 1],
-        })
-        .unwrap();
-    assert_eq!(total.count, 2);
+    let mut chunks = Bytes::from_static(b"abc");
+    assert_eq!((&mut chunks, &mut output).sync_write_chunks_unpin(nz(2)), 3);
+    let mut fill = &b"defg"[..];
+    assert_eq!((&mut fill, &mut output).sync_write_fill_unpin().count, 4);
+    let mut buffered = &b"hi"[..];
+    assert_eq!(
+        (&mut buffered, &mut output)
+            .sync_write_buffered_unpin(&mut [0; 1])
+            .unwrap()
+            .count,
+        2
+    );
     assert_eq!(output, b"abcdefghi");
+}
+
+#[call(sync)]
+async fn write_bounded<F, G>(
+    source: &mut impl ReceiverAccess<Family = F>,
+    sink: &mut impl ReceiverAccess<Family = G>,
+) -> u64
+where
+    F: ReadChunk<Metadata = (), Error = !> + ExactLen<Length = usize, LengthError = !>,
+    G: Write<(), Report = (), Error = !>,
+{
+    let mut payload = Chunks {
+        source: source.compose(ReadLimit(4u8)),
+        chunk_maximum: nz(8),
+    };
+    assert_eq!(payload.encoded_len().await.unwrap(), 4);
+    sink.encode(payload).await.unwrap().count
 }
 
 #[test]
 fn a_bounded_source_writes_only_its_bound() {
     let mut source = &b"abcdef"[..];
     let mut output = Vec::new();
-    let mut payload = Chunks {
-        source: Composed::new(ConstructedAccess::new(&mut source), ReadLimit(4u8)),
-        chunk_maximum: nz(8),
-    };
-    let Ok(length) = nitori_call::__private::run_sync(payload.encoded_len()) else {
-        panic!("a memory source knows its length");
-    };
-    assert_eq!(length, 4);
-    assert_eq!(output.sync_encode_unpin(payload).unwrap().count, 4);
+    assert_eq!((&mut source, &mut output).sync_write_bounded_unpin(), 4);
     assert_eq!(output, b"abcd");
     assert_eq!(source, b"ef");
 }
 
 #[test]
 fn an_empty_buffer_cannot_carry_a_source() {
+    let mut source = &b"a"[..];
     let mut output = Vec::new();
-    let error = output
-        .sync_encode_unpin(Buffered {
-            source: ConstructedAccess::new(&b"a"[..]),
-            buffer: [0u8; 0],
-        })
+    let error = (&mut source, &mut output)
+        .sync_write_buffered_unpin(&mut [])
         .unwrap_err();
     assert!(
         matches!(error, CopyBufferedError::InsufficientCapacity { .. }),
@@ -129,25 +177,19 @@ fn writing_a_source_returns_the_merged_metadata_of_what_it_read() {
     // The vector takes no write options: give it `()` for every segment,
     // whatever it was read with.
     let mut output = ComposedReceiver::new(Vec::new(), MappedOptions(FixedOptions(())));
-    let total: CopyTotal<ZeroRtt, ()> = output
-        .sync_encode_unpin(Buffered {
-            source: ConstructedAccess::new(Received {
-                data: b"abcde",
-                read: 0,
-            }),
-            buffer: [0u8; 8],
-        })
+    let mut source = Received {
+        data: b"abcde",
+        read: 0,
+    };
+    let total = (&mut source, &mut output)
+        .sync_write_buffered_unpin(&mut [0; 8])
         .unwrap();
     assert_eq!((total.count, total.metadata), (5, ZeroRtt(true)));
-    let total = output
-        .sync_encode_unpin(Fill {
-            source: ConstructedAccess::new(Received {
-                data: b"abcde",
-                read: 2,
-            }),
-            chunk_maximum: nz(8),
-        })
-        .unwrap();
+    let mut source = Received {
+        data: b"abcde",
+        read: 2,
+    };
+    let total = (&mut source, &mut output).sync_write_fill_unpin();
     assert_eq!((total.count, total.metadata), (3, ZeroRtt(false)));
     assert_eq!(output.into_parts().0, b"abcdecde");
 }
@@ -188,23 +230,41 @@ impl ExactLen for Reset {
     }
 }
 
+#[call]
+async fn chunks_len<F: ExactLen>(
+    source: &mut impl ReceiverAccess<Family = F>,
+) -> Result<u64, SourceLengthError<F::LengthError>>
+where
+    u64: TryFrom<<F as ExactLen>::Length>,
+{
+    Chunks {
+        source,
+        chunk_maximum: nz(1),
+    }
+    .encoded_len()
+    .await
+}
+
+#[call]
+async fn fill_len<F: ExactLen>(
+    source: &mut impl ReceiverAccess<Family = F>,
+) -> Result<u64, SourceLengthError<F::LengthError>>
+where
+    u64: TryFrom<<F as ExactLen>::Length>,
+{
+    Fill {
+        source,
+        chunk_maximum: nz(1),
+    }
+    .encoded_len()
+    .await
+}
+
 #[test]
 fn a_length_the_source_cannot_tell_or_that_does_not_fit_fails() {
-    let too_long = nitori_call::__private::run_sync(
-        Chunks {
-            source: ConstructedAccess::new(Huge),
-            chunk_maximum: nz(1),
-        }
-        .encoded_len(),
-    );
+    let too_long = nitori_call::__private::run_sync(Huge.chunks_len_unpin());
     assert!(matches!(too_long, Err(SourceLengthError::TooLong)));
-    let unknown = nitori_call::__private::run_sync(
-        Fill {
-            source: ConstructedAccess::new(Reset),
-            chunk_maximum: nz(1),
-        }
-        .encoded_len(),
-    );
+    let unknown = nitori_call::__private::run_sync(Reset.fill_len_unpin());
     assert!(matches!(
         unknown,
         Err(SourceLengthError::Source { source: Reason })
@@ -236,13 +296,22 @@ impl ExactLen for Later {
     }
 }
 
+#[call]
+async fn buffered_len<F: ExactLen<Length = usize, LengthError = !>>(
+    source: &mut impl ReceiverAccess<Family = F>,
+) -> Result<u64, SourceLengthError<!>> {
+    Buffered {
+        source,
+        buffer: [0u8; 1],
+    }
+    .encoded_len()
+    .await
+}
+
 #[test]
 fn a_length_waits_for_the_source() {
-    let mut payload = Buffered {
-        source: ConstructedAccess::new(Later { polls: 0 }),
-        buffer: [0u8; 1],
-    };
-    let mut length = core::pin::pin!(payload.encoded_len());
+    let mut receiver = Later { polls: 0 };
+    let mut length = core::pin::pin!(receiver.buffered_len_unpin());
     let mut cx = Context::from_waker(core::task::Waker::noop());
     assert!(length.as_mut().poll(&mut cx).is_pending());
     assert!(matches!(length.as_mut().poll(&mut cx), Poll::Ready(Ok(5))));

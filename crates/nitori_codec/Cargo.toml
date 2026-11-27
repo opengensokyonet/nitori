@@ -13,4 +13,6 @@ std = ["nitori_call/std", "nitori_io/std"]
 bytes.workspace = true
 nitori_call = { workspace = true, features = ["bytes"] }
 nitori_io.workspace = true
+pin-project-lite.workspace = true
+nitori_call_macros.workspace = true
 snafu.workspace = true

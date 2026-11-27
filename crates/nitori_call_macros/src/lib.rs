@@ -22,6 +22,7 @@ use syn::{
     visit_mut::{self, VisitMut},
 };
 
+mod map_io;
 mod several;
 mod synchronous;
 
@@ -46,6 +47,19 @@ pub fn call(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
     let result = Options::parse(attribute).and_then(|options| expand_call(item, options));
     result.unwrap_or_else(Error::into_compile_error).into()
+}
+
+/// Derive `nitori_codec::staged::MapIo` for a struct or enum that holds IO.
+///
+/// Use `#[map_io(S)]` when `S` is the IO type parameter, or
+/// `#[map_io(within = P)]` to delegate to the field of type `P: MapIo`.
+/// Every variant must have exactly one field containing the selected parameter.
+#[proc_macro_derive(MapIo, attributes(map_io))]
+pub fn derive_map_io(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    map_io::expand(input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
 
 /// Where generated operation structs live.
